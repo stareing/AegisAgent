@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from agent_framework.agent.base_agent import BaseAgent
+from agent_framework.agent.prompt_templates import DEFAULT_SYSTEM_PROMPT
 from agent_framework.models.agent import AgentConfig
 
 
@@ -14,7 +15,7 @@ class DefaultAgent(BaseAgent):
     def __init__(
         self,
         agent_id: str = "default",
-        system_prompt: str = "You are a helpful assistant.",
+        system_prompt: str = "",
         model_name: str = "gpt-3.5-turbo",
         max_iterations: int = 20,
         temperature: float = 0.7,
@@ -22,7 +23,7 @@ class DefaultAgent(BaseAgent):
     ) -> None:
         config = AgentConfig(
             agent_id=agent_id,
-            system_prompt=system_prompt,
+            system_prompt=system_prompt or DEFAULT_SYSTEM_PROMPT,
             model_name=model_name,
             max_iterations=max_iterations,
             temperature=temperature,

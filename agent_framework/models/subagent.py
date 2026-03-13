@@ -67,8 +67,17 @@ class SubAgentResult(BaseModel):
     trace_ref: str | None = None
 
 
+class ArtifactRef(BaseModel):
+    """Lightweight reference to a sub-agent artifact for parent consumption."""
+    name: str = ""
+    artifact_type: str = ""
+    uri: str | None = None
+
+
 class DelegationSummary(BaseModel):
     status: str = ""
     summary: str = ""
     artifacts_digest: list[str] = Field(default_factory=list)
+    # Full artifact references for parent to decide on promotion
+    artifact_refs: list[ArtifactRef] = Field(default_factory=list)
     error_code: str | None = None

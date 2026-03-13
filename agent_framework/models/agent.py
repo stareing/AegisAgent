@@ -92,6 +92,9 @@ class CapabilityPolicy(BaseModel):
     allow_system_tools: bool = True
     allow_spawn: bool = False
     max_spawn_depth: int = 0
+    # §11.10: Memory admin tools (remember/forget/list_memories) are dangerous
+    # and default-blocked even if manually registered. Only exposed when True.
+    allow_memory_admin: bool = False
 
 
 class ErrorStrategy(str, Enum):

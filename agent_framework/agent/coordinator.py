@@ -9,7 +9,6 @@ from agent_framework.infra.logger import get_logger
 from agent_framework.agent.capability_policy import apply_capability_policy
 from agent_framework.agent.loop import AgentLoop
 from agent_framework.models.agent import (
-    AgentConfig,
     AgentRunResult,
     AgentState,
     AgentStatus,
@@ -22,6 +21,7 @@ from agent_framework.models.agent import (
 from agent_framework.models.context import LLMRequest
 from agent_framework.models.message import Message, TokenUsage
 from agent_framework.models.session import SessionState
+from agent_framework.models.subagent import Artifact
 
 # Default global run timeout (5 minutes). Prevents hangs from slow models.
 DEFAULT_RUN_TIMEOUT_MS = 300_000
@@ -90,6 +90,11 @@ class RunCoordinator:
 
         session_started = False
         try:
+            # Defensive reset: clear any stale skill state from a prior run
+            # that may not have cleaned up (e.g. SIGKILL). This is safe because
+            # _apply_skill_if_needed() below will re-detect and activate as needed.
+            self._deactivate_skill_if_needed(deps)
+
             # Begin session
             deps.memory_manager.begin_session(run_id, agent.agent_id, None)
             session_started = True
@@ -255,6 +260,18 @@ class RunCoordinator:
         deps.context_engineer.set_skill_context(None)
         deps.skill_router.deactivate_current_skill()
 
+    @staticmethod
+    def _collect_runtime_info() -> dict[str, str]:
+        """Collect runtime environment info for context injection."""
+        import os
+        import platform
+
+        os_map = {"Darwin": "macOS", "Windows": "Windows", "Linux": "Linux"}
+        return {
+            "operating_system": os_map.get(platform.system(), platform.system()),
+            "working_directory": os.getcwd(),
+        }
+
     def _prepare_llm_request(
         self,
         agent: BaseAgent,
@@ -278,6 +295,7 @@ class RunCoordinator:
             "memories": memories,
             "task": task,
             "active_skill": active_skill,
+            "runtime_info": self._collect_runtime_info(),
         }
 
         # Build LLM context
@@ -350,6 +368,9 @@ class RunCoordinator:
         if stop_signal is None:
             stop_signal = StopSignal(reason=StopReason.LLM_STOP)
 
+        # Promote artifacts from sub-agent delegation results
+        promoted_artifacts = self._collect_subagent_artifacts(agent_state)
+
         return AgentRunResult(
             run_id=agent_state.run_id,
             success=stop_signal.reason in (StopReason.LLM_STOP, StopReason.CUSTOM),
@@ -358,7 +379,33 @@ class RunCoordinator:
             usage=TokenUsage(total_tokens=agent_state.total_tokens_used),
             iterations_used=agent_state.iteration_count,
             iteration_history=list(agent_state.iteration_history),
+            artifacts=promoted_artifacts,
         )
+
+    @staticmethod
+    def _collect_subagent_artifacts(agent_state: AgentState) -> list[Artifact]:
+        """Promote sub-agent artifacts into the parent run result.
+
+        Scans iteration history for spawn_agent tool results containing
+        DelegationSummary with artifact_refs, and converts them to Artifact
+        objects for the parent AgentRunResult.
+        """
+        artifacts: list[Artifact] = []
+        for iteration in agent_state.iteration_history:
+            for tr in iteration.tool_results:
+                if tr.tool_name != "spawn_agent" or not tr.success:
+                    continue
+                output = tr.output
+                if not isinstance(output, dict):
+                    continue
+                for ref in output.get("artifact_refs", []):
+                    if isinstance(ref, dict):
+                        artifacts.append(Artifact(
+                            name=ref.get("name", ""),
+                            artifact_type=ref.get("artifact_type", ""),
+                            uri=ref.get("uri"),
+                        ))
+        return artifacts
 
     def _handle_run_error(
         self,

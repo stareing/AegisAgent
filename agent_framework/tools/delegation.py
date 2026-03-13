@@ -3,7 +3,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from agent_framework.infra.logger import get_logger
-from agent_framework.models.subagent import DelegationSummary, SubAgentResult, SubAgentSpec
+from agent_framework.models.subagent import (
+    ArtifactRef,
+    DelegationSummary,
+    SubAgentResult,
+    SubAgentSpec,
+)
 
 if TYPE_CHECKING:
     from agent_framework.agent.base_agent import BaseAgent
@@ -155,5 +160,13 @@ class DelegationExecutor:
             status="success" if result.success else "failed",
             summary=summary_text,
             artifacts_digest=[a.name for a in result.artifacts],
+            artifact_refs=[
+                ArtifactRef(
+                    name=a.name,
+                    artifact_type=a.artifact_type,
+                    uri=a.uri,
+                )
+                for a in result.artifacts
+            ],
             error_code=None if result.success else "DELEGATION_FAILED",
         )

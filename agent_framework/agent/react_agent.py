@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 
 from agent_framework.agent.base_agent import BaseAgent
+from agent_framework.agent.prompt_templates import REACT_SYSTEM_PROMPT
 from agent_framework.models.agent import (
     AgentConfig,
     AgentState,
@@ -15,24 +16,6 @@ from agent_framework.models.agent import (
 _FINAL_ANSWER_PATTERN = re.compile(
     r"Final\s*Answer\s*[:：]\s*(.*)", re.IGNORECASE | re.DOTALL
 )
-
-_REACT_SYSTEM_PROMPT = """\
-You are a ReAct (Reasoning + Acting) agent. You solve tasks by interleaving Thought, Action, and Observation steps.
-
-## Protocol
-1. **Thought**: Analyze the current situation and decide what to do next.
-2. **Action**: Use one of the available tools to gather information or perform an action.
-3. **Observation**: Review the tool result and reason about the next step.
-4. Repeat until you have enough information to answer.
-5. When ready, respond with: **Final Answer: <your answer>**
-
-## Rules
-- Always think step-by-step before acting.
-- Use tools to verify information rather than guessing.
-- If a tool call fails, reason about why and try an alternative approach.
-- Do NOT fabricate tool results or information.
-- When you are confident in your answer, output "Final Answer:" followed by your complete response.
-"""
 
 
 class ReActAgent(BaseAgent):
@@ -54,7 +37,7 @@ class ReActAgent(BaseAgent):
         max_react_steps: int | None = None,
         allow_spawn_children: bool = False,
     ) -> None:
-        full_prompt = _REACT_SYSTEM_PROMPT
+        full_prompt = REACT_SYSTEM_PROMPT
         if system_prompt:
             full_prompt += f"\n## Additional Instructions\n{system_prompt}\n"
 

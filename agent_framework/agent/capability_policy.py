@@ -38,4 +38,8 @@ def apply_capability_policy(
     if not policy.allow_spawn:
         result = [t for t in result if t.meta.name != "spawn_agent"]
 
+    # Filter memory admin tools (§11.10)
+    if not policy.allow_memory_admin:
+        result = [t for t in result if t.meta.category != "memory"]
+
     return result

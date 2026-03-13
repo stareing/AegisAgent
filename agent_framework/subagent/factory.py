@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING
 
+from agent_framework.agent.prompt_templates import SUB_AGENT_SYSTEM_PROMPT
 from agent_framework.infra.logger import get_logger
 from agent_framework.memory.sqlite_store import SQLiteMemoryStore
 from agent_framework.models.memory import MemoryRecord
@@ -49,11 +50,12 @@ class SubAgentFactory:
         config_overrides = spec.agent_config_override or {}
 
         parent_model = parent_agent.agent_config.model_name if parent_agent else "gpt-3.5-turbo"
+        default_prompt = SUB_AGENT_SYSTEM_PROMPT
 
         agent = DefaultAgent(
             agent_id=sub_agent_id,
             model_name=config_overrides.get("model_name", parent_model),
-            system_prompt=config_overrides.get("system_prompt", "You are a helpful sub-agent."),
+            system_prompt=config_overrides.get("system_prompt", default_prompt),
             temperature=config_overrides.get("temperature", 0.7),
             max_iterations=spec.max_iterations,
             # Section 14.2 & 20.2: SubAgentFactory MUST force allow_spawn_children=False
