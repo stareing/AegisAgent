@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 from agent_framework.memory.base_manager import BaseMemoryManager
 from agent_framework.models.memory import (
+    CommitDecision,
     MemoryCandidate,
     MemoryRecord,
     MemorySourceContext,
@@ -36,8 +37,8 @@ class IsolatedMemoryManager(BaseMemoryManager):
         user_input: str,
         final_answer: str | None,
         iteration_results: list[IterationResult],
-    ) -> None:
-        pass
+    ) -> CommitDecision:
+        return CommitDecision(committed=False, reason="Isolated scope", source="IsolatedMemoryManager")
 
     def extract_candidates(
         self,
@@ -88,8 +89,8 @@ class InheritReadMemoryManager(BaseMemoryManager):
         user_input: str,
         final_answer: str | None,
         iteration_results: list[IterationResult],
-    ) -> None:
-        pass
+    ) -> CommitDecision:
+        return CommitDecision(committed=False, reason="InheritRead scope", source="InheritReadMemoryManager")
 
     def extract_candidates(
         self,
@@ -142,8 +143,8 @@ class SharedWriteMemoryManager(BaseMemoryManager):
         user_input: str,
         final_answer: str | None,
         iteration_results: list[IterationResult],
-    ) -> None:
-        self._parent.record_turn(user_input, final_answer, iteration_results)
+    ) -> CommitDecision:
+        return self._parent.record_turn(user_input, final_answer, iteration_results)
 
     def extract_candidates(
         self,

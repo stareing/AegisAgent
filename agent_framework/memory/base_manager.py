@@ -161,7 +161,6 @@ class BaseMemoryManager(ABC):
             return None
 
         if action == MemoryUpdateAction.DELETE:
-            # Find and delete matching
             for r in existing:
                 if self._normalize(r.title) == self._normalize(candidate.title):
                     self._store.delete(r.memory_id)
@@ -170,19 +169,18 @@ class BaseMemoryManager(ABC):
         # UPSERT
         import uuid
 
-        # Build source string from context for auditing
         source_str = source_context.source_type
         if source_context.source_spawn_id:
             source_str += f":spawn:{source_context.source_spawn_id}"
 
-        match = None
-        for r in existing:
-            if (
-                r.kind == candidate.kind
-                and self._normalize(r.title) == self._normalize(candidate.title)
-            ):
-                match = r
-                break
+        # Find matching record in single pass (P5-1: avoid double scan)
+        norm_title = self._normalize(candidate.title)
+        match = next(
+            (r for r in existing
+             if r.kind == candidate.kind
+             and self._normalize(r.title) == norm_title),
+            None,
+        )
 
         if match:
             if match.is_pinned:

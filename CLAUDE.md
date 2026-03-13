@@ -42,7 +42,7 @@ Adapters → adapters/model/ | Infra → infra/
 - **#17-22** 多智能体协调: Scheduler API, Executor路由, spawn_seed, 派生权限, 递归防护
 - **#23-27** v2.4架构: ContextPolicy/MemoryPolicy/EffectiveRunConfig, SessionState写锁, AgentLoop最小依赖, Skill反激活, MemoryScope快照
 - **#29-30** 多模型适配: OpenAI/Anthropic/Google原生SDK + DeepSeek/豆包/通义/智谱/MiniMax/Custom (OpenAI-compatible)
-- **#31** 577 tests 全模块覆盖
+- **#31** 602 tests 全模块覆盖
 - **#32-37** Skill系统(API/配置/CLI) + 交互终端main.py + 入口点
 - **#38-39** 终止条件6层闭环(LLM_STOP/MAX_ITER/TRUNCATED/ERROR/CANCEL/TIMEOUT) + 全链路日志50+事件
 - **#40** 架构审查7项: RunCoordinator三层拆分, 消息投影规则, Policy消费边界, EffectiveRunConfig冻结, CapabilityPolicy双执行, remember()审计, 记忆治理拦截
@@ -57,6 +57,8 @@ Adapters → adapters/model/ | Infra → infra/
 - **#49** v2.6.4收口4项: 并发工具副作用提交串行化(ToolExecutionOutcome+ToolCommitSequencer按input_index排序), 委派统一状态机(SubAgentStatus: COMPLETED/FAILED/CANCELLED/REJECTED/DEGRADED+error_code映射), 上下文层只读快照(SessionSnapshot冻结视图+RunStateController.session_snapshot()), 子Agent装配器纯装配(ResolvedSubAgentRuntimeBundle+Factory禁止解释策略), 红线测试(21条断言)
 - **#50** v2.6.5收口4项: 自动重试幂等边界(RetrySafety+RetryDecision, retryable≠idempotent, 无幂等键禁止自动重放), checkpoint/resume正式立场(RunCheckpoint占位, 当前不支持resume, SessionState/日志/事件不可作恢复源), 事件投递语义(EventEnvelope+event_id幂等+尽力投递+订阅方必须幂等), 重试版本链(IterationAttempt+TransactionGroupAttempt, retry不覆盖原记录+parent链关联), 红线测试(18条断言)
 - **#51** 架构守卫套件(test_architecture_guard.py 43项): 反旁路扫描(SessionState写端口/AgentLoop零写/Policy解释权/TransactionGroupIndex消费/Factory纯装配), 故障注入(模型500/工具部分失败/子Agent超时/memory提交失败/session结束失败/事件重复/取消/超时), 数据流不变量(iteration_history只增/迭代ID注入/快照冻结/提交排序/重试版本链/白名单交集/映射完备/begin-end配对)
+
+- **#52** 全面优化修复: P2错误处理(scheduler/delegation异常日志), P3死代码(ResolvedRunPolicyBundle未用导入), P4架构接入(SessionSnapshot传递上下文层+CommitDecision消费审计+memory_scope返回CommitDecision), P5性能(remember()单次遍历), 内置工具测试(filesystem+system 25项)
 
 ### Bug Fixes
 - RunCoordinator初始消息写入改用RunStateController(v2.5.1写端口合规)
@@ -116,7 +118,7 @@ Adapters → adapters/model/ | Infra → infra/
 ## Commands
 ```bash
 pip install -e ".[dev]"           # Install
-pytest tests/                     # Tests (577 passed)
+pytest tests/                     # Tests (602 passed)
 python -m agent_framework.main    # Interactive (Mock, no API key)
 python -m agent_framework.main --config config/deepseek.json  # Real model
 python run_demo.py                # Demo

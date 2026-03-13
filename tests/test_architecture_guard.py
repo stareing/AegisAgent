@@ -104,6 +104,16 @@ class TestAntiBypassScan:
         source = inspect.getsource(loop_mod)
         assert "import AgentRuntimeDeps" not in source
 
+    # --- Context layer receives snapshot, not mutable session ---
+
+    def test_coordinator_passes_snapshot_to_context(self):
+        """RunCoordinator must pass SessionSnapshot, not SessionState, to context (v2.6.4 §45)."""
+        import agent_framework.agent.coordinator as coord_mod
+        source = inspect.getsource(coord_mod.RunCoordinator._prepare_llm_request)
+        assert "session_snapshot" in source or "session_snap" in source, (
+            "Coordinator must create a snapshot for context layer"
+        )
+
     # --- Policy interpretation uniqueness ---
 
     def test_coordinator_does_not_read_context_policy_fields(self):

@@ -226,9 +226,15 @@ class SubAgentScheduler:
         def _on_done(t: asyncio.Task) -> None:
             try:
                 self._results[spawn_id] = t.result()
-            except Exception:
+            except Exception as e:
+                logger.error(
+                    "scheduler.on_done_failed",
+                    spawn_id=spawn_id,
+                    error_type=type(e).__name__,
+                    error=str(e),
+                )
                 self._results[spawn_id] = SubAgentResult(
-                    spawn_id=spawn_id, success=False, error="Task failed unexpectedly"
+                    spawn_id=spawn_id, success=False, error=f"Task failed: {e}"
                 )
 
         task.add_done_callback(_on_done)

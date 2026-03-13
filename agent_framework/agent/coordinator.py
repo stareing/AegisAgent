@@ -9,7 +9,7 @@ from agent_framework.infra.logger import get_logger
 from agent_framework.agent.capability_policy import apply_capability_policy
 from agent_framework.agent.commit_sequencer import CommitSequencer
 from agent_framework.agent.loop import AgentLoop, AgentLoopDeps
-from agent_framework.agent.run_policy import ResolvedRunPolicyBundle, RunPolicyResolver
+from agent_framework.agent.run_policy import RunPolicyResolver
 from agent_framework.agent.run_state import RunStateController
 from agent_framework.models.agent import (
     AgentRunResult,
@@ -219,7 +219,16 @@ class RunCoordinator:
 
             # Post-run
             self._state_ctrl.mark_finished(agent_state)
-            deps.memory_manager.record_turn(task, final_answer, agent_state.iteration_history)
+            commit_decision = deps.memory_manager.record_turn(
+                task, final_answer, agent_state.iteration_history
+            )
+            if commit_decision and hasattr(commit_decision, 'committed'):
+                logger.info(
+                    "run.memory_commit",
+                    run_id=run_id,
+                    committed=commit_decision.committed,
+                    reason=commit_decision.reason,
+                )
 
             await agent.on_final_answer(final_answer, agent_state)
 
@@ -318,9 +327,12 @@ class RunCoordinator:
         memories = deps.memory_manager.select_for_context(task, agent_state)
 
         # Prepare context materials
+        # v2.6.4 §45: Pass SessionSnapshot (read-only) to context layer,
+        # not the mutable SessionState.
+        session_snap = self._state_ctrl.session_snapshot(session_state)
         context_materials = {
             "agent_config": agent.agent_config,
-            "session_state": session_state,
+            "session_state": session_snap,
             "memories": memories,
             "task": task,
             "active_skill": active_skill,

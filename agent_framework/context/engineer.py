@@ -11,7 +11,7 @@ from agent_framework.models.message import Message
 if TYPE_CHECKING:
     from agent_framework.models.agent import AgentConfig, AgentState, Skill
     from agent_framework.models.memory import MemoryRecord
-    from agent_framework.models.session import SessionState
+    from agent_framework.models.session import SessionSnapshot, SessionState
 
 
 class ContextEngineer:

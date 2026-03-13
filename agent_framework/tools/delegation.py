@@ -141,8 +141,12 @@ class DelegationExecutor:
                     if info.get("url") == agent_url:
                         alias = a
                         break
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(
+                    "delegation.a2a.discovery_failed",
+                    agent_url=agent_url,
+                    error=str(e),
+                )
 
         if alias is None:
             return SubAgentResult(
