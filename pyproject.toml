@@ -1,0 +1,42 @@
+[project]
+name = "agent-framework"
+version = "0.1.0"
+description = "AI Agent Framework - offline-first, extensible agent runtime"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "structlog>=23.0",
+    "blinker>=1.6",
+    "litellm>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+]
+tiktoken = [
+    "tiktoken>=0.5",
+]
+mcp = [
+    "mcp>=1.0",
+]
+a2a = [
+    "a2a-python>=0.2",
+]
+all = [
+    "tiktoken>=0.5",
+    "mcp>=1.0",
+    "a2a-python>=0.2",
+]
+
+[project.scripts]
+agent-cli = "agent_framework.cli:main"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["agent_framework*"]
