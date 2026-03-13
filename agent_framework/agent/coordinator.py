@@ -330,6 +330,10 @@ class RunCoordinator:
         # v2.6.4 §45: Pass SessionSnapshot (read-only) to context layer,
         # not the mutable SessionState.
         session_snap = self._state_ctrl.session_snapshot(session_state)
+
+        # Skill descriptions for LLM to discover available skills
+        skill_descriptions = deps.skill_router.get_skill_descriptions()
+
         context_materials = {
             "agent_config": agent.agent_config,
             "session_state": session_snap,
@@ -337,6 +341,7 @@ class RunCoordinator:
             "task": task,
             "active_skill": active_skill,
             "runtime_info": self._collect_runtime_info(),
+            "skill_descriptions": skill_descriptions,
         }
 
         # Build LLM context

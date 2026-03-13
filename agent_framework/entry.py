@@ -161,6 +161,28 @@ class AgentFramework:
                 temperature_override=skill_def.temperature_override,
             ))
 
+        # Load file-based skills from directories (SKILL.md)
+        import pathlib
+        skill_dirs: list[pathlib.Path] = []
+        project_skills = pathlib.Path.cwd() / "skills"
+        if project_skills.is_dir():
+            skill_dirs.append(project_skills)
+        user_skills = pathlib.Path.home() / ".agent" / "skills"
+        if user_skills.is_dir():
+            skill_dirs.append(user_skills)
+        for extra_dir in self.config.skills.directories:
+            p = pathlib.Path(extra_dir)
+            if p.is_dir():
+                skill_dirs.append(p)
+        if skill_dirs:
+            file_count = skill_router.load_file_skills(skill_dirs)
+            logger.info("skills.file_loaded", count=file_count,
+                        dirs=[str(d) for d in skill_dirs])
+
+        # Wire invoke_skill tool with runtime references
+        from agent_framework.tools.builtin_skills import set_skill_runtime
+        set_skill_runtime(skill_router, context_engineer)
+
         # Assemble deps
         self._deps = AgentRuntimeDeps(
             tool_registry=self._registry,
@@ -218,6 +240,8 @@ class AgentFramework:
             common["api_key"] = cfg.api_key
         if cfg.api_base:
             common["api_base"] = cfg.api_base
+        if cfg.max_output_tokens:
+            common["max_output_tokens"] = cfg.max_output_tokens
 
         match cfg.adapter_type:
             case "openai":

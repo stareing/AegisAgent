@@ -25,8 +25,9 @@ def register_all_builtins(catalog: GlobalToolCatalog) -> int:
     )
     from agent_framework.tools.builtin.system import run_command, get_env
     from agent_framework.tools.builtin.spawn_agent import spawn_agent
+    from agent_framework.tools.builtin_skills import invoke_skill
 
-    builtins = [read_file, write_file, list_directory, file_exists, run_command, get_env, spawn_agent]
+    builtins = [read_file, write_file, list_directory, file_exists, run_command, get_env, spawn_agent, invoke_skill]
     count = 0
     for func in builtins:
         catalog.register_function(func)

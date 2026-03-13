@@ -281,6 +281,17 @@ class ErrorStrategy(str, Enum):
 
 
 class Skill(BaseModel):
+    """Skill definition — supports both config-based and file-based skills.
+
+    Config-based (legacy): trigger_keywords + system_prompt_addon
+    File-based (SKILL.md): source_path + description-based LLM matching
+
+    For file-based skills, the body is lazy-loaded from source_path on
+    first invocation. Only name + description are held in memory at rest.
+    """
+
+    model_config = {"arbitrary_types_allowed": True}
+
     skill_id: str
     name: str = ""
     description: str = ""
@@ -289,6 +300,12 @@ class Skill(BaseModel):
     model_override: str | None = None
     temperature_override: float | None = None
     recommended_capability_policy_id: str | None = None
+    # --- File-based skill fields ---
+    source_path: str | None = None
+    allowed_tools: list[str] | None = None
+    disable_model_invocation: bool = False
+    user_invocable: bool = True
+    argument_hint: str = ""
 
 
 # ---------------------------------------------------------------------------

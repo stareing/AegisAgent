@@ -71,6 +71,17 @@ class ContextEngineer:
         # Collect from each source
         system_core = self._source.collect_system_core(agent_config, runtime_info)
         skill_addon = self._skill_prompt or self._source.collect_skill_addon(active_skill)
+
+        # Inject skill catalog so LLM knows which skills are available
+        skill_descriptions: list = context_materials.get("skill_descriptions", [])
+        skill_catalog = self._source.collect_skill_catalog(skill_descriptions)
+        if skill_catalog and not skill_addon:
+            # No active skill — show available skills catalog
+            skill_addon = skill_catalog
+        elif skill_catalog and skill_addon:
+            # Active skill + catalog — append catalog as reference
+            skill_addon = f"{skill_addon}\n\n{skill_catalog}"
+
         memory_block = self._source.collect_saved_memory_block(memories)
         session_groups = self._source.collect_session_groups(session_state)
         current_input = self._source.collect_current_input(task)

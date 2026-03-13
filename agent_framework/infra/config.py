@@ -101,6 +101,7 @@ class SkillConfig(BaseModel):
 class SkillsConfig(BaseModel):
     """Container for skill definitions in config."""
     definitions: list[SkillConfig] = Field(default_factory=list)
+    directories: list[str] = Field(default_factory=list)
 
 
 class MCPConfig(BaseModel):

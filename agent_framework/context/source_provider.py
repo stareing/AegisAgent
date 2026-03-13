@@ -174,6 +174,28 @@ class ContextSourceProvider:
 
         return groups
 
+    def collect_skill_catalog(
+        self, skill_descriptions: list[dict[str, str]]
+    ) -> str | None:
+        """Format available skill descriptions for LLM context injection.
+
+        The LLM sees skill names + descriptions so it can decide when to
+        invoke a skill via the invoke_skill tool. Full skill bodies are
+        NOT loaded here — only on invocation (lazy loading).
+        """
+        if not skill_descriptions:
+            return None
+
+        lines = [
+            "## Available Skills",
+            "You can invoke a skill using the `invoke_skill` tool with the skill_id.",
+            "",
+        ]
+        for desc in skill_descriptions:
+            hint = f" {desc['argument_hint']}" if desc.get("argument_hint") else ""
+            lines.append(f"- **{desc['name']}** (id: `{desc['skill_id']}`){hint}: {desc['description']}")
+        return "\n".join(lines)
+
     def collect_current_input(self, task_or_prompt: str) -> Message:
         """Wrap current user input as a Message."""
         return Message(role="user", content=task_or_prompt)
