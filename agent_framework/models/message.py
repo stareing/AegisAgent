@@ -33,6 +33,14 @@ class Message(BaseModel):
       are LLM-safe fields that may enter the model context.
     """
 
+    # None semantics (project-wide convention):
+    # - content: None = message has no text body (e.g. pure tool_calls assistant msg)
+    # - tool_calls: None = this message does not invoke tools
+    # - tool_call_id: None = not a tool response message
+    # - name: None = no tool name (non-tool messages)
+    # - metadata: None = no framework metadata attached
+    # Rule: None means "does not exist", NOT "failed" or "empty string".
+    #       Empty collections use [] not None; empty text uses "" not None.
     role: Literal["system", "user", "assistant", "tool"]
     content: str | None = None
     tool_calls: list[ToolCallRequest] | None = None

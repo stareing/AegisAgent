@@ -132,7 +132,7 @@ class TestSubAgentScheduler:
         assert cancelled is False
 
     @pytest.mark.asyncio
-    async def test_cancel_all(self):
+    async def test_cancel_all_tasks(self):
         sched = SubAgentScheduler(max_per_run=10)
 
         async def _slow():
@@ -141,22 +141,22 @@ class TestSubAgentScheduler:
 
         for i in range(3):
             h = self._make_handle(spawn_id=f"s{i}")
-            sched.submit(h, _slow(), deadline_ms=60000)
+            task_record = sched.allocate_task_id("run_1", f"s{i}")
+            sched.submit(h, _slow(), deadline_ms=60000, task_record=task_record)
 
         await asyncio.sleep(0.01)
-        count = await sched.cancel_all("run_1")
+        count = await sched.cancel_all_tasks("run_1")
         assert count >= 1
 
-    def test_get_active_children(self):
+    def test_allocate_task_id(self):
+        """SubAgentScheduler is the sole source of subagent_task_id (v2.6.3 §39)."""
         sched = SubAgentScheduler()
-        h1 = self._make_handle(spawn_id="s1", parent_run_id="run_1")
-        h2 = self._make_handle(spawn_id="s2", parent_run_id="run_2")
-        sched._active["s1"] = h1
-        sched._active["s2"] = h2
-
-        children = sched.get_active_children("run_1")
-        assert len(children) == 1
-        assert children[0].spawn_id == "s1"
+        record = sched.allocate_task_id("run_1", "spawn_abc")
+        assert record.subagent_task_id.startswith("task_")
+        assert record.parent_run_id == "run_1"
+        assert record.spawn_id == "spawn_abc"
+        assert record.status.value == "QUEUED"
+        assert record.child_run_id is None  # Runtime assigns this later
 
     @pytest.mark.asyncio
     async def test_concurrent_limit(self):
@@ -333,10 +333,13 @@ class TestSubAgentFactory:
 
         deps = self._make_parent_deps()
         factory = SubAgentFactory(deps)
+        from agent_framework.models.subagent import SubAgentConfigOverride
         spec = SubAgentSpec(
             task_input="task",
             spawn_id="f_spawn",
-            agent_config_override={"allow_spawn_children": True},  # attempt override
+            # SubAgentConfigOverride cannot express allow_spawn_children —
+            # it's not in the whitelist. Factory forces False regardless.
+            config_override=SubAgentConfigOverride(model_name="gpt-4"),
         )
         from agent_framework.agent.default_agent import DefaultAgent
         parent = DefaultAgent(agent_id="parent", allow_spawn_children=True)

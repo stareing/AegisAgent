@@ -26,215 +26,103 @@
 * **代码审核**：将由codex排查代码是否和需求一致
 
 ## Project Overview
-Offline-first, extensible AI Agent Framework built in Python 3.11+ with pydantic v2.
-Architecture follows Protocol / Base / Default three-layer pattern for all extensible modules.
+Offline-first, extensible AI Agent Framework in Python 3.11+ / pydantic v2.
+Protocol → Base → Default three-layer pattern. Tech: structlog, blinker, litellm, SQLite, MCP SDK, A2A SDK.
 
-## Tech Stack
-- Python 3.11+, pydantic v2, pydantic-settings
-- structlog for logging, blinker for events
-- litellm for unified LLM adapter
-- SQLite for offline memory storage
-- MCP SDK (`mcp`) for tool discovery from external servers
-- A2A SDK (`a2a-python`) for inter-agent delegation
-
-## Architecture Layers (bottom → top)
+## Architecture Layers
 ```
-Entry           → entry.py (AgentFramework facade), cli.py (REPL + argparse)
-Agent           → agent/ (base_agent, default_agent, react_agent, loop, coordinator, runtime_deps, skill_router, capability_policy)
-SubAgent        → subagent/ (memory_scope, factory, scheduler, runtime)
-Tools           → tools/ (decorator, catalog, registry, executor, confirmation, delegation, builtin/spawn_agent)
-Memory          → memory/ (sqlite_store, base_manager, default_manager)
-Context         → context/ (transaction_group, source_provider, builder, compressor, engineer)
-Protocols       → protocols/ (core.py, mcp/mcp_client_manager.py, a2a/a2a_client_adapter.py)
-Models          → models/ (message, tool, agent, session, memory, subagent, context, mcp)
-Adapters        → adapters/model/ (base_adapter, litellm_adapter, openai_adapter, anthropic_adapter, google_adapter, openai_compatible_adapter)
-Infrastructure  → infra/ (config, logger, event_bus, disk_store)
+Entry → entry.py, cli.py | Agent → agent/ | SubAgent → subagent/ | Tools → tools/
+Memory → memory/ | Context → context/ | Protocols → protocols/ | Models → models/
+Adapters → adapters/model/ | Infra → infra/
 ```
 
-## Development Progress
+## Completed Tasks
+- **L1-8** infra/models/protocols/adapters/tools/memory/context/agent 全模块完成
+- **#11-16** ReAct Agent, SubAgent Runtime, MCP Client, A2A Client, Entry+CLI, Integration wiring
+- **#17-22** 多智能体协调: Scheduler API, Executor路由, spawn_seed, 派生权限, 递归防护
+- **#23-27** v2.4架构: ContextPolicy/MemoryPolicy/EffectiveRunConfig, SessionState写锁, AgentLoop最小依赖, Skill反激活, MemoryScope快照
+- **#29-30** 多模型适配: OpenAI/Anthropic/Google原生SDK + DeepSeek/豆包/通义/智谱/MiniMax/Custom (OpenAI-compatible)
+- **#31** 577 tests 全模块覆盖
+- **#32-37** Skill系统(API/配置/CLI) + 交互终端main.py + 入口点
+- **#38-39** 终止条件6层闭环(LLM_STOP/MAX_ITER/TRUNCATED/ERROR/CANCEL/TIMEOUT) + 全链路日志50+事件
+- **#40** 架构审查7项: RunCoordinator三层拆分, 消息投影规则, Policy消费边界, EffectiveRunConfig冻结, CapabilityPolicy双执行, remember()审计, 记忆治理拦截
+- **#41** 架构审查6项: iteration_history append-only, ToolResult序列化边界, 日志≠状态, Artifact生命周期, 确认决策分层, ScopedRegistry边界, 委派失败统一语义
+- **#42** Bug(dedup_guard)+7项: Message metadata边界, ToolMeta冻结, 记忆抽取边界, MemoryCandidate置信度, 格式稳定性, Factory反膨胀, Framework/Integration边界
+- **#43** 架构审查7项: 对象作用域4级分类, SkillRouter纯目录化(active_skill→run-scoped), ContextEngineer只读合约, batch_execute顺序保证, ErrorCode统一注册表, 配额硬软语义, None语义规范
+- **#44** v2.5.1边界修复7项: RunStateController持有active_skill+activate/deactivate, MessageProjector提取(格式化与状态分离), AgentLoopDeps最小依赖(frozen dataclass), 策略解释权唯一化, AuthorizationDecision结构化授权, SubAgentConfigOverride强类型白名单(替代dict), 实现红线测试(8条断言)
+- **#45** v2.5.2边界修复11项: BaseAgent hook/decision分离(StopDecision/ToolCallDecision/SpawnDecision), 终止语义三分类(TerminationKind: NORMAL/ABORT/DEGRADE), 委派返回分层文档, Session/audit对齐(iteration_id in metadata), CommitSequencer串行提交, 配额所有权表, DTO边界文档, EventBus观察边界, Integration旁路禁止, None/error强化, 红线测试(11条断言)
+- **#46** v2.5.3必修+建议修: AgentLoop零状态写入(status/tokens/history全部移至RunStateController), apply_iteration_result统一入口, set_status/add_tokens/snapshot/append_user_message, SubAgentRawResult(Layer0内部详情), 红线测试(14条断言)
+- **#47** v2.6.1收口5项: ResolvedRunPolicyBundle(config唯一源), Decision模型+source字段, AgentRunResult.termination_kind, tool_category_whitelist交集语义(禁止扩权), 流式输出边界(ModelChunk禁入SessionState), 红线测试(13条断言)
+- **#48** v2.6.3收口4项: SubAgentScheduler/Runtime所有权分离(SubAgentTaskRecord+active_children唯一真相源), TransactionGroupIndex(禁止ContextSourceProvider重建事务组), MemoryManager会话生命周期(begin_run_session/end_run_session成对+CommitDecision+RunSessionOutcome), RuntimeIdentityBundle(ID归属表+内外ID分离), 红线测试(23条断言)
+- **#49** v2.6.4收口4项: 并发工具副作用提交串行化(ToolExecutionOutcome+ToolCommitSequencer按input_index排序), 委派统一状态机(SubAgentStatus: COMPLETED/FAILED/CANCELLED/REJECTED/DEGRADED+error_code映射), 上下文层只读快照(SessionSnapshot冻结视图+RunStateController.session_snapshot()), 子Agent装配器纯装配(ResolvedSubAgentRuntimeBundle+Factory禁止解释策略), 红线测试(21条断言)
+- **#50** v2.6.5收口4项: 自动重试幂等边界(RetrySafety+RetryDecision, retryable≠idempotent, 无幂等键禁止自动重放), checkpoint/resume正式立场(RunCheckpoint占位, 当前不支持resume, SessionState/日志/事件不可作恢复源), 事件投递语义(EventEnvelope+event_id幂等+尽力投递+订阅方必须幂等), 重试版本链(IterationAttempt+TransactionGroupAttempt, retry不覆盖原记录+parent链关联), 红线测试(18条断言)
+- **#51** 架构守卫套件(test_architecture_guard.py 43项): 反旁路扫描(SessionState写端口/AgentLoop零写/Policy解释权/TransactionGroupIndex消费/Factory纯装配), 故障注入(模型500/工具部分失败/子Agent超时/memory提交失败/session结束失败/事件重复/取消/超时), 数据流不变量(iteration_history只增/迭代ID注入/快照冻结/提交排序/重试版本链/白名单交集/映射完备/begin-end配对)
 
-### Completed (Layers 1-8: Infrastructure → Agent)
-- [x] `infra/` — FrameworkConfig, StructLogger, EventBus, DiskStore
-- [x] `models/` — All 7 model modules (message, tool, agent, session, memory, subagent, context)
-- [x] `protocols/core.py` — All 10 Protocol definitions
-- [x] `adapters/model/` — BaseModelAdapter ABC + LiteLLMAdapter with retry/streaming
-- [x] `tools/` — @tool decorator, GlobalToolCatalog, ToolRegistry (qualified naming), ToolExecutor (local/mcp/a2a/subagent routing), ConfirmationHandlers, DelegationExecutor
-- [x] `memory/` — SQLiteMemoryStore, BaseMemoryManager, DefaultMemoryManager (pattern extraction + merge rules)
-- [x] `context/` — ToolTransactionGroup, ContextSourceProvider, ContextBuilder (5-slot), ContextCompressor, ContextEngineer
-- [x] `agent/` — BaseAgent (7 hooks + 4 strategies), DefaultAgent, AgentLoop, RunCoordinator, SkillRouter, CapabilityPolicy
-- [x] Consistency verification against architecture doc v2.3 — 13 gaps found and fixed
-
-### Completed (Tasks #11-#16: ReAct + MCP + A2A + SubAgent + Entry)
-- [x] **#11** ReAct Agent (`agent/react_agent.py`) — ReAct system prompt, "Final Answer:" detection, retry error policy
-- [x] **#12** SubAgent Runtime — `subagent/memory_scope.py` (Isolated/InheritRead/SharedWrite), `factory.py`, `scheduler.py` (quota + timeout), `runtime.py` (facade) + `tools/builtin/spawn_agent.py`
-- [x] **#13** MCP Client (`protocols/mcp/client_manager.py` + `models/mcp.py`) — stdio/sse/streamable_http transport, tool discovery + sync to catalog
-- [x] **#14** A2A Client (`protocols/a2a/client_adapter.py`) — agent discovery via agent cards, task delegation, tool sync
-- [x] **#15** Entry Layer + CLI (`entry.py` AgentFramework facade + `cli.py` REPL with argparse)
-- [x] **#16** Integration wiring — delegation.py A2A wiring, pyproject.toml optional deps (mcp/a2a/all), `agent-cli` script entry point
-
-### Completed (Tasks #17-#22: 多智能体协调)
-- [x] **#17** SubAgentScheduler API 对齐 doc 14.4 — `submit()` + `await_result()` 分离式接口，保留 `schedule()` 便利方法
-- [x] **#18** Executor subagent 路由完善 — 传递所有 spawn_agent 参数 (task_input, mode, skill_id, tool_categories, memory_scope)
-- [x] **#19** `build_spawn_seed()` 添加到 ContextBuilder (doc 8.8) — 从父会话中选取最近消息种子给子Agent上下文
-- [x] **#20** 派生权限检查 (doc 16.2/20.2) — DelegationExecutor 检查 allow_spawn_children，子Agent调spawn_agent返回 PERMISSION_DENIED
-- [x] **#21** 多智能体协调演示 — run_demo.py 新增 demo_9(子Agent派生) + demo_10(递归防护)
-- [x] **#22** spawn_agent 工具 source="subagent" 正确路由，ContextBuilder 构造函数支持 max_context_tokens/reserve_for_output
-
-### Completed (Tasks #23-#27: v2.4 架构升级)
-- [x] **#23** 新增 `ContextPolicy`, `MemoryPolicy`, `EffectiveRunConfig` pydantic 模型 (v2.4 §3)
-- [x] **#24** SessionState 写入权限收归 RunCoordinator 独占 (v2.4 §4)
-- [x] **#25** AgentLoop 最小依赖传递 — 只接收 model_adapter + tool_executor，不接收完整 AgentRuntimeDeps (v2.4 §5)
-- [x] **#26** RunCoordinator: EffectiveRunConfig 构建 + Skill 反激活保证（正常/异常路径均清理）(v2.4 §8/§9/§18)
-- [x] **#27** MemoryScope 快照语义 — InheritRead/SharedWrite 在 spawn 时刻捕获父记忆冻结快照，运行期间不感知父记忆变化 (v2.4 §10)
-
-### Completed (Task #29: 多模型 SDK 适配)
-- [x] **#29** 原生 SDK 适配器 — OpenAIAdapter / AnthropicAdapter / GoogleAdapter
-  - `adapters/model/openai_adapter.py` — 官方 openai SDK，格式与 LiteLLM 兼容
-  - `adapters/model/anthropic_adapter.py` — 官方 anthropic SDK，处理 content blocks、system 分离、tool_result 合并
-  - `adapters/model/google_adapter.py` — 官方 google-genai SDK，处理 role 映射、function_call/response parts、合成 tool_call_id
-  - `ModelConfig.adapter_type` 字段选择适配器 ("litellm"|"openai"|"anthropic"|"google")
-  - `entry.py` 适配器工厂方法 `_create_model_adapter()`，懒加载 SDK
-  - `__init__.py` 条件导入，缺少 SDK 不影响框架启动
-  - `pyproject.toml` 可选依赖组: `[openai]`, `[anthropic]`, `[google]`, `[all]`
-
-### Completed (Task #30: 国产模型 + 自定义适配)
-- [x] **#30** OpenAI-compatible 适配器 — DeepSeek / 豆包 / 通义千问 / 智谱 / MiniMax / Custom
-  - `adapters/model/openai_compatible_adapter.py` — `OpenAICompatibleAdapter` 基类 + 6 个子类
-  - 各厂商预设 `api_base` 和默认模型名：DeepSeek(`deepseek-chat`), Doubao(`doubao-pro-32k`), Qwen(`qwen-plus`), Zhipu(`glm-4`), MiniMax(`abab6.5s-chat`)
-  - `CustomAdapter` 支持任意 OpenAI-compatible 端点（需手动传 `api_base`）
-  - 中文文本 token 估算优化（CJK ~1.5 chars/token）
-  - `extra_headers` 支持（部分厂商需自定义 Header）
-  - `config.model.adapter_type` 新增: `"deepseek"|"doubao"|"qwen"|"zhipu"|"minimax"|"custom"`
-  - `entry.py` 工厂方法扩展，全部走 `openai` SDK（无额外依赖）
-
-### Completed (Task #31: 全模块严格测试)
-- [x] **#31** 严格单元测试覆盖全部功能模块 — 426 tests total
-  - `test_tools.py` (80 tests) — @tool 装饰器、Catalog、Registry、Executor、Delegation、CapabilityPolicy
-  - `test_memory.py` (55 tests) — SQLiteStore CRUD、DefaultManager 抽取/合并、MemoryScope 快照语义
-  - `test_context.py` (30 tests) — TransactionGroup、SourceProvider、Builder 5-slot 组装/裁剪/spawn seed、Compressor
-  - `test_agent.py` (35 tests) — BaseAgent hooks、DefaultAgent、ReActAgent、SkillRouter、AgentLoop、RunCoordinator
-  - `test_subagent.py` (20 tests) — Scheduler 配额/超时/取消、Factory 内存域/工具过滤/快照捕获
-  - `test_infra.py` (18 tests) — EventBus 发布/订阅、DiskStore JSON/文本/原子写入
-  - `test_openai_compatible_adapters.py` (30 tests) — 6 个厂商默认值、构建参数、token 计数、complete/retry、Entry 工厂
-
-### Completed (Task #32-#34: Skill 系统修复 + 交互终端)
-- [x] **#32** Skill 公开 API — `AgentFramework.register_skill()`, `list_skills()`, `remove_skill()`, `get_active_skill()`
-- [x] **#33** Skill 配置加载 — `SkillConfig` / `SkillsConfig` 模型，`FrameworkConfig.skills` 字段，setup() 自动加载
-- [x] **#34** CLI skills 命令 — REPL 新增 `skills` 命令，显示注册技能列表和激活状态
-- [x] **#35** 交互终端 `main.py` — 彩色 ANSI 输出、命令系统（help/tools/skills/memories/config/stats/clear/reset）、内置 Mock 模型 + 3 个 demo 工具 + 3 个 demo 技能
-- [x] **#36** Skill 演示 — run_demo.py 新增 demo_11（技能注册→检测→激活→反激活完整流程）
-- [x] **#37** 入口点 — `python -m agent_framework.main` + `agent-interactive` CLI 命令
-
-### Completed (Task #38-#39: 终止条件闭环 + 详细日志)
-- [x] **#38** 终止条件统一闭环修复
-  - `coordinator.py`: 全局 `run_timeout_ms` 超时（默认5分钟），防止主Agent无限挂起
-  - `coordinator.py`: `cancel_event: asyncio.Event` 支持外部取消，触发 `USER_CANCEL` StopReason
-  - `loop.py`: `finish_reason="stop"` + tool_calls 边界修复 — 优先终止，丢弃工具调用
-  - `loop.py`: 重复工具调用检测 — 连续3次相同调用自动强制 ERROR 停止
-  - `loop.py`: 连续3次 LLM 错误强制 ABORT（防止 RETRY 策略死循环）
-  - `executor.py`: spawn_agent 路由时传递 `parent_run_id`，修复子Agent配额跟踪失效
-- [x] **#39** 全链路详细日志增强
-  - `loop.py`: iteration 级日志含 max_iterations/tokens/context_messages/tools_available
-  - `loop.py`: LLM 调用日志含 temperature/token 分项/response_preview/tool_names
-  - `loop.py`: 工具执行日志含 execution_time_ms/source/output_preview
-  - `coordinator.py`: run 级日志含 model/max_iterations/allow_spawn/elapsed_ms
-  - `executor.py`: 工具路由日志含 source/arguments_keys/subagent详情
-  - `delegation.py`: 子Agent委托全流程日志（requested/approved/denied/hook_denied）
-  - `runtime.py`: 子Agent生命周期日志（spawning/creating/created/quota_check/run_started/finished）
-  - `scheduler.py`: 任务状态日志（running/completed/timeout/cancelled/failed/quota_exceeded）
-  - `logger.py`: STANDARD_EVENTS 从17个扩展到50+个
-
-### Completed (Task #41: 架构审查 6 项边界强化)
-- [x] **#41.8** iteration_history 不可改写审计轨迹 — RunStateController 文档化 append-only 合约，success/fail/retry/skip 均入历史，context 压缩不改写
-- [x] **#41.9** ToolResult.output 序列化边界 — `_sanitize_output()` 强制 JSON 可序列化, 50K 字符截断, 不可序列化对象自动转 str
-- [x] **#41.10** 日志/运行态边界硬约束 — logger.py 模块级文档: 日志仅服务观测, 业务判断禁止依赖日志内容, 日志缺失不影响正确性
-- [x] **#41.11** Artifact 生命周期边界 — content 限小对象, 大对象用 uri, 生命周期由产出方 runtime 管理, memory 层只吸收摘要
-- [x] **#41.12** ConfirmationHandler 确认决策分层 — `_should_confirm()` + `CapabilityPolicy.force_confirm_categories` 策略级升级, Handler 只执行流程
-- [x] **#41.13** ScopedToolRegistry 可见性 vs 执行边界 — docstring 明确: Registry=可见性优化, ToolExecutor.is_tool_allowed()=安全边界
-- [x] **#41.14** A2A/subagent 统一失败语义 — `DelegationErrorCode` 枚举(TIMEOUT/QUOTA_EXCEEDED/PERMISSION_DENIED/DELEGATION_FAILED/REMOTE_UNAVAILABLE), A2A 错误统一映射
-
-### Completed (Task #40: 架构审查 7 项改进)
-- [x] **#40.1** RunCoordinator 职责拆分 — 新增 `RunStateController`（状态变更）和 `RunPolicyResolver`（配置合成），RunCoordinator 仅负责编排
-- [x] **#40.2** 消息投影规则形式化 — `RunStateController.project_iteration_to_session()` 定义严格投影合约（assistant→tool顺序, error必投影, 不静默丢弃）
-- [x] **#40.3** Policy 消费边界写死 — ContextPolicy 仅 ContextEngineer 消费, MemoryPolicy 仅 MemoryManager 消费, RunCoordinator 只传递不解释
-- [x] **#40.4** EffectiveRunConfig 不可变 — `model_config = {"frozen": True}`，构建后禁止修改，防止运行时统计污染
-- [x] **#40.5** CapabilityPolicy 双重执行点 — schema导出时可见性过滤（非安全边界）+ ToolExecutor.is_tool_allowed() 执行时校验（安全边界）
-- [x] **#40.6** remember() 来源审计 — `MemorySourceContext(source_type, source_run_id, source_spawn_id)`, SharedWrite 强制标记 source_type="subagent"
-- [x] **#40.7** 记忆治理工具拦截 — `CapabilityPolicy.allow_memory_admin` 默认 False, category="memory" 的工具被 apply_capability_policy 过滤
-
-### Completed (Task #42: 架构审查 Bug修复 + 7 项边界强化)
-- [x] **Bug** `dedup_guard` ValidationError — `ToolExecutionMeta(source="dedup_guard")` 不在 Literal 范围内，改为 `source="local"`
-- [x] **#42.15** Message metadata 边界 — docstring 明确: metadata 不发送给 LLM，仅 role/content/tool_calls/tool_call_id/name 为 LLM 安全字段
-- [x] **#42.16** ToolMeta 注册后冻结 — `model_config = {"frozen": True}`，@tool 装饰器新增 `source` 参数避免创建后变更
-- [x] **#42.17** 记忆抽取触发边界 — DefaultMemoryManager 文档化: record_turn() 为唯一抽取入口，过滤低置信度推断候选
-- [x] **#42.18** MemoryCandidate 置信度 — `MemoryCandidateSource` (EXPLICIT_USER/INFERRED/TOOL_DERIVED/ADMIN) + `MemoryConfidence` (HIGH/MEDIUM/LOW)
-- [x] **#42.19** ContextSourceProvider 格式稳定性 — 确定性排序 (pinned→kind→title alphabetical)，相同输入产生相同输出
-- [x] **#42.20** SubAgentFactory 反膨胀边界 — 文档化职责上限 (~200行)，超出需拆分为 PolicyResolver + DependencyBuilder
-- [x] **#42.21** Framework Core vs Integration Layer 边界 — entry.py 文档化: Core=runtime/tools/context/memory, Integration=auth/UI/DTOs/streaming
-
-### Bug Fixes (本轮)
-- [x] SubAgentFactory 使用 DefaultAgent 构造函数替代 `__new__` + `BaseAgent.__init__` 直接调用
-- [x] SubAgentFactory 清理冗余 AgentConfig，移除未使用参数
-- [x] SubAgentFactory 默认阻止子Agent访问 system/network/subagent 类工具 (doc 2.6/20.1)
-- [x] MemoryScope managers 补充 `extract_candidates()` 抽象方法实现
-- [x] ContextEngineer.build_spawn_seed 委托给 ContextBuilder（消除重复逻辑）
-- [x] run_demo.py SmartMockModel `_tool_results` 累积 bug 修复（跟踪 `_last_seen_msg_count`）
-- [x] structlog 日志噪音抑制（demo 中设 WARNING 级别）
-- [x] `_rl_wrap` regex 替换崩溃修复 — `\x01`/`\x02` 在 re.sub 替换串中是非法转义，改用 lambda
-- [x] SubAgentSpec.parent_run_id 未传递导致配额跟踪失效 — executor 路由时从 parent_agent 获取
+### Bug Fixes
+- RunCoordinator初始消息写入改用RunStateController(v2.5.1写端口合规)
+- SubAgentFactory构造修复, 工具类别阻止, MemoryScope extract_candidates, build_spawn_seed委托
+- SmartMockModel累积bug, structlog噪音, _rl_wrap regex崩溃, parent_run_id传递, dedup_guard ValidationError
 
 ## Key Design Patterns
-- **Qualified tool naming**: `local::<name>`, `mcp::<server_id>::<name>`, `a2a::<alias>::<name>`, `subagent::spawn_agent`
-- **Context slots**: System Core → Skill Addon → Saved Memories → Session History → Current Input
-- **Tool permission chain (双重执行点)**: schema导出过滤(可见性) → ToolExecutor.is_tool_allowed()(安全边界) → on_tool_call_requested()
-- **RunCoordinator 三层分离**: RunCoordinator(编排) + RunStateController(状态变更) + RunPolicyResolver(配置合成)
-- **Policy 消费边界**: ContextPolicy→ContextEngineer独占, MemoryPolicy→MemoryManager独占, RunCoordinator只传递不解释
-- **EffectiveRunConfig 不可变**: frozen=True, 构建后只读, 不承载运行统计
-- **记忆写入审计**: MemorySourceContext 区分 user/agent/subagent/admin 来源, SharedWrite 强制标记 subagent
-- **iteration_history 审计轨迹**: append-only, 不可改写, success/fail/retry/skip 均入历史, context 压缩不影响
-- **ToolResult.output 序列化边界**: 必须 JSON 可序列化, ToolExecutor._sanitize_output() 强制截断/转换
-- **日志≠状态**: 日志仅观测/审计, 业务判断禁止依赖日志, 日志缺失不影响正确性
-- **确认决策分层**: CapabilityPolicy.force_confirm_categories(策略升级) > ToolMeta.require_confirm(工具声明) > 默认不确认; Handler 只执行流程
-- **委派失败统一语义**: DelegationErrorCode 枚举统一本地 subagent 和远程 A2A 的错误码 (TIMEOUT/QUOTA_EXCEEDED/PERMISSION_DENIED/DELEGATION_FAILED/REMOTE_UNAVAILABLE)
-- **Memory scopes for subagents**: ISOLATED, INHERIT_READ, SHARED_WRITE (v2.4: spawn-time frozen snapshot for reads)
-- **Error strategies**: ABORT, SKIP, RETRY (per agent policy, 连续3次错误强制 ABORT)
-- **终止条件闭环 (6层)**:
-  1. `LLM_STOP` — finish_reason="stop" 无 tool_calls（含 stop+tool_calls 边界修复）
-  2. `MAX_ITERATIONS` — 迭代次数硬限制（主20/子10）
-  3. `OUTPUT_TRUNCATED` — finish_reason="length"
-  4. `ERROR` — 不可恢复错误/连续3次错误/重复工具调用3次
-  5. `USER_CANCEL` — asyncio.Event 外部取消
-  6. `run_timeout_ms` — 全局墙钟超时（默认5分钟）
-- **子Agent递归防护**: SubAgentFactory 强制 allow_spawn_children=False，DelegationExecutor 检查并返回 PERMISSION_DENIED
-- **子Agent派生流**: spawn_agent tool_call → ToolExecutor(source=subagent) → DelegationExecutor → SubAgentRuntime → Factory + Scheduler
-- **多模型适配**: BaseModelAdapter ABC → LiteLLM/OpenAI/Anthropic/Google + DeepSeek/Doubao/Qwen/Zhipu/MiniMax/Custom，`config.model.adapter_type` 选择
-- **ToolMeta 不可变**: frozen=True, 注册后不可修改, 可见性可变但合约不可变
-- **MemoryCandidate 写入控制**: CandidateSource+Confidence 区分来源和置信度, 低置信推断自动过滤
-- **格式稳定性**: ContextSourceProvider 确定性输出 — 相同输入恒等输出, 无随机/时间/调用者依赖
-- **Framework/Integration 边界**: Core=agent runtime+tools+context+memory, Integration=auth+UI+DTOs+streaming+deployment
-- **OpenAI-compatible 模式**: 国产模型均通过 `openai` SDK + 自定义 `base_url` 接入，`OpenAICompatibleAdapter` 基类统一管理
+- **工具命名**: `local::<name>`, `mcp::<srv>::<name>`, `a2a::<alias>::<name>`, `subagent::spawn_agent`
+- **Context 5-slot**: System Core → Skill Addon → Saved Memories → Session History → Current Input
+- **权限链**: schema导出(可见性) → ToolExecutor.is_tool_allowed()(安全) → on_tool_call_requested()
+- **RunCoordinator三层**: Coordinator(编排) + StateController(状态) + PolicyResolver(配置)
+- **不可变模型**: EffectiveRunConfig frozen, ToolMeta frozen (注册后不可改)
+- **记忆控制**: MemorySourceContext审计(user/agent/subagent/admin), CandidateSource+Confidence写入优先级, SharedWrite强制subagent标记
+- **终止6层**: LLM_STOP → MAX_ITERATIONS → OUTPUT_TRUNCATED → ERROR(3次) → USER_CANCEL → run_timeout_ms
+- **子Agent**: Factory强制allow_spawn_children=False, ISOLATED/INHERIT_READ/SHARED_WRITE(spawn快照), DelegationErrorCode统一错误码
+- **确认分层**: force_confirm_categories > ToolMeta.require_confirm > 默认不确认
+- **多模型**: LiteLLM/OpenAI/Anthropic/Google + 6国产(OpenAI-compatible), adapter_type选择
+- **格式稳定**: ContextSourceProvider确定性输出, iteration_history append-only审计轨迹
+- **边界**: Framework Core(runtime/tools/context/memory) vs Integration(auth/UI/DTOs), 日志仅观测不影响业务
+- **对象作用域**: 进程级(Config/Catalog/Logger) → Agent级(Deps/Registry/Adapter) → Run级(AgentState/SessionState/EffectiveRunConfig) → SubAgent级(scoped registry/memory view)
+- **SkillRouter纯目录**: router只负责注册+检测, active_skill由RunStateController持有(run-scoped), 杜绝并发串状态
+- **ContextEngineer只读**: 不改SessionState/MemoryRecord/AgentState, 压缩结果仅影响本次LLM请求
+- **batch_execute顺序保证**: 结果按输入请求顺序返回(asyncio.gather), 不按完成顺序
+- **ErrorCode统一注册表**: 三层(通用/工具/委派), 新错误码必须追加注册, 禁止自由命名
+- **配额硬软语义**: 硬限制(超出→拒绝: max_iterations/spawn数/递归) vs 软限制(超出→降级: token budget/并发队列/memory条数)
+- **None语义**: None="字段不存在", 失败用error对象, 空集合用[], "未生成"仅限内部对象
+- **MessageProjector**: 格式化与状态写入分离, 返回message列表, 不直接写SessionState
+- **AgentLoopDeps**: frozen dataclass(model_adapter+tool_executor), 禁止传入完整AgentRuntimeDeps
+- **AuthorizationDecision**: 结构化授权结果(allowed+reason+source_layer), 禁止裸bool
+- **SubAgentConfigOverride**: 强类型白名单(model_name/temperature/system_prompt_addon), 禁止dict注入
+- **策略解释权唯一**: ContextPolicy→ContextEngineer, MemoryPolicy→MemoryManager, CapabilityPolicy→授权链, 其他模块禁读字段
+- **Hook/Decision分离**: 观察hooks(on_before_run等)→无返回值, 决策接口(should_stop/on_tool_call_requested/on_spawn_requested)→结构化Decision模型
+- **TerminationKind三分类**: StopSignal.termination_kind派生属性, NORMAL(LLM_STOP/CUSTOM) / ABORT(ERROR/USER_CANCEL) / DEGRADE(MAX_ITERATIONS/OUTPUT_TRUNCATED)
+- **CommitSequencer**: asyncio.Lock包装, 保证并发结果串行提交到SessionState
+- **配额所有权表**: 每个配额有唯一Owner模块负责执行, 禁止跨模块读配额自行执行
+- **iteration_id链接**: MessageProjector在metadata中注入iteration_id, 关联SessionState消息↔iteration_history审计轨迹
+- **ResolvedRunPolicyBundle**: RunPolicyResolver唯一产出, RunCoordinator只消费, frozen后不可改
+- **tool_category_whitelist交集语义**: 白名单只能收窄(blocked∩whitelist), 不能扩权绕过CapabilityPolicy
+- **流式边界**: ModelChunk仅供UI输出, 不入SessionState; 中断不写半成品; 只有最终ModelResponse落盘
+- **AgentRunResult.termination_kind**: 派生属性区分stop/abort/degrade, 审计日志必须可区分
+- **SubAgentScheduler/Runtime分离**: Scheduler负责排队/配额/task_id分配, Runtime负责执行/active_children真相源/cancel执行, 禁止两层同时持有active child集合
+- **SubAgentTaskRecord**: 统一任务记录(QUEUED→SCHEDULED→RUNNING→COMPLETED/FAILED/CANCELLED), task_id由Scheduler分配, child_run_id由Runtime分配
+- **TransactionGroupIndex**: 预计算事务组索引, ContextSourceProvider只消费不重建, 缺失metadata降级为"不可安全裁剪"而非重建
+- **MemoryManager会话成对**: begin_run_session/end_run_session必须成对, end_run_session必须finally执行, record_turn返回CommitDecision
+- **CommitDecision/RunSessionOutcome**: 结构化提交决策(committed+reason+source), 结构化终止描述(status+termination_kind+audit_ref)
+- **RuntimeIdentityBundle**: 内核ID(run_id/run_session_id/iteration_id)与外部ID(external_session_id/request_id/user_id)分离, 内核可无外部ID独立运行
+- **工具并发副作用提交**: 并发只允许计算阶段, 可观察副作用(session写/artifact登记/审计)经ToolCommitSequencer按input_index串行化提交
+- **ToolExecutionOutcome**: 结构化工具执行结果(tool_call_id+input_index+result+artifact_refs+side_effect_refs)
+- **SubAgentStatus统一状态机**: COMPLETED/FAILED/CANCELLED/REJECTED/DEGRADED, 本地subagent与A2A统一, error_code→status映射表
+- **SessionSnapshot只读快照**: 上下文层不直接消费可变SessionState, RunStateController产出冻结快照, 同一次上下文构建绑定单一snapshot
+- **SubAgentFactory纯装配**: Factory只消费已解析配置(ResolvedSubAgentRuntimeBundle), 不解释MemoryScope/CapabilityPolicy/EffectiveRunConfig/quota
+- **自动重试幂等边界**: retryable≠idempotent, 自动重试需retryable+idempotent(或idempotency_key), 无幂等保障只允许上层重新规划
+- **Checkpoint/Resume立场**: 当前不支持通用resume, 中断后创建新run, SessionState/日志/事件/流输出不可作恢复源
+- **事件投递语义**: 尽力而为(允许重复/丢失), EventEnvelope带event_id, 订阅方必须幂等, 事件顺序不作为业务真相源
+- **重试版本链**: IterationAttempt(attempt_id+parent_attempt_id链), TransactionGroupAttempt同理, retry不覆盖原记录, 审计保留全链
 
 ## Commands
 ```bash
-# Install
-pip install -e ".[dev]"
-
-# Tests
-pytest tests/
-
-# Interactive terminal (Mock 模型, 无需 API Key)
-python -m agent_framework.main
-
-# Interactive terminal (真实模型)
-python -m agent_framework.main --config config/deepseek.json
-
-# Demo (Mock 模型)
-python run_demo.py
+pip install -e ".[dev]"           # Install
+pytest tests/                     # Tests (577 passed)
+python -m agent_framework.main    # Interactive (Mock, no API key)
+python -m agent_framework.main --config config/deepseek.json  # Real model
+python run_demo.py                # Demo
 ```
 
 ## File Conventions
-- All models use pydantic v2 BaseModel
-- All config uses pydantic-settings BaseSettings
-- TYPE_CHECKING imports for forward refs to avoid circular imports
-- Protocols are runtime_checkable
-- Async tool functions detected automatically by @tool decorator
+- pydantic v2 BaseModel / pydantic-settings BaseSettings
+- TYPE_CHECKING for forward refs, runtime_checkable Protocols
+- @tool decorator auto-detects async

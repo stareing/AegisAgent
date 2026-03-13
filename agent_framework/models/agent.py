@@ -28,9 +28,94 @@ class StopReason(str, Enum):
     OUTPUT_TRUNCATED = "OUTPUT_TRUNCATED"
 
 
+class TerminationKind(str, Enum):
+    """Classifies WHY a run terminated (v2.5.2 §20).
+
+    NORMAL  — expected completion (LLM_STOP, CUSTOM)
+    ABORT   — hard failure, run cannot continue (ERROR, USER_CANCEL)
+    DEGRADE — soft limit hit, result may be partial (MAX_ITERATIONS, OUTPUT_TRUNCATED)
+    """
+
+    NORMAL = "NORMAL"
+    ABORT = "ABORT"
+    DEGRADE = "DEGRADE"
+
+
+# Mapping from StopReason → TerminationKind (authoritative, single source)
+_STOP_REASON_TO_TERMINATION_KIND: dict[StopReason, TerminationKind] = {
+    StopReason.LLM_STOP: TerminationKind.NORMAL,
+    StopReason.CUSTOM: TerminationKind.NORMAL,
+    StopReason.ERROR: TerminationKind.ABORT,
+    StopReason.USER_CANCEL: TerminationKind.ABORT,
+    StopReason.MAX_ITERATIONS: TerminationKind.DEGRADE,
+    StopReason.OUTPUT_TRUNCATED: TerminationKind.DEGRADE,
+}
+
+
 class StopSignal(BaseModel):
     reason: StopReason
     message: str | None = None
+
+    @property
+    def termination_kind(self) -> TerminationKind:
+        """Derived from reason — not a stored field. Single source of truth."""
+        return _STOP_REASON_TO_TERMINATION_KIND[self.reason]
+
+    @property
+    def is_normal(self) -> bool:
+        return self.termination_kind == TerminationKind.NORMAL
+
+    @property
+    def is_abort(self) -> bool:
+        return self.termination_kind == TerminationKind.ABORT
+
+    @property
+    def is_degrade(self) -> bool:
+        return self.termination_kind == TerminationKind.DEGRADE
+
+
+# ---------------------------------------------------------------------------
+# Decision models (v2.5.2 §19)
+# BaseAgent decision interfaces return these structured types instead of
+# bare bools, enabling audit trails and reason tracking.
+# ---------------------------------------------------------------------------
+
+class StopDecision(BaseModel):
+    """Returned by should_stop(). Replaces bare bool.
+
+    v2.6.1 §31: All decision types must carry source (originating layer)
+    and reason (human-readable explanation). Bare bools are prohibited.
+    """
+
+    should_stop: bool = False
+    reason: str = ""
+    source: str = "agent"
+    # If should_stop is True and a StopSignal is provided, it takes precedence
+    # over auto-generated signals in the coordinator.
+    stop_signal: StopSignal | None = None
+
+
+class ToolCallDecision(BaseModel):
+    """Returned by on_tool_call_requested(). Replaces bare bool.
+
+    v2.6.1 §31: Must carry reason and source for audit trail.
+    """
+
+    allowed: bool = True
+    reason: str = ""
+    source: str = "agent"
+    normalized_tool_name: str | None = None
+
+
+class SpawnDecision(BaseModel):
+    """Returned by on_spawn_requested(). Replaces bare bool.
+
+    v2.6.1 §31: Must carry reason and source for audit trail.
+    """
+
+    allowed: bool = True
+    reason: str = ""
+    source: str = "agent"
 
 
 class IterationError(BaseModel):
@@ -40,6 +125,50 @@ class IterationError(BaseModel):
     stacktrace: str | None = None
 
 
+class IterationAttempt(BaseModel):
+    """Tracks a single attempt within a logical iteration (v2.6.5 §50).
+
+    Retry produces a NEW attempt — never overwrites the original.
+    Attempts form a version chain via parent_attempt_id.
+
+    Rules:
+    - iteration_id = logical turn (stable across retries)
+    - attempt_id = specific execution attempt (unique per try)
+    - parent_attempt_id links to the failed attempt that triggered this retry
+    - Context compression MUST NOT discard the attempt chain
+    - User/model projection may show only the final successful attempt
+    - Audit/debug layer MUST preserve the full chain
+    """
+
+    attempt_id: str = ""
+    iteration_id: str = ""
+    parent_attempt_id: str | None = None
+    attempt_index: int = 0
+    trigger_reason: str = ""
+
+
+class TransactionGroupAttempt(BaseModel):
+    """Tracks a single execution attempt of a transaction group (v2.6.5 §50).
+
+    When tools within a transaction group are retried, a new
+    TransactionGroupAttempt is created. The original group record
+    is never overwritten.
+
+    Rules:
+    - transaction_group_id = logical group (stable)
+    - group_attempt_id = specific execution attempt (unique per try)
+    - parent_group_attempt_id links to the prior failed attempt
+    - Audit must preserve all attempts; projection may show only final
+    """
+
+    group_attempt_id: str = ""
+    transaction_group_id: str = ""
+    parent_group_attempt_id: str | None = None
+    attempt_index: int = 0
+    status: str = ""  # "pending" | "completed" | "failed" | "retried"
+    message_refs: list[str] = Field(default_factory=list)
+
+
 class IterationResult(BaseModel):
     iteration_index: int = 0
     model_response: ModelResponse | None = None
@@ -47,9 +176,22 @@ class IterationResult(BaseModel):
     tool_execution_meta: list[ToolExecutionMeta] = Field(default_factory=list)
     stop_signal: StopSignal | None = None
     error: IterationError | None = None
+    # v2.6.5 §50: Optional attempt tracking for retry version chains
+    attempt: IterationAttempt | None = None
 
 
 class AgentState(BaseModel):
+    """Mutable run-level state. DOMAIN MODEL — internal to framework.
+
+    DTO boundary (v2.5.2 §27):
+    - AgentState is a DOMAIN MODEL owned by RunStateController.
+    - It is NEVER exposed to integration layer or external APIs directly.
+    - AgentRunResult is the OUTPUT DTO — the only run result type
+      that crosses the framework boundary.
+    - If an integration layer needs run progress, it should subscribe
+      to EventBus events, not read AgentState directly.
+    """
+
     run_id: str = ""
     task: str = ""
     status: AgentStatus = AgentStatus.IDLE
@@ -62,6 +204,22 @@ class AgentState(BaseModel):
 
 
 class AgentRunResult(BaseModel):
+    """Final result of an agent run.
+
+    None semantics (project-wide convention):
+    - None = "the field semantically does not exist for this result"
+    - final_answer: None = agent did not produce a final answer (error/cancel)
+    - error: None = no error occurred (success path)
+    - Failure is expressed via error field + success=False, NEVER via None
+    - Empty collections use [] not None (iteration_history, artifacts)
+    - "Not yet generated" is internal-only; final DTOs always have a value
+
+    Termination semantics (v2.6.1 §32):
+    - termination_kind: derived from stop_signal, classifies stop/abort/degrade
+    - termination_source: which layer triggered termination
+    - Audit logs MUST be able to distinguish stop vs abort vs degrade
+    """
+
     run_id: str = ""
     success: bool = False
     final_answer: str | None = None
@@ -73,9 +231,24 @@ class AgentRunResult(BaseModel):
     iteration_history: list[IterationResult] = Field(default_factory=list)
     artifacts: list[Artifact] = Field(default_factory=list)
     error: str | None = None
+    # v2.6.1 §32: Explicit termination classification for audit
+    termination_source: str = "runtime"
+
+    @property
+    def termination_kind(self) -> TerminationKind:
+        """Derived from stop_signal — single source of truth."""
+        return self.stop_signal.termination_kind
 
 
 class AgentConfig(BaseModel):
+    """Agent configuration.
+
+    Quota semantics:
+    - max_iterations: HARD — exceeded → forced stop (MAX_ITERATIONS)
+    - max_output_tokens: SOFT — LLM may truncate, reported as OUTPUT_TRUNCATED
+    - allow_spawn_children: HARD — False → spawn denied (PERMISSION_DENIED)
+    """
+
     agent_id: str = "default"
     model_name: str = "gpt-3.5-turbo"
     system_prompt: str = "You are a helpful assistant."

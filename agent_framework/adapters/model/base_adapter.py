@@ -5,7 +5,18 @@ from agent_framework.models.message import Message, ModelResponse, ToolCallReque
 
 
 class ModelChunk:
-    """A chunk from streaming response."""
+    """A chunk from streaming response.
+
+    Streaming boundary (v2.6.1 §34):
+    - ModelChunk is for streaming output ONLY (consumed by integration layer).
+    - ModelChunk MUST NOT be written directly into SessionState.
+    - Only the final merged ModelResponse (after stream completes) enters
+      the runtime pipeline: AgentLoop → IterationResult → MessageProjector → SessionState.
+    - If streaming is interrupted before completion, NO assistant message
+      is written to SessionState — only a structured failure audit record.
+    - Integration layer may consume chunks for UI rendering but must not
+      treat them as authoritative session history.
+    """
 
     def __init__(
         self,

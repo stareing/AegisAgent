@@ -107,6 +107,25 @@ class ToolExecutor:
     async def batch_execute(
         self, tool_call_requests: list[ToolCallRequest]
     ) -> list[tuple[ToolResult, ToolExecutionMeta]]:
+        """Execute multiple tool calls concurrently with bounded parallelism.
+
+        Order guarantee:
+        - Results are returned in the SAME ORDER as input tool_call_requests.
+        - The i-th result corresponds to the i-th request, regardless of
+          which tool finishes first.
+        - This is enforced by asyncio.gather() which preserves positional order.
+        - Downstream code (session projection, debug, tests) relies on this
+          stability — do NOT change to completion-order collection.
+
+        Side-effect commit boundary (v2.6.4 §43):
+        - Concurrent execution only covers the COMPUTATION phase.
+        - Observable side effects (session writes, artifact registration,
+          audit records) are NOT committed by tool threads directly.
+        - ToolExecutor collects results; RunStateController commits them
+          in input order via ToolCommitSequencer.
+        - Tool threads MUST NOT write SessionState, register artifacts,
+          or submit audit records directly.
+        """
         sem = asyncio.Semaphore(self._max_concurrent)
 
         async def _run(req: ToolCallRequest) -> tuple[ToolResult, ToolExecutionMeta]:

@@ -19,6 +19,14 @@ class ModelConfig(BaseModel):
 
 
 class ContextConfig(BaseModel):
+    """Context budget configuration.
+
+    Quota semantics:
+    - max_context_tokens: SOFT — exceeded triggers compression/trimming, not abort
+    - reserve_for_output: SOFT — best-effort reservation, not enforced by LLM
+    - spawn_seed_ratio: SOFT — child context seed ratio, trimmed if over budget
+    """
+
     max_context_tokens: int = 8192
     reserve_for_output: int = 1024
     compress_threshold_ratio: float = 0.85
@@ -27,6 +35,13 @@ class ContextConfig(BaseModel):
 
 
 class MemoryConfig(BaseModel):
+    """Memory configuration.
+
+    Quota semantics:
+    - max_memories_in_context: SOFT — excess memories are trimmed by relevance, not error
+    - max_memory_items_per_user: SOFT — oldest/lowest-priority purged on overflow
+    """
+
     db_path: str = "data/memories.db"
     enable_saved_memory: bool = True
     auto_extract_memory: bool = True
@@ -37,12 +52,33 @@ class MemoryConfig(BaseModel):
 
 
 class ToolConfig(BaseModel):
+    """Tool execution configuration.
+
+    Quota semantics:
+    - max_concurrent_tool_calls: SOFT — excess queued via semaphore, not rejected
+    """
+
     confirmation_handler_type: str = "cli"
     max_concurrent_tool_calls: int = 5
     allow_parallel_tool_calls: bool = True
 
 
 class SubAgentConfig(BaseModel):
+    """Sub-agent configuration.
+
+    Quota semantics — HARD vs SOFT:
+
+    HARD (exceed → immediate reject/abort, no degraded mode):
+    - max_sub_agents_per_run     — spawn denied with QUOTA_EXCEEDED
+    - allow_recursive_spawn      — children cannot spawn (PERMISSION_DENIED)
+    - default_deadline_ms        — sub-agent killed on timeout (TIMEOUT)
+    - default_max_iterations     — sub-agent forcefully stopped
+
+    SOFT (exceed → graceful degradation, trimming, or warning):
+    - per_sub_agent_max_tokens   — context trimmed if over budget
+    - max_concurrent_sub_agents  — excess queued, not rejected
+    """
+
     max_sub_agents_per_run: int = 5
     max_concurrent_sub_agents: int = 3
     per_sub_agent_max_tokens: int = 4096
@@ -83,6 +119,33 @@ class LoggingConfig(BaseModel):
 
 
 class FrameworkConfig(BaseSettings):
+    """Root framework configuration.
+
+    Quota ownership table (v2.5.2 §26):
+    Each quota has exactly one OWNER module that enforces it.
+
+    ┌──────────────────────────────┬──────────┬─────────────────────────┐
+    │ Quota                        │ Severity │ Owner                   │
+    ├──────────────────────────────┼──────────┼─────────────────────────┤
+    │ AgentConfig.max_iterations   │ HARD     │ AgentLoop (stop check)  │
+    │ AgentConfig.max_output_tokens│ SOFT     │ LLM adapter (truncation)│
+    │ AgentConfig.allow_spawn      │ HARD     │ DelegationExecutor      │
+    │ SubAgent.max_per_run         │ HARD     │ SubAgentScheduler       │
+    │ SubAgent.max_concurrent      │ SOFT     │ SubAgentScheduler       │
+    │ SubAgent.deadline_ms         │ HARD     │ SubAgentScheduler       │
+    │ SubAgent.max_iterations      │ HARD     │ AgentLoop (sub run)     │
+    │ SubAgent.token_budget        │ SOFT     │ ContextBuilder (trim)   │
+    │ Context.max_context_tokens   │ SOFT     │ ContextBuilder (trim)   │
+    │ Context.reserve_for_output   │ SOFT     │ ContextBuilder          │
+    │ Memory.max_in_context        │ SOFT     │ MemoryManager (trim)    │
+    │ Memory.max_per_user          │ SOFT     │ MemoryManager (purge)   │
+    │ Tool.max_concurrent          │ SOFT     │ ToolExecutor (semaphore)│
+    └──────────────────────────────┴──────────┴─────────────────────────┘
+
+    Rule: If you need to check a quota, you MUST go through its owner.
+    No module may read another module's quota and enforce it independently.
+    """
+
     model: ModelConfig = Field(default_factory=ModelConfig)
     context: ContextConfig = Field(default_factory=ContextConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)

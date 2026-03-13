@@ -2,21 +2,36 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
 from typing import Any
 
 from agent_framework.infra.logger import get_logger
-from agent_framework.models.subagent import SubAgentHandle, SubAgentResult
+from agent_framework.models.subagent import (
+    SubAgentHandle,
+    SubAgentResult,
+    SubAgentTaskRecord,
+    SubAgentTaskStatus,
+)
 
 logger = get_logger(__name__)
 
 
 class SubAgentScheduler:
-    """Manages concurrent sub-agent execution with quota enforcement.
+    """Manages sub-agent queuing, quota enforcement, and scheduling decisions.
+
+    Ownership boundary (v2.6.3 §39):
+    - Responsible for: queuing, quota, concurrency control, task ID assignment,
+      scheduling decisions (immediate/queue/reject)
+    - NOT responsible for: running sub-agents, holding execution context,
+      maintaining active runtime handles, cancel execution
+
+    The scheduler assigns subagent_task_id. The runtime assigns child_run_id.
+    active_children truth source belongs to SubAgentRuntime only.
 
     API per doc section 14.4:
     - submit(handle, coro, deadline_ms) -> SubAgentHandle
     - await_result(handle) -> SubAgentResult
-    - cancel(handle) -> None
+    - cancel(handle) -> None (issues cancel command; runtime executes)
     - get_quota_status(parent_run_id) -> QuotaStatus
     """
 
@@ -28,10 +43,40 @@ class SubAgentScheduler:
         self._max_concurrent = max_concurrent
         self._max_per_run = max_per_run
         self._semaphore = asyncio.Semaphore(max_concurrent)
-        self._active: dict[str, SubAgentHandle] = {}  # spawn_id -> handle
         self._tasks: dict[str, asyncio.Task] = {}  # spawn_id -> task
         self._results: dict[str, SubAgentResult] = {}  # spawn_id -> result
         self._run_counts: dict[str, int] = {}  # parent_run_id -> count
+        # Task records — scheduling-level tracking only
+        self._task_records: dict[str, SubAgentTaskRecord] = {}  # task_id -> record
+
+    # ------------------------------------------------------------------
+    # Task record management
+    # ------------------------------------------------------------------
+
+    def allocate_task_id(self, parent_run_id: str, spawn_id: str) -> SubAgentTaskRecord:
+        """Allocate a subagent_task_id. Sole source of task ID generation."""
+        task_id = f"task_{uuid.uuid4().hex[:12]}"
+        record = SubAgentTaskRecord(
+            subagent_task_id=task_id,
+            parent_run_id=parent_run_id,
+            spawn_id=spawn_id,
+            status=SubAgentTaskStatus.QUEUED,
+            scheduler_decision_ref=f"sched_{uuid.uuid4().hex[:8]}",
+        )
+        self._task_records[task_id] = record
+        return record
+
+    def get_task_record(self, task_id: str) -> SubAgentTaskRecord | None:
+        """Get a task record by task ID."""
+        return self._task_records.get(task_id)
+
+    def _update_task_status(
+        self, task_id: str, status: SubAgentTaskStatus
+    ) -> None:
+        """Update task record status (scheduler-owned transitions only)."""
+        record = self._task_records.get(task_id)
+        if record:
+            record.status = status
 
     # ------------------------------------------------------------------
     # Quota
@@ -60,15 +105,10 @@ class SubAgentScheduler:
     def get_quota_status(self, parent_run_id: str) -> dict:
         """Return quota status for a parent run (section 14.4)."""
         count = self._run_counts.get(parent_run_id, 0)
-        active = len([
-            h for h in self._active.values()
-            if h.parent_run_id == parent_run_id
-        ])
         return {
             "parent_run_id": parent_run_id,
             "total_spawned": count,
             "max_per_run": self._max_per_run,
-            "active_count": active,
             "max_concurrent": self._max_concurrent,
             "quota_remaining": max(0, self._max_per_run - count),
         }
@@ -82,6 +122,7 @@ class SubAgentScheduler:
         handle: SubAgentHandle,
         coro: Any,  # coroutine that returns SubAgentResult
         deadline_ms: int = 60000,
+        task_record: SubAgentTaskRecord | None = None,
     ) -> SubAgentHandle:
         """Submit a sub-agent coroutine for execution. Returns the handle immediately.
 
@@ -94,8 +135,13 @@ class SubAgentScheduler:
         self._enforce_quota(parent_run_id)
 
         self._run_counts[parent_run_id] = self._run_counts.get(parent_run_id, 0) + 1
-        self._active[spawn_id] = handle
         handle.status = "PENDING"
+
+        # Mark task record as scheduled
+        if task_record:
+            self._update_task_status(
+                task_record.subagent_task_id, SubAgentTaskStatus.SCHEDULED
+            )
 
         async def _wrapped() -> SubAgentResult:
             start = time.monotonic()
@@ -171,7 +217,6 @@ class SubAgentScheduler:
                     duration_ms=duration,
                 )
             finally:
-                self._active.pop(spawn_id, None)
                 self._tasks.pop(spawn_id, None)
 
         task = asyncio.create_task(_wrapped())
@@ -217,14 +262,20 @@ class SubAgentScheduler:
         handle: SubAgentHandle,
         coro: Any,
         deadline_ms: int = 60000,
+        task_record: SubAgentTaskRecord | None = None,
     ) -> SubAgentResult:
         """Submit and immediately await. Convenience for synchronous spawn pattern."""
         try:
-            self.submit(handle, coro, deadline_ms)
+            self.submit(handle, coro, deadline_ms, task_record=task_record)
         except RuntimeError as e:
             # If submit fails before scheduling, close the coroutine to avoid warnings.
             if hasattr(coro, "close"):
                 coro.close()
+            # Mark task as rejected
+            if task_record:
+                self._update_task_status(
+                    task_record.subagent_task_id, SubAgentTaskStatus.REJECTED
+                )
             return SubAgentResult(
                 spawn_id=handle.spawn_id,
                 success=False,
@@ -233,39 +284,41 @@ class SubAgentScheduler:
         return await self.await_result(handle)
 
     # ------------------------------------------------------------------
-    # Cancel
+    # Cancel — issues command only; runtime executes actual cancellation
     # ------------------------------------------------------------------
 
     async def cancel(self, spawn_id: str) -> bool:
-        """Cancel a single sub-agent by spawn_id (section 14.4)."""
-        handle = self._active.get(spawn_id)
+        """Issue cancel command for a sub-agent by spawn_id.
+
+        The scheduler only issues the cancel. Actual cancellation and
+        final status update is performed by SubAgentRuntime (v2.6.3 §39).
+        """
         task = self._tasks.get(spawn_id)
         if task and not task.done():
             task.cancel()
-            if handle:
-                handle.status = "CANCELLED"
             return True
         return False
 
-    def get_active_children(self, parent_run_id: str) -> list[SubAgentHandle]:
-        return [
-            h for h in self._active.values()
-            if h.parent_run_id == parent_run_id
-        ]
+    async def cancel_all_tasks(self, parent_run_id: str) -> int:
+        """Issue cancel commands for all tasks under a parent run.
 
-    async def cancel_all(self, parent_run_id: str) -> int:
-        """Cancel all active sub-agents for a given parent run."""
+        Returns the number of cancel commands issued.
+        Actual cancellation is performed by SubAgentRuntime.
+        """
         cancelled = 0
-        for spawn_id, handle in list(self._active.items()):
-            if handle.parent_run_id == parent_run_id:
-                task = self._tasks.get(spawn_id)
-                if task and not task.done():
-                    task.cancel()
-                    cancelled += 1
-                handle.status = "CANCELLED"
+        for spawn_id, task in list(self._tasks.items()):
+            # Find task records matching this parent
+            record = None
+            for tr in self._task_records.values():
+                if tr.spawn_id == spawn_id and tr.parent_run_id == parent_run_id:
+                    record = tr
+                    break
+            if record and task and not task.done():
+                task.cancel()
+                cancelled += 1
         logger.info(
-            "subagent.cancel_all",
+            "scheduler.cancel_all_issued",
             parent_run_id=parent_run_id,
-            cancelled=cancelled,
+            cancel_commands_issued=cancelled,
         )
         return cancelled

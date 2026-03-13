@@ -606,24 +606,19 @@ async def _cmd_skill(fw, mock, state, args):
         return
 
     if args.strip().lower() == "off":
-        fw._deps.skill_router.deactivate_current_skill()
-        fw._deps.context_engineer.set_skill_context(None)
+        fw.deactivate_skill()
         print(f"  {_green('技能已反激活')}")
         return
 
     skill_id = args.strip()
     router = fw._deps.skill_router
-    found = None
-    for s in router.list_skills():
-        if s.skill_id == skill_id:
-            found = s
-            break
+    found = router.get_skill(skill_id)
     if not found:
         print(f"  {_red('技能不存在:')} {skill_id}")
         print(f"  {_dim('可用: ' + ', '.join(s.skill_id for s in router.list_skills()))}")
         return
 
-    router.activate_skill(found, fw._deps.context_engineer)
+    fw.activate_skill(found)
     print(f"  {_green('已激活技能:')} {_magenta(found.skill_id)} ({found.name})")
     print(f"    Addon: {_dim(found.system_prompt_addon[:80])}")
 

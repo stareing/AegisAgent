@@ -5,7 +5,12 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from agent_framework.infra.logger import get_logger
-from agent_framework.models.subagent import SubAgentHandle, SubAgentResult, SubAgentSpec
+from agent_framework.models.subagent import (
+    SubAgentHandle,
+    SubAgentResult,
+    SubAgentSpec,
+    SubAgentTaskStatus,
+)
 from agent_framework.subagent.factory import SubAgentFactory
 from agent_framework.subagent.scheduler import SubAgentScheduler
 
@@ -18,7 +23,18 @@ logger = get_logger(__name__)
 
 
 class SubAgentRuntime:
-    """Facade composing SubAgentFactory + SubAgentScheduler.
+    """Executes sub-agent runs and manages their lifecycle.
+
+    Ownership boundary (v2.6.3 §39):
+    - Responsible for: starting sub-agent runs, maintaining active_children
+      truth source, executing cancel propagation, resource cleanup,
+      producing SubAgentResult, assigning child_run_id
+    - NOT responsible for: quota decisions, queuing, generating subagent_task_id
+
+    SubAgentScheduler handles queuing/quota/concurrency.
+    SubAgentRuntime handles execution/lifecycle/cancellation.
+
+    active_children truth source: this class only (not duplicated in scheduler).
 
     Implements SubAgentRuntimeProtocol:
     - spawn(spec, parent_agent) -> SubAgentResult
@@ -40,6 +56,8 @@ class SubAgentRuntime:
         )
         self._coordinator = coordinator
         self._parent_deps = parent_deps
+        # active_children truth source — only SubAgentRuntime maintains this
+        self._active: dict[str, SubAgentHandle] = {}  # spawn_id -> handle
 
     async def spawn(
         self, spec: SubAgentSpec, parent_agent: Any
@@ -61,6 +79,11 @@ class SubAgentRuntime:
             deadline_ms=spec.deadline_ms,
         )
 
+        # Allocate task record via scheduler (task_id from scheduler only)
+        task_record = self._scheduler.allocate_task_id(
+            spec.parent_run_id, spec.spawn_id
+        )
+
         # Create handle
         handle = SubAgentHandle(
             sub_agent_id=f"sub_{spec.spawn_id}",
@@ -70,11 +93,15 @@ class SubAgentRuntime:
             created_at=datetime.now(timezone.utc),
         )
 
+        # Register in active_children (runtime is the truth source)
+        self._active[spec.spawn_id] = handle
+
         # Create sub-agent and deps
         logger.info(
             "subagent.creating",
             spawn_id=spec.spawn_id,
             step="factory.create_agent_and_deps",
+            task_id=task_record.subagent_task_id,
         )
         sub_agent, sub_deps = self._factory.create_agent_and_deps(
             spec, parent_agent
@@ -122,22 +149,39 @@ class SubAgentRuntime:
             parent_run_id=spec.parent_run_id,
             total_spawned=quota["total_spawned"],
             quota_remaining=quota["quota_remaining"],
-            active_count=quota["active_count"],
             max_concurrent=quota["max_concurrent"],
         )
 
-        # Schedule execution
+        # Schedule execution — runtime wraps the actual run
         async def _run() -> SubAgentResult:
-            logger.info("subagent.run_started", spawn_id=spec.spawn_id)
+            # child_run_id is assigned by the runtime at actual start
+            child_run_id = str(uuid.uuid4())
+            task_record.child_run_id = child_run_id
+            task_record.status = SubAgentTaskStatus.RUNNING
+
+            logger.info(
+                "subagent.run_started",
+                spawn_id=spec.spawn_id,
+                child_run_id=child_run_id,
+                task_id=task_record.subagent_task_id,
+            )
             run_result = await coordinator.run(
                 sub_agent,
                 sub_deps,
                 spec.task_input,
                 initial_session_messages=initial_session_messages,
             )
+
+            # Update task record status (runtime-owned transitions)
+            task_record.status = (
+                SubAgentTaskStatus.COMPLETED if run_result.success
+                else SubAgentTaskStatus.FAILED
+            )
+
             logger.info(
                 "subagent.run_finished",
                 spawn_id=spec.spawn_id,
+                child_run_id=child_run_id,
                 success=run_result.success,
                 iterations_used=run_result.iterations_used,
                 total_tokens=run_result.usage.total_tokens,
@@ -151,9 +195,18 @@ class SubAgentRuntime:
                 iterations_used=run_result.iterations_used,
             )
 
-        result = await self._scheduler.schedule(
-            handle, _run(), deadline_ms=spec.deadline_ms
-        )
+        try:
+            result = await self._scheduler.schedule(
+                handle, _run(), deadline_ms=spec.deadline_ms,
+                task_record=task_record,
+            )
+        finally:
+            # Remove from active_children after completion (runtime cleanup)
+            self._active.pop(spec.spawn_id, None)
+
+        # Handle cancellation status from scheduler
+        if handle.status == "CANCELLED":
+            task_record.status = SubAgentTaskStatus.CANCELLED
 
         logger.info(
             "subagent.spawn_completed",
@@ -161,12 +214,34 @@ class SubAgentRuntime:
             success=result.success,
             duration_ms=result.duration_ms,
             iterations_used=result.iterations_used,
+            task_status=task_record.status.value,
             answer_preview=(result.final_answer or result.error or "")[:120],
         )
         return result
 
     def get_active_children(self, parent_run_id: str) -> list[SubAgentHandle]:
-        return self._scheduler.get_active_children(parent_run_id)
+        """Return active children. This is the SOLE truth source (v2.6.3 §39)."""
+        return [
+            h for h in self._active.values()
+            if h.parent_run_id == parent_run_id
+        ]
 
     async def cancel_all(self, parent_run_id: str) -> int:
-        return await self._scheduler.cancel_all(parent_run_id)
+        """Cancel all active sub-agents for a given parent run.
+
+        Runtime executes actual cancellation and updates final status.
+        Scheduler only issues cancel commands.
+        """
+        cancelled = 0
+        for spawn_id, handle in list(self._active.items()):
+            if handle.parent_run_id == parent_run_id:
+                success = await self._scheduler.cancel(spawn_id)
+                if success:
+                    handle.status = "CANCELLED"
+                    cancelled += 1
+        logger.info(
+            "subagent.cancel_all",
+            parent_run_id=parent_run_id,
+            cancelled=cancelled,
+        )
+        return cancelled

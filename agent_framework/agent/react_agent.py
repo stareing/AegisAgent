@@ -9,6 +9,7 @@ from agent_framework.models.agent import (
     AgentState,
     ErrorStrategy,
     IterationResult,
+    StopDecision,
     StopReason,
     StopSignal,
 )
@@ -54,32 +55,38 @@ class ReActAgent(BaseAgent):
 
     def should_stop(
         self, iteration_result: IterationResult, agent_state: AgentState
-    ) -> bool:
+    ) -> StopDecision:
         # Parent stop conditions (stop_signal, max_iterations)
-        if super().should_stop(iteration_result, agent_state):
-            return True
+        parent_decision = super().should_stop(iteration_result, agent_state)
+        if parent_decision.should_stop:
+            return parent_decision
 
         # ReAct-specific: detect "Final Answer:" in model output
         if iteration_result.model_response and iteration_result.model_response.content:
             content = iteration_result.model_response.content
             match = _FINAL_ANSWER_PATTERN.search(content)
             if match:
-                # Inject stop signal so coordinator can extract the answer
-                iteration_result.stop_signal = StopSignal(
-                    reason=StopReason.CUSTOM,
-                    message="ReAct final answer detected",
+                return StopDecision(
+                    should_stop=True,
+                    reason="ReAct final answer detected",
+                    stop_signal=StopSignal(
+                        reason=StopReason.CUSTOM,
+                        message="ReAct final answer detected",
+                    ),
                 )
-                return True
 
         # Optional react step limit
         if self._max_react_steps and agent_state.iteration_count >= self._max_react_steps:
-            iteration_result.stop_signal = StopSignal(
-                reason=StopReason.MAX_ITERATIONS,
-                message=f"Reached max ReAct steps ({self._max_react_steps})",
+            return StopDecision(
+                should_stop=True,
+                reason=f"max_react_steps ({self._max_react_steps}) reached",
+                stop_signal=StopSignal(
+                    reason=StopReason.MAX_ITERATIONS,
+                    message=f"Reached max ReAct steps ({self._max_react_steps})",
+                ),
             )
-            return True
 
-        return False
+        return StopDecision(should_stop=False)
 
     def get_error_policy(
         self, error: Exception, agent_state: AgentState

@@ -87,3 +87,28 @@ class MemoryUpdateAction(str, Enum):
     UPSERT = "UPSERT"
     DELETE = "DELETE"
     IGNORE = "IGNORE"
+
+
+class CommitDecision(BaseModel):
+    """Decision on whether to commit memory from a turn (v2.6.3 §41).
+
+    Returned by record_turn(). Makes the commit/skip decision explicit
+    and auditable instead of implicit.
+    """
+
+    committed: bool = False
+    reason: str = ""
+    source: str = "memory_manager"
+
+
+class RunSessionOutcome(BaseModel):
+    """Structured outcome passed to end_run_session() (v2.6.3 §41).
+
+    Describes how the run terminated so the memory manager can decide
+    cleanup behavior based on structured data, not ad-hoc conditionals.
+    """
+
+    status: str = "completed"  # "completed" | "aborted" | "cancelled"
+    termination_kind: str = "NORMAL"  # matches TerminationKind values
+    termination_reason: str = ""
+    audit_ref: str = ""

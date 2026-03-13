@@ -7,8 +7,9 @@ from typing import TYPE_CHECKING
 
 from agent_framework.infra.logger import get_logger
 from agent_framework.agent.capability_policy import apply_capability_policy
-from agent_framework.agent.loop import AgentLoop
-from agent_framework.agent.run_policy import RunPolicyResolver
+from agent_framework.agent.commit_sequencer import CommitSequencer
+from agent_framework.agent.loop import AgentLoop, AgentLoopDeps
+from agent_framework.agent.run_policy import ResolvedRunPolicyBundle, RunPolicyResolver
 from agent_framework.agent.run_state import RunStateController
 from agent_framework.models.agent import (
     AgentRunResult,
@@ -17,12 +18,14 @@ from agent_framework.models.agent import (
     EffectiveRunConfig,
     IterationResult,
     Skill,
+    StopDecision,
     StopReason,
     StopSignal,
 )
 from agent_framework.models.context import LLMRequest
 from agent_framework.models.message import Message, TokenUsage
 from agent_framework.models.session import SessionState
+from agent_framework.models.memory import RunSessionOutcome
 from agent_framework.models.subagent import Artifact
 
 # Default global run timeout (5 minutes). Prevents hangs from slow models.
@@ -38,23 +41,34 @@ logger = get_logger(__name__)
 class RunCoordinator:
     """Manages the full lifecycle of an agent run.
 
-    Responsibilities (v2.4 separation):
+    Responsibilities (v2.5.1):
     - Orchestration ONLY — sequencing the run lifecycle steps.
-    - Delegates state mutation to RunStateController.
+    - Delegates state mutation to RunStateController (sole write-port).
+    - Delegates message formatting to MessageProjector (via RunStateController).
     - Delegates config composition to RunPolicyResolver.
-    - Delegates context/memory policy interpretation to their respective modules:
-      * ContextPolicy -> ContextEngineer (exclusive consumer)
-      * MemoryPolicy  -> MemoryManager  (exclusive consumer)
+    - Delegates iteration execution to AgentLoop (via AgentLoopDeps).
 
-    Flow (section 13.9):
+    Policy interpretation uniqueness (v2.5.1 §15):
+    - ContextPolicy → ONLY ContextEngineer may interpret its fields
+    - MemoryPolicy → ONLY MemoryManager may interpret its fields
+    - CapabilityPolicy → ONLY authorization chain may interpret its fields
+    - RunCoordinator passes policies, NEVER reads their fields for branching
+
+    Exclusive responsibilities:
+    - RunCoordinator: WHEN to activate/deactivate skill (orchestration)
+    - RunStateController: HOW to write state + holds active_skill
+    - MessageProjector: HOW to format iteration results as messages
+    - Three roles must not merge.
+
+    Flow:
     1. Initialize state + SessionState
     2. memory_manager.begin_session()
-    3. Detect and activate skill
+    3. Detect and activate skill (via RunStateController)
     4. Build effective config (via RunPolicyResolver)
     5. Iteration loop:
        - Prepare LLM request
-       - Execute iteration (AgentLoop)
-       - Project to SessionState (RunStateController)
+       - Execute iteration (AgentLoop via AgentLoopDeps)
+       - Project + commit to SessionState (RunStateController + MessageProjector)
        - Check stop
     6. memory_manager.record_turn()
     7. memory_manager.end_session()
@@ -65,6 +79,7 @@ class RunCoordinator:
         self._loop = loop or AgentLoop()
         self._state_ctrl = RunStateController()
         self._policy_resolver = RunPolicyResolver()
+        self._commit_sequencer = CommitSequencer()
 
     async def run(
         self,
@@ -79,8 +94,10 @@ class RunCoordinator:
         agent_state = self._state_ctrl.initialize_state(task, run_id)
         session_state = SessionState(session_id=str(uuid.uuid4()), run_id=run_id)
         if initial_session_messages:
-            for msg in initial_session_messages:
-                session_state.append_message(msg)
+            # Use RunStateController — sole write-port for SessionState
+            self._state_ctrl.append_projected_messages(
+                session_state, initial_session_messages
+            )
 
         timeout_ms = run_timeout_ms or DEFAULT_RUN_TIMEOUT_MS
         run_start = time.monotonic()
@@ -100,15 +117,16 @@ class RunCoordinator:
         try:
             # Defensive reset: clear any stale skill state from a prior run
             # that may not have cleaned up (e.g. SIGKILL).
-            self._deactivate_skill_if_needed(deps)
+            self._state_ctrl.deactivate_skill()
+            deps.context_engineer.set_skill_context(None)
 
-            # Begin session
-            deps.memory_manager.begin_session(run_id, agent.agent_id, None)
+            # Begin memory session (v2.6.3 §41: paired with end_run_session in finally)
+            deps.memory_manager.begin_run_session(run_id, agent.agent_id, None)
             session_started = True
 
-            # Skill detection
-            self._apply_skill_if_needed(agent, deps, task, agent_state)
-            active_skill = deps.skill_router.get_active_skill()
+            # Skill detection — router detects, RunStateController holds state
+            self._detect_and_activate_skill(deps, agent_state)
+            active_skill = self._state_ctrl.active_skill
             if active_skill:
                 logger.info(
                     "run.skill_activated",
@@ -117,10 +135,11 @@ class RunCoordinator:
                     skill_name=active_skill.name,
                 )
 
-            # Build effective config (delegated to RunPolicyResolver)
-            effective_config = self._policy_resolver.build_effective_config(
-                agent, active_skill
+            # Build complete policy bundle (delegated to RunPolicyResolver — sole source)
+            policy_bundle = self._policy_resolver.resolve_run_policy_bundle(
+                agent, active_skill, agent_state
             )
+            effective_config = policy_bundle.effective_run_config
 
             await agent.on_before_run(task, agent_state)
 
@@ -167,25 +186,35 @@ class RunCoordinator:
                     task=task,
                 )
 
-                # Execute iteration — pass only minimal deps (v2.4 §5)
+                # Set status to RUNNING via RunStateController (sole write-port)
+                self._state_ctrl.set_status(agent_state, AgentStatus.RUNNING)
+
+                # Execute iteration — pass only AgentLoopDeps (v2.5.1 §13)
+                loop_deps = AgentLoopDeps(
+                    model_adapter=deps.model_adapter,
+                    tool_executor=deps.tool_executor,
+                )
                 iteration_result = await self._loop.execute_iteration(
-                    agent, deps.model_adapter, deps.tool_executor,
+                    agent, loop_deps,
                     agent_state, llm_request, effective_config,
                 )
+
+                # Apply iteration result: token counting + history append
+                # (RunStateController — sole write-port, v2.5.3 §必修1)
+                self._state_ctrl.apply_iteration_result(agent_state, iteration_result)
 
                 # Project iteration to session (RunStateController)
                 self._state_ctrl.project_iteration_to_session(
                     session_state, iteration_result
                 )
 
-                # Advance iteration counter (RunStateController)
-                self._state_ctrl.advance_iteration(agent_state, iteration_result)
-
-                # Check stop
-                if agent.should_stop(iteration_result, agent_state):
+                # Check stop (returns StopDecision, not bare bool)
+                stop_decision = agent.should_stop(iteration_result, agent_state)
+                if stop_decision.should_stop:
                     if iteration_result.model_response and iteration_result.model_response.content:
                         final_answer = iteration_result.model_response.content
-                    last_stop_signal = iteration_result.stop_signal
+                    # StopDecision may carry its own stop_signal (e.g. ReAct final answer)
+                    last_stop_signal = stop_decision.stop_signal or iteration_result.stop_signal
                     break
 
             # Post-run
@@ -223,15 +252,43 @@ class RunCoordinator:
         finally:
             if session_started:
                 try:
-                    deps.memory_manager.end_session()
+                    # v2.6.3 §41: end_run_session() always in finally
+                    outcome = RunSessionOutcome(
+                        status=(
+                            "completed" if agent_state.status == AgentStatus.FINISHED
+                            else "aborted"
+                        ),
+                        termination_kind=(
+                            last_stop_signal.termination_kind.value
+                            if last_stop_signal else "NORMAL"
+                        ),
+                        termination_reason=str(
+                            last_stop_signal.message if last_stop_signal else ""
+                        ),
+                        audit_ref=run_id,
+                    )
+                    deps.memory_manager.end_run_session(outcome)
                 except Exception as e:
                     logger.warning("run.end_session_failed", run_id=run_id, error=str(e))
-            self._deactivate_skill_if_needed(deps)
+            # Always deactivate skill — run-scoped, must not leak
+            self._state_ctrl.deactivate_skill(agent_state)
+            deps.context_engineer.set_skill_context(None)
 
-    def _deactivate_skill_if_needed(self, deps: AgentRuntimeDeps) -> None:
-        """v2.4 §9/§18: Skill deactivation is RunCoordinator's exclusive responsibility."""
-        deps.context_engineer.set_skill_context(None)
-        deps.skill_router.deactivate_current_skill()
+    def _detect_and_activate_skill(
+        self,
+        deps: AgentRuntimeDeps,
+        agent_state: AgentState,
+    ) -> None:
+        """Detect skill from task and activate it.
+
+        RunCoordinator decides WHEN to activate (orchestration).
+        RunStateController holds the active_skill state.
+        ContextEngineer receives the prompt injection.
+        """
+        skill = deps.skill_router.detect_skill(agent_state.task)
+        if skill:
+            self._state_ctrl.activate_skill(agent_state, skill)
+            deps.context_engineer.set_skill_context(skill.system_prompt_addon)
 
     @staticmethod
     def _collect_runtime_info() -> dict[str, str]:
@@ -290,18 +347,6 @@ class RunCoordinator:
         )
 
         return LLMRequest(messages=llm_messages, tools_schema=tools_schema)
-
-    def _apply_skill_if_needed(
-        self,
-        agent: BaseAgent,
-        deps: AgentRuntimeDeps,
-        task: str,
-        agent_state: AgentState,
-    ) -> None:
-        skill = deps.skill_router.detect_skill(task)
-        if skill:
-            deps.skill_router.activate_skill(skill, deps.context_engineer)
-            self._state_ctrl.set_active_skill(agent_state, skill.skill_id)
 
     def _finalize_run(
         self,

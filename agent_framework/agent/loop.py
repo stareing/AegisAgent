@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import traceback
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from agent_framework.infra.logger import get_logger
 from agent_framework.models.agent import (
     AgentState,
-    AgentStatus,
     EffectiveRunConfig,
     ErrorStrategy,
     IterationError,
@@ -30,11 +30,34 @@ _MAX_REPEATED_TOOL_CALLS = 3
 _MAX_CONSECUTIVE_ERRORS = 3
 
 
+@dataclass(frozen=True)
+class AgentLoopDeps:
+    """Minimal dependency set for AgentLoop.
+
+    v2.5.1 §13: AgentLoop MUST NOT receive full AgentRuntimeDeps.
+    Only the exact dependencies needed for a single iteration are passed.
+    This prevents AgentLoop from becoming a hidden service locator.
+
+    Prohibited additions:
+    - memory_manager (belongs to RunCoordinator)
+    - skill_router (belongs to RunCoordinator)
+    - context_engineer (belongs to RunCoordinator)
+    - delegation_executor (belongs to ToolExecutor, not exposed here)
+    """
+
+    model_adapter: ModelAdapterProtocol
+    tool_executor: ToolExecutorProtocol
+
+
 class AgentLoop:
     """Executes a single iteration of the agent loop.
 
-    v2.4 §5: AgentLoop does NOT receive full AgentRuntimeDeps.
-    It only receives the minimal deps it needs (model_adapter, tool_executor).
+    Boundary:
+    - Only performs single-iteration execution
+    - Consumes AgentLoopDeps (minimal), NOT full AgentRuntimeDeps
+    - Does NOT write SessionState (returns IterationResult for caller)
+    - Does NOT interpret ContextPolicy/MemoryPolicy
+    - Does NOT persist memory or manage skill lifecycle
 
     One iteration:
     1. Call LLM with prepared request
@@ -46,8 +69,7 @@ class AgentLoop:
     async def execute_iteration(
         self,
         agent: BaseAgent,
-        model_adapter: ModelAdapterProtocol,
-        tool_executor: ToolExecutorProtocol,
+        loop_deps: AgentLoopDeps,
         agent_state: AgentState,
         llm_request: LLMRequest,
         effective_config: EffectiveRunConfig,
@@ -65,12 +87,14 @@ class AgentLoop:
             tools_available=len(llm_request.tools_schema) if llm_request.tools_schema else 0,
         )
 
-        agent_state.status = AgentStatus.RUNNING
+        # NOTE: Status transitions (RUNNING, TOOL_CALLING) are handled by
+        # RunStateController after this method returns. AgentLoop must NOT
+        # directly mutate AgentState (v2.5.3 §必修1).
 
         # 1. Call LLM
         try:
             model_response = await self._call_llm(
-                model_adapter,
+                loop_deps.model_adapter,
                 llm_request.messages,
                 llm_request.tools_schema,
                 effective_config,
@@ -78,8 +102,8 @@ class AgentLoop:
         except Exception as e:
             return self._handle_iteration_error(agent, e, agent_state, idx)
 
-        # Update token usage
-        agent_state.total_tokens_used += model_response.usage.total_tokens
+        # Token accounting is done by RunStateController.apply_iteration_result()
+        # after this method returns. AgentLoop must NOT mutate token counters.
 
         # 2. Check stop conditions
         stop_signal = self._check_stop_conditions(agent, model_response, agent_state)
@@ -89,7 +113,7 @@ class AgentLoop:
                 iteration_index=idx,
                 stop_reason=stop_signal.reason.value,
                 stop_message=stop_signal.message or "",
-                total_tokens=agent_state.total_tokens_used,
+                iteration_tokens=model_response.usage.total_tokens,
                 response_preview=(model_response.content or "")[:120],
             )
             return IterationResult(
@@ -110,9 +134,8 @@ class AgentLoop:
                 tool_count=len(model_response.tool_calls),
                 tool_names=tool_names,
             )
-            agent_state.status = AgentStatus.TOOL_CALLING
             tool_results, tool_metas = await self._dispatch_tool_calls(
-                agent, tool_executor, model_response.tool_calls, agent_state
+                agent, loop_deps.tool_executor, model_response.tool_calls, agent_state
             )
             success_count = sum(1 for r in tool_results if r.success)
             fail_count = len(tool_results) - success_count
@@ -137,7 +160,7 @@ class AgentLoop:
         logger.info(
             "iteration.completed",
             iteration_index=idx,
-            total_tokens=agent_state.total_tokens_used,
+            iteration_tokens=model_response.usage.total_tokens,
         )
 
         return IterationResult(
@@ -360,11 +383,15 @@ class AgentLoop:
                         tool_name=tc.function_name,
                     )
                     continue
-            allowed = await agent.on_tool_call_requested(tc)
-            if allowed:
+            decision = await agent.on_tool_call_requested(tc)
+            if decision.allowed:
                 approved.append(tc)
             else:
-                logger.warning("tool.blocked", tool_name=tc.function_name)
+                logger.warning(
+                    "tool.blocked_by_hook",
+                    tool_name=tc.function_name,
+                    reason=decision.reason,
+                )
 
         if not approved and not dedup_results:
             logger.warning(

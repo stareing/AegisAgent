@@ -9,6 +9,8 @@ from agent_framework.models.subagent import (
     DelegationSummary,
     SubAgentResult,
     SubAgentSpec,
+    SubAgentStatus,
+    resolve_delegation_status,
 )
 
 if TYPE_CHECKING:
@@ -61,19 +63,19 @@ class DelegationExecutor:
                 error="SubAgentRuntime not configured",
             )
 
-        # BaseAgent hook check
+        # BaseAgent hook check (returns SpawnDecision)
         if parent_agent is not None and hasattr(parent_agent, "on_spawn_requested"):
-            allowed = await parent_agent.on_spawn_requested(spec)
-            if not allowed:
+            spawn_decision = await parent_agent.on_spawn_requested(spec)
+            if not spawn_decision.allowed:
                 logger.warning(
                     "delegation.subagent.hook_denied",
                     parent_agent_id=parent_id,
-                    reason="on_spawn_requested returned False",
+                    reason=spawn_decision.reason or "on_spawn_requested denied",
                 )
                 return SubAgentResult(
                     spawn_id=spec.spawn_id,
                     success=False,
-                    error="PERMISSION_DENIED: spawn rejected by parent agent hook",
+                    error=f"PERMISSION_DENIED: {spawn_decision.reason or 'spawn rejected by parent agent hook'}",
                 )
 
         # Doc 16.2 step 1: allow_spawn check
@@ -171,6 +173,10 @@ class DelegationExecutor:
         Error codes are unified across local subagent and remote A2A delegation
         via DelegationErrorCode enum, so the main agent loop sees a consistent
         error vocabulary regardless of delegation target.
+
+        v2.6.4 §44: Uses unified SubAgentStatus state machine. Status is
+        resolved via resolve_delegation_status() before building summary.
+        Local subagent and A2A paths use the same status enum.
         """
         summary_text = result.final_answer or result.error or ""
         # Add termination hint so the model knows to stop calling spawn_agent
@@ -185,8 +191,11 @@ class DelegationExecutor:
         if not result.success:
             error_code = DelegationExecutor._classify_error_code(result.error)
 
+        # Resolve unified status (v2.6.4 §44)
+        delegation_status = resolve_delegation_status(result, error_code)
+
         return DelegationSummary(
-            status="success" if result.success else "failed",
+            status=delegation_status.value,
             summary=summary_text,
             artifacts_digest=[a.name for a in result.artifacts],
             artifact_refs=[

@@ -22,6 +22,30 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+def _resolve_effective_tool_names(
+    all_tools: list,
+    blocked_categories: set[str],
+    whitelist: list[str] | None,
+) -> list[str]:
+    """Compute final tool name set for a sub-agent (v2.6.1 §33).
+
+    whitelist can only NARROW the visible set, never expand beyond
+    what the parent sees minus blocked categories.
+
+    Effective set = parent_visible - blocked ∩ whitelist (if specified).
+    """
+    # Step 1: remove blocked categories (always enforced)
+    safe_tools = [t for t in all_tools if t.meta.category not in blocked_categories]
+
+    if whitelist:
+        # Step 2: intersect with whitelist (can only narrow further)
+        whitelist_set = set(whitelist)
+        return [t.meta.name for t in safe_tools if t.meta.category in whitelist_set]
+
+    # No whitelist = all safe tools
+    return [t.meta.name for t in safe_tools]
+
+
 class SubAgentFactory:
     """Creates sub-agent instances with appropriate deps based on SubAgentSpec.
 
@@ -38,6 +62,16 @@ class SubAgentFactory:
     - Tracing, metrics, hooks, env config must NOT be added here.
     - If this class grows beyond ~200 lines, it needs decomposition into
       SubAgentPolicyResolver + SubAgentDependencyBuilder.
+
+    Assembly-only contract (v2.6.4 §46):
+    - Factory MUST only consume resolved configuration, not interpret policy.
+    - Factory MUST NOT re-merge EffectiveRunConfig from raw fields.
+    - Factory MUST NOT patch CapabilityPolicy or quota decisions.
+    - Factory MUST NOT expand tool visibility beyond what was resolved.
+    - When ResolvedSubAgentRuntimeBundle is available, Factory should consume
+      it directly. Current implementation extracts from SubAgentSpec for
+      backward compatibility, but the interpretation logic should migrate
+      to a SubAgentPolicyResolver in future decomposition.
     """
 
     def __init__(self, parent_deps: AgentRuntimeDeps) -> None:
@@ -55,16 +89,21 @@ class SubAgentFactory:
         from agent_framework.tools.registry import ScopedToolRegistry
 
         sub_agent_id = f"sub_{spec.spawn_id or uuid.uuid4().hex[:8]}"
-        config_overrides = spec.agent_config_override or {}
+        override = spec.config_override
 
         parent_model = parent_agent.agent_config.model_name if parent_agent else "gpt-3.5-turbo"
         default_prompt = SUB_AGENT_SYSTEM_PROMPT
 
+        # Build system prompt: base + optional addon from override
+        system_prompt = default_prompt
+        if override and override.system_prompt_addon:
+            system_prompt = f"{default_prompt}\n\n{override.system_prompt_addon}"
+
         agent = DefaultAgent(
             agent_id=sub_agent_id,
-            model_name=config_overrides.get("model_name", parent_model),
-            system_prompt=config_overrides.get("system_prompt", default_prompt),
-            temperature=config_overrides.get("temperature", 0.7),
+            model_name=(override.model_name if override and override.model_name else parent_model),
+            system_prompt=system_prompt,
+            temperature=(override.temperature if override and override.temperature is not None else 0.7),
             max_iterations=spec.max_iterations,
             # Section 14.2 & 20.2: SubAgentFactory MUST force allow_spawn_children=False
             allow_spawn_children=False,
@@ -82,18 +121,12 @@ class SubAgentFactory:
 
         all_tools = self._parent_deps.tool_registry.list_tools()
 
-        if spec.tool_category_whitelist:
-            # Explicit whitelist: only allow tools matching these categories
-            allowed_names = [
-                t.meta.name for t in all_tools
-                if t.meta.category in spec.tool_category_whitelist
-            ]
-        else:
-            # Default: allow all except blocked categories
-            allowed_names = [
-                t.meta.name for t in all_tools
-                if t.meta.category not in _BLOCKED_CATEGORIES
-            ]
+        # v2.6.1 §33: tool_category_whitelist can only NARROW, never expand.
+        # Final set = parent-visible ∩ NOT blocked ∩ whitelist (if specified).
+        # Blocked categories are ALWAYS filtered regardless of whitelist.
+        allowed_names = _resolve_effective_tool_names(
+            all_tools, _BLOCKED_CATEGORIES, spec.tool_category_whitelist
+        )
 
         tool_registry = ScopedToolRegistry(
             source=self._parent_deps.tool_registry,

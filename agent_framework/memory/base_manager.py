@@ -4,10 +4,12 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
 from agent_framework.models.memory import (
+    CommitDecision,
     MemoryCandidate,
     MemoryRecord,
     MemorySourceContext,
     MemoryUpdateAction,
+    RunSessionOutcome,
 )
 
 if TYPE_CHECKING:
@@ -17,6 +19,13 @@ if TYPE_CHECKING:
 
 class BaseMemoryManager(ABC):
     """Base class for memory management.
+
+    Session lifecycle contract (v2.6.3 §41):
+    - begin_run_session() and end_run_session() MUST be paired.
+    - end_run_session() MUST execute in finally (even after errors).
+    - record_turn() commit is governed by CommitDecision.
+    - record_turn() failure MUST NOT block end_run_session().
+    - Failed runs decide memory commit via MemoryPolicy + CommitDecision.
 
     Responsibilities:
     - Decide what is worth remembering
@@ -37,13 +46,49 @@ class BaseMemoryManager(ABC):
         self._run_id: str | None = None
         self._agent_id: str | None = None
         self._user_id: str | None = None
+        self._session_active = False
+
+    # ------------------------------------------------------------------
+    # Session lifecycle (v2.6.3 §41)
+    # ------------------------------------------------------------------
+
+    def begin_run_session(
+        self, run_id: str, agent_id: str, user_id: str | None
+    ) -> None:
+        """Start a memory session for a run. Must be paired with end_run_session().
+
+        Replaces begin_session(). The "run_session" naming clarifies this
+        is a run-scoped session, not an external UI session.
+        """
+        self._run_id = run_id
+        self._agent_id = agent_id
+        self._user_id = user_id
+        self._session_active = True
 
     def begin_session(
         self, run_id: str, agent_id: str, user_id: str | None
     ) -> None:
-        self._run_id = run_id
-        self._agent_id = agent_id
-        self._user_id = user_id
+        """Backward-compatible alias for begin_run_session()."""
+        self.begin_run_session(run_id, agent_id, user_id)
+
+    def end_run_session(
+        self, outcome: RunSessionOutcome | None = None
+    ) -> None:
+        """End the memory session. Must always execute (typically in finally).
+
+        Replaces end_session(). Accepts structured outcome to decide
+        cleanup behavior based on termination kind.
+        """
+        self._run_id = None
+        self._session_active = False
+
+    def end_session(self) -> None:
+        """Backward-compatible alias for end_run_session()."""
+        self.end_run_session()
+
+    # ------------------------------------------------------------------
+    # Abstract methods
+    # ------------------------------------------------------------------
 
     @abstractmethod
     def select_for_context(
@@ -58,8 +103,12 @@ class BaseMemoryManager(ABC):
         user_input: str,
         final_answer: str | None,
         iteration_results: list[IterationResult],
-    ) -> None:
-        """Process a completed turn for potential memory extraction."""
+    ) -> CommitDecision:
+        """Process a completed turn for potential memory extraction.
+
+        Returns CommitDecision indicating whether memory was committed.
+        Failure MUST NOT block run finalization or end_run_session().
+        """
         ...
 
     @abstractmethod
@@ -197,9 +246,6 @@ class BaseMemoryManager(ABC):
 
     def set_enabled(self, enabled: bool) -> None:
         self._enabled = enabled
-
-    def end_session(self) -> None:
-        self._run_id = None
 
     @staticmethod
     def _normalize(text: str) -> str:

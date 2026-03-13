@@ -1,6 +1,6 @@
 """Entry point: AgentFramework class wiring all components together.
 
-Framework vs Integration Layer boundary:
+Framework vs Integration Layer boundary (v2.5.2 §24):
 
 FRAMEWORK CORE (this package) is responsible for:
 - Agent runtime (loop, coordinator, state)
@@ -17,9 +17,17 @@ INTEGRATION LAYER (external consumers) is responsible for:
 - Memory admin tool exposure strategy
 - Deployment-specific confirmation policies
 
-This boundary ensures the framework core is not coupled to any specific
-deployment model (CLI, REST API, SDK, REPL). Product-level behaviours
-(auth, admin UI, streaming) belong in the integration layer.
+Bypass prohibition (v2.5.2 §24):
+- Integration code MUST call AgentFramework public methods (run, register_tool, etc.)
+- Integration code MUST NOT directly access internal components:
+  - coordinator.run() → use framework.run()
+  - tool_executor.execute() → use framework.register_tool() + framework.run()
+  - memory_manager.remember() → use framework.list_memories() etc.
+  - context_engineer.prepare_context_for_llm() → internal only
+- Internal deps (self._deps, self._coordinator) are implementation details.
+  Their types and wiring may change without notice.
+- This boundary ensures the framework core is not coupled to any specific
+  deployment model (CLI, REST API, SDK, REPL).
 """
 
 from __future__ import annotations
@@ -74,6 +82,10 @@ class AgentFramework:
         self._mcp_manager: Any = None
         self._a2a_adapter: Any = None
         self._setup_done = False
+        # Integration-layer active skill tracking for interactive UIs.
+        # This is NOT the run-scoped active skill — it's a UI convenience
+        # that the interactive terminal uses between runs.
+        self._interactive_active_skill: Any = None
 
     def setup(
         self,
@@ -356,10 +368,25 @@ class AgentFramework:
         return False
 
     def get_active_skill(self) -> Skill | None:
-        """Return the currently active skill, if any."""
-        if not self._setup_done:
-            return None
-        return self._deps.skill_router.get_active_skill()
+        """Return the interactive-mode active skill, if any.
+
+        This is an INTEGRATION LAYER convenience for interactive UIs.
+        During an actual run, active skill is managed as a run-scoped
+        local in RunCoordinator, not here.
+        """
+        return self._interactive_active_skill
+
+    def activate_skill(self, skill: Skill) -> None:
+        """Activate a skill in interactive mode (UI convenience)."""
+        self._interactive_active_skill = skill
+        if self._deps:
+            self._deps.context_engineer.set_skill_context(skill.system_prompt_addon)
+
+    def deactivate_skill(self) -> None:
+        """Deactivate the current interactive skill."""
+        self._interactive_active_skill = None
+        if self._deps:
+            self._deps.context_engineer.set_skill_context(None)
 
     # ---------------------------------------------------------------
     # Tool public API

@@ -9,11 +9,22 @@ if TYPE_CHECKING:
 
 
 class SkillRouter:
-    """Routes user input to skills and manages skill activation."""
+    """Skill registry and keyword-based detection.
+
+    Ownership boundary:
+    - SkillRouter owns the skill CATALOG (registration + detection).
+    - SkillRouter does NOT own active skill state — that belongs to
+      the run-scoped AgentState (managed by RunCoordinator).
+    - This separation ensures multiple concurrent runs cannot interfere
+      with each other's active skill.
+
+    Prohibited:
+    - Do NOT store _active_skill or any per-run mutable state here.
+    - Do NOT store references to ContextEngineer or other run-scoped objects.
+    """
 
     def __init__(self) -> None:
         self._skills: dict[str, Skill] = {}
-        self._active_skill: Skill | None = None
 
     def register_skill(self, skill: Skill) -> None:
         self._skills[skill.skill_id] = skill
@@ -27,18 +38,9 @@ class SkillRouter:
                     return skill
         return None
 
-    def activate_skill(
-        self, skill: Skill, context_engineer: ContextEngineerProtocol
-    ) -> None:
-        """Activate a skill, injecting its prompt addon."""
-        self._active_skill = skill
-        context_engineer.set_skill_context(skill.system_prompt_addon)
-
-    def deactivate_current_skill(self) -> None:
-        self._active_skill = None
-
-    def get_active_skill(self) -> Skill | None:
-        return self._active_skill
+    def get_skill(self, skill_id: str) -> Skill | None:
+        """Look up a skill by ID."""
+        return self._skills.get(skill_id)
 
     def list_skills(self) -> list[Skill]:
         return list(self._skills.values())

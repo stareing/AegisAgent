@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 from agent_framework.memory.base_manager import BaseMemoryManager
 from agent_framework.models.memory import (
+    CommitDecision,
     MemoryCandidateSource,
     MemoryCandidate,
     MemoryConfidence,
@@ -110,15 +111,22 @@ class DefaultMemoryManager(BaseMemoryManager):
         user_input: str,
         final_answer: str | None,
         iteration_results: list[IterationResult],
-    ) -> None:
+    ) -> CommitDecision:
         """Sole automatic extraction entry point. One turn = one extraction pass.
 
         Low-confidence inferred candidates are filtered out to prevent
         "memory hallucinations" from speculative model reasoning.
+
+        Returns CommitDecision (v2.6.3 §41).
         """
         if not self._enabled or not self._auto_extract:
-            return
+            return CommitDecision(
+                committed=False,
+                reason="Memory extraction disabled",
+                source="DefaultMemoryManager",
+            )
         candidates = self.extract_candidates(user_input, final_answer, iteration_results)
+        committed_count = 0
         for c in candidates:
             # Filter out low-confidence inferred candidates
             if (
@@ -130,7 +138,14 @@ class DefaultMemoryManager(BaseMemoryManager):
                 source_type="agent",
                 source_run_id=self._run_id or "",
             )
-            self.remember(c, source_context=source_ctx)
+            result = self.remember(c, source_context=source_ctx)
+            if result is not None:
+                committed_count += 1
+        return CommitDecision(
+            committed=committed_count > 0,
+            reason=f"Committed {committed_count} memories from {len(candidates)} candidates",
+            source="DefaultMemoryManager",
+        )
 
     def extract_candidates(
         self,

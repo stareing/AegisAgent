@@ -538,8 +538,7 @@ async def demo_11_skill(model, deps):
     # Show that skill was detected
     print(f"\n  --- Skill 状态 ---")
     print(f"  已注册技能: {[s.skill_id for s in deps.skill_router.list_skills()]}")
-    print(f"  当前活跃技能: {deps.skill_router.get_active_skill()}")
-    print(f"  (技能在 run 结束后自动反激活)")
+    print(f"  (活跃技能为 run-scoped，run 结束后自动清除)")
 
 
 async def demo_8_context_stats(model, deps):

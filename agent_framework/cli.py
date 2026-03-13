@@ -77,7 +77,8 @@ async def _repl(framework: AgentFramework) -> None:
             skills = framework.list_skills()
             for s in skills:
                 kw = ", ".join(s.trigger_keywords) if s.trigger_keywords else "(none)"
-                active = " [ACTIVE]" if framework.get_active_skill() and framework.get_active_skill().skill_id == s.skill_id else ""
+                active_skill = framework.get_active_skill()
+                active = " [ACTIVE]" if active_skill and active_skill.skill_id == s.skill_id else ""
                 print(f"  - {s.skill_id}: {s.name or s.skill_id}{active}")
                 print(f"    Keywords: {kw}")
                 if s.description:

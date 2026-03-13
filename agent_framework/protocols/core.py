@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, AsyncIterator, Protocol, runtime_checkable
 
-from agent_framework.models.memory import MemoryCandidate, MemoryKind, MemoryRecord, MemorySourceContext
+from agent_framework.models.memory import (
+    CommitDecision,
+    MemoryCandidate,
+    MemoryKind,
+    MemoryRecord,
+    MemorySourceContext,
+    RunSessionOutcome,
+)
 from agent_framework.models.message import Message, ModelResponse, ToolCallRequest
 from agent_framework.models.tool import ToolEntry, ToolExecutionMeta, ToolResult
 
@@ -111,9 +118,25 @@ class MemoryStoreProtocol(Protocol):
 # ---------------------------------------------------------------------------
 @runtime_checkable
 class MemoryManagerProtocol(Protocol):
+    """Memory manager protocol.
+
+    Session lifecycle (v2.6.3 §41):
+    - begin_run_session() and end_run_session() MUST be paired
+    - end_run_session() MUST execute in finally
+    - record_turn() returns CommitDecision
+    - begin_session/end_session retained as backward-compatible aliases
+    """
+
+    def begin_run_session(
+        self, run_id: str, agent_id: str, user_id: str | None
+    ) -> None: ...
+    def end_run_session(
+        self, outcome: RunSessionOutcome | None = None
+    ) -> None: ...
     def begin_session(
         self, run_id: str, agent_id: str, user_id: str | None
     ) -> None: ...
+    def end_session(self) -> None: ...
     def select_for_context(
         self, task: str, agent_state: AgentState
     ) -> list[MemoryRecord]: ...
@@ -122,7 +145,7 @@ class MemoryManagerProtocol(Protocol):
         user_input: str,
         final_answer: str | None,
         iteration_results: list[IterationResult],
-    ) -> None: ...
+    ) -> CommitDecision: ...
     def remember(
         self,
         candidate: MemoryCandidate,
@@ -138,7 +161,6 @@ class MemoryManagerProtocol(Protocol):
     def deactivate(self, memory_id: str) -> None: ...
     def clear_memories(self, agent_id: str, user_id: str | None) -> int: ...
     def set_enabled(self, enabled: bool) -> None: ...
-    def end_session(self) -> None: ...
 
 
 # ---------------------------------------------------------------------------
@@ -193,11 +215,13 @@ class ConfirmationHandlerProtocol(Protocol):
 # ---------------------------------------------------------------------------
 @runtime_checkable
 class SkillRouterProtocol(Protocol):
+    """Skill catalog + detection. Does NOT hold per-run activation state.
+
+    Active skill state belongs to run-scoped locals in RunCoordinator,
+    not in this shared registry.
+    """
+
     def register_skill(self, skill: Skill) -> None: ...
     def detect_skill(self, user_input: str) -> Skill | None: ...
-    def activate_skill(
-        self, skill: Skill, context_engineer: ContextEngineerProtocol
-    ) -> None: ...
-    def deactivate_current_skill(self) -> None: ...
-    def get_active_skill(self) -> Skill | None: ...
+    def get_skill(self, skill_id: str) -> Skill | None: ...
     def list_skills(self) -> list[Skill]: ...

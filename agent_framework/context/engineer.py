@@ -18,6 +18,20 @@ class ContextEngineer:
     """Orchestrates context preparation for LLM calls.
 
     Coordinates ContextSourceProvider, ContextBuilder, and ContextCompressor.
+
+    Read-only consumer contract:
+    - ContextEngineer MUST NOT modify any input state:
+      * SessionState — no appending, clearing, or removing messages
+      * MemoryRecord list — no activating, deactivating, or deleting
+      * AgentState — no modifying iteration_count, status, or any field
+    - Compression results only affect the message list sent to the LLM
+      in THIS call. They NEVER write back to SessionState or modify
+      iteration_history.
+    - The only mutable state is internal bookkeeping (_skill_prompt,
+      _last_stats) which does not leak to callers.
+    - Violation of this contract turns the context layer from a pure
+      transformer into a read-write layer, causing state corruption
+      in concurrent or re-entrant scenarios.
     """
 
     def __init__(

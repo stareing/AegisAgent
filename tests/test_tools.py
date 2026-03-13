@@ -630,11 +630,14 @@ class TestDelegationExecutor:
 
     @pytest.mark.asyncio
     async def test_parent_hook_denies_spawn(self):
+        from agent_framework.models.agent import SpawnDecision
         runtime = MagicMock()
         de = DelegationExecutor(sub_agent_runtime=runtime)
 
         parent = MagicMock()
-        parent.on_spawn_requested = AsyncMock(return_value=False)
+        parent.on_spawn_requested = AsyncMock(
+            return_value=SpawnDecision(allowed=False, reason="test deny")
+        )
 
         spec = SubAgentSpec(task_input="test")
         result = await de.delegate_to_subagent(spec, parent)
@@ -643,11 +646,14 @@ class TestDelegationExecutor:
 
     @pytest.mark.asyncio
     async def test_allow_spawn_children_false_denies(self):
+        from agent_framework.models.agent import SpawnDecision
         runtime = MagicMock()
         de = DelegationExecutor(sub_agent_runtime=runtime)
 
         parent = MagicMock()
-        parent.on_spawn_requested = AsyncMock(return_value=True)
+        parent.on_spawn_requested = AsyncMock(
+            return_value=SpawnDecision(allowed=True)
+        )
         parent.agent_config = MagicMock()
         parent.agent_config.allow_spawn_children = False
 
@@ -658,13 +664,16 @@ class TestDelegationExecutor:
 
     @pytest.mark.asyncio
     async def test_successful_delegation(self):
+        from agent_framework.models.agent import SpawnDecision
         expected = SubAgentResult(spawn_id="s1", success=True, final_answer="done")
         runtime = MagicMock()
         runtime.spawn = AsyncMock(return_value=expected)
 
         de = DelegationExecutor(sub_agent_runtime=runtime)
         parent = MagicMock()
-        parent.on_spawn_requested = AsyncMock(return_value=True)
+        parent.on_spawn_requested = AsyncMock(
+            return_value=SpawnDecision(allowed=True)
+        )
         parent.agent_config = MagicMock()
         parent.agent_config.allow_spawn_children = True
 
@@ -683,7 +692,7 @@ class TestDelegationExecutor:
     def test_summarize_result_success(self):
         result = SubAgentResult(spawn_id="s1", success=True, final_answer="answer")
         summary = DelegationExecutor.summarize_result(result)
-        assert summary.status == "success"
+        assert summary.status == "COMPLETED"
         assert "answer" in summary.summary
         assert "Do NOT call spawn_agent again" in summary.summary
         assert summary.error_code is None
@@ -691,7 +700,7 @@ class TestDelegationExecutor:
     def test_summarize_result_failure(self):
         result = SubAgentResult(spawn_id="s1", success=False, error="something went wrong")
         summary = DelegationExecutor.summarize_result(result)
-        assert summary.status == "failed"
+        assert summary.status == "FAILED"
         assert summary.summary == "something went wrong"
         assert summary.error_code == "DELEGATION_FAILED"
 
