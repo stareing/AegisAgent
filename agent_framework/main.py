@@ -726,6 +726,28 @@ async def _cmd_demo_all(fw, mock, state, args):
 # Result printer
 # ---------------------------------------------------------------------------
 
+def _render_tool_output(output: Any, tool_name: str) -> str:
+    """Render tool output for human-readable display."""
+    if isinstance(output, dict):
+        # Special handling for run_command: show stdout/stderr inline
+        if tool_name == "run_command" and "stdout" in output:
+            parts = []
+            stdout = output.get("stdout", "").strip()
+            stderr = output.get("stderr", "").strip()
+            rc = output.get("return_code", 0)
+            if stdout:
+                parts.append(stdout)
+            if stderr:
+                parts.append(f"(stderr) {stderr}")
+            if not parts:
+                parts.append(f"(exit {rc}, no output)")
+            return "\n".join(parts)
+        return json.dumps(output, ensure_ascii=False, indent=2)
+    if isinstance(output, list):
+        return json.dumps(output, ensure_ascii=False, indent=2)
+    return str(output) if output else "(no output)"
+
+
 def _print_result(result: Any) -> None:
     if getattr(result, "iteration_history", None):
         print(f"\n  {_bold('执行轨迹:')}")
@@ -744,16 +766,14 @@ def _print_result(result: Any) -> None:
                 print(f"    {_magenta(f'工具结果[{tr.tool_name}]')}:")
                 if tr.success:
                     out = tr.output
-                    if isinstance(out, (dict, list)):
-                        rendered = json.dumps(out, ensure_ascii=False, indent=2)
-                    else:
-                        rendered = str(out)
+                    rendered = _render_tool_output(out, tr.tool_name)
                     if len(rendered) > 1000:
                         rendered = rendered[:1000] + "\n... [truncated]"
                     for line in rendered.splitlines():
                         print(f"      {line}")
                 else:
-                    print(f"      {_red(str(tr.error))}")
+                    err_msg = str(tr.error) if tr.error else str(tr.output or "未知错误")
+                    print(f"      {_red(err_msg)}")
 
     if result.success:
         print(f"\n  {_green('Agent 回复:')}")
