@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 from agent_framework.infra.logger import get_logger
 from agent_framework.memory.sqlite_store import SQLiteMemoryStore
+from agent_framework.models.memory import MemoryRecord
 from agent_framework.models.subagent import MemoryScope, SubAgentSpec
 from agent_framework.subagent.memory_scope import (
     InheritReadMemoryManager,
@@ -41,6 +42,7 @@ class SubAgentFactory:
         """Create a sub-agent and its runtime deps from a SubAgentSpec."""
         from agent_framework.agent.default_agent import DefaultAgent
         from agent_framework.agent.runtime_deps import AgentRuntimeDeps
+        from agent_framework.tools.executor import ToolExecutor
         from agent_framework.tools.registry import ScopedToolRegistry
 
         sub_agent_id = f"sub_{spec.spawn_id or uuid.uuid4().hex[:8]}"
@@ -88,10 +90,21 @@ class SubAgentFactory:
             whitelist=allowed_names,
         )
 
+        # Build a scoped executor bound to this sub-agent and its scoped registry.
+        parent_executor = self._parent_deps.tool_executor
+        scoped_tool_executor = ToolExecutor(
+            registry=tool_registry,
+            confirmation_handler=self._parent_deps.confirmation_handler,
+            delegation_executor=self._parent_deps.delegation_executor,
+            mcp_client_manager=getattr(parent_executor, "_mcp", None),
+            parent_agent_getter=lambda: agent,
+            max_concurrent=getattr(parent_executor, "_max_concurrent", 5),
+        )
+
         # Assemble deps
         deps = AgentRuntimeDeps(
             tool_registry=tool_registry,
-            tool_executor=self._parent_deps.tool_executor,
+            tool_executor=scoped_tool_executor,
             memory_manager=memory_manager,
             context_engineer=self._parent_deps.context_engineer,
             model_adapter=self._parent_deps.model_adapter,
@@ -120,18 +133,37 @@ class SubAgentFactory:
         parent_mm = self._parent_deps.memory_manager
 
         if scope == MemoryScope.SHARED_WRITE:
-            return SharedWriteMemoryManager(parent_manager=parent_mm)
+            # v2.4 §10: capture frozen snapshot of parent memories at spawn time
+            snapshot = self._capture_parent_snapshot(parent_mm, parent_agent)
+            return SharedWriteMemoryManager(
+                parent_manager=parent_mm,
+                parent_snapshot=snapshot,
+            )
 
         if scope == MemoryScope.INHERIT_READ:
             # Create a local store for the sub-agent's own writes
             local_store = SQLiteMemoryStore(db_path=":memory:")
+            # v2.4 §10: capture frozen snapshot of parent memories at spawn time
+            snapshot = self._capture_parent_snapshot(parent_mm, parent_agent)
             mgr = InheritReadMemoryManager(
                 store=local_store,
-                parent_manager=parent_mm,
-                parent_agent_id=parent_agent.agent_id if parent_agent else "",
+                parent_snapshot=snapshot,
             )
             return mgr
 
         # ISOLATED (default)
         local_store = SQLiteMemoryStore(db_path=":memory:")
         return IsolatedMemoryManager(store=local_store)
+
+    def _capture_parent_snapshot(
+        self,
+        parent_mm: MemoryManagerProtocol,
+        parent_agent: BaseAgent | None,
+    ) -> list[MemoryRecord]:
+        """v2.4 §10: Capture a frozen snapshot of parent memories at spawn time.
+
+        Sub-agents read this snapshot throughout their run and do not see
+        any subsequent changes to parent memory.
+        """
+        agent_id = parent_agent.agent_id if parent_agent else ""
+        return parent_mm.list_memories(agent_id, None)

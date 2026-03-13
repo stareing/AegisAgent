@@ -44,6 +44,16 @@ class DelegationExecutor:
                 error="SubAgentRuntime not configured",
             )
 
+        # BaseAgent hook check
+        if parent_agent is not None and hasattr(parent_agent, "on_spawn_requested"):
+            allowed = await parent_agent.on_spawn_requested(spec)
+            if not allowed:
+                return SubAgentResult(
+                    spawn_id=spec.spawn_id,
+                    success=False,
+                    error="PERMISSION_DENIED: spawn rejected by parent agent hook",
+                )
+
         # Doc 16.2 step 1: allow_spawn check
         if parent_agent is not None:
             config = getattr(parent_agent, "agent_config", None)

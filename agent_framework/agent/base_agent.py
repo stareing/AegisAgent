@@ -6,8 +6,10 @@ from agent_framework.models.agent import (
     AgentConfig,
     AgentState,
     CapabilityPolicy,
+    ContextPolicy,
     ErrorStrategy,
     IterationResult,
+    MemoryPolicy,
     StopReason,
     StopSignal,
 )
@@ -16,22 +18,6 @@ from agent_framework.models.tool import ToolResult
 
 if TYPE_CHECKING:
     from agent_framework.models.subagent import SubAgentSpec
-
-
-class ContextPolicy:
-    """Policy for context construction."""
-
-    compress_threshold_ratio: float = 0.85
-    max_context_tokens: int = 8192
-    reserve_for_output: int = 1024
-
-
-class MemoryPolicy:
-    """Policy for memory behavior."""
-
-    enabled: bool = True
-    auto_extract: bool = True
-    max_in_context: int = 10
 
 
 class BaseAgent:

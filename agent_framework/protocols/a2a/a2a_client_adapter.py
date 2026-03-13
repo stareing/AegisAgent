@@ -127,6 +127,25 @@ class A2AClientAdapter:
                 error=f"A2A delegation failed: {e}",
             )
 
+    async def delegate_task_to_agent(
+        self,
+        agent_url: str,
+        task_input: str,
+        skill_id: str | None = None,
+    ) -> SubAgentResult:
+        """Compatibility method: delegate by agent URL."""
+        alias = self._resolve_alias(agent_url)
+        if alias is None:
+            await self.discover_agent(agent_url)
+            alias = self._resolve_alias(agent_url)
+        if alias is None:
+            return SubAgentResult(
+                spawn_id="",
+                success=False,
+                error=f"A2A agent at {agent_url} not discoverable",
+            )
+        return await self.delegate_task(alias, task_input, skill_id)
+
     def sync_agents_to_catalog(self, catalog: Any) -> int:
         """Register discovered A2A agent skills as tools in the catalog."""
         count = 0
@@ -160,16 +179,24 @@ class A2AClientAdapter:
 
     async def stream_task_to_agent(
         self,
-        alias: str,
+        agent_url: str,
         task_input: str,
     ) -> AsyncIterator[dict]:
         """Stream a task to a remote A2A agent, yielding events as they arrive.
 
         Yields dicts with keys: type, data.
         """
-        client = self._clients.get(alias)
+        alias = self._resolve_alias(agent_url)
+        if alias is None:
+            try:
+                await self.discover_agent(agent_url)
+            except Exception:
+                pass
+            alias = self._resolve_alias(agent_url)
+
+        client = self._clients.get(alias or "")
         if client is None:
-            yield {"type": "error", "data": f"A2A agent '{alias}' not discovered"}
+            yield {"type": "error", "data": f"A2A agent '{agent_url}' not discovered"}
             return
 
         try:
@@ -271,4 +298,10 @@ class A2AClientAdapter:
             if parts_text:
                 return "\n".join(parts_text)
 
+        return None
+
+    def _resolve_alias(self, agent_url: str) -> str | None:
+        for alias, info in self._known_agents.items():
+            if info.get("url") == agent_url:
+                return alias
         return None

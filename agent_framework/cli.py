@@ -39,7 +39,7 @@ async def _repl(framework: AgentFramework) -> None:
         if user_input.lower() in ("exit", "quit", "q"):
             break
         if user_input.lower() == "help":
-            print("Commands: exit/quit, help, tools, memories")
+            print("Commands: exit/quit, help, tools, memories, skills")
             continue
         if user_input.lower() == "tools":
             tools = framework._registry.list_tools() if framework._registry else []
@@ -47,6 +47,18 @@ async def _repl(framework: AgentFramework) -> None:
                 print(f"  - {t.meta.name} ({t.meta.source}): {t.meta.description[:60]}")
             if not tools:
                 print("  (no tools registered)")
+            continue
+        if user_input.lower() == "skills":
+            skills = framework.list_skills()
+            for s in skills:
+                kw = ", ".join(s.trigger_keywords) if s.trigger_keywords else "(none)"
+                active = " [ACTIVE]" if framework.get_active_skill() and framework.get_active_skill().skill_id == s.skill_id else ""
+                print(f"  - {s.skill_id}: {s.name or s.skill_id}{active}")
+                print(f"    Keywords: {kw}")
+                if s.description:
+                    print(f"    Description: {s.description[:80]}")
+            if not skills:
+                print("  (no skills registered)")
             continue
         if user_input.lower() == "memories":
             mm = framework._deps.memory_manager if framework._deps else None

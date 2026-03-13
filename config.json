@@ -1,0 +1,53 @@
+{
+  "model": {
+    "adapter_type": "litellm",
+    "default_model_name": "gpt-3.5-turbo",
+    "temperature": 0.7,
+    "max_output_tokens": 4096,
+    "api_key": null,
+    "api_base": null,
+    "timeout_ms": 30000,
+    "max_retries": 3
+  },
+  "context": {
+    "max_context_tokens": 8192,
+    "reserve_for_output": 1024,
+    "compress_threshold_ratio": 0.85,
+    "default_compression_strategy": "SLIDING_WINDOW",
+    "spawn_seed_ratio": 0.3
+  },
+  "memory": {
+    "db_path": "data/memories.db",
+    "enable_saved_memory": true,
+    "auto_extract_memory": true,
+    "max_memories_in_context": 10,
+    "max_memory_items_per_user": 200,
+    "allow_user_memory_namespace": true,
+    "allow_memory_management_api": true
+  },
+  "tools": {
+    "confirmation_handler_type": "cli",
+    "max_concurrent_tool_calls": 5,
+    "allow_parallel_tool_calls": true
+  },
+  "subagent": {
+    "max_sub_agents_per_run": 5,
+    "max_concurrent_sub_agents": 3,
+    "per_sub_agent_max_tokens": 4096,
+    "default_deadline_ms": 60000,
+    "default_max_iterations": 10,
+    "allow_recursive_spawn": false
+  },
+  "mcp": {
+    "config_file": null,
+    "servers": []
+  },
+  "a2a": {
+    "known_agents": []
+  },
+  "logging": {
+    "log_dir": "logs",
+    "json_output": true,
+    "level": "INFO"
+  }
+}

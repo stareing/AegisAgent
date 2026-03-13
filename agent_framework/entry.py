@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from agent_framework.adapters.model.litellm_adapter import LiteLLMAdapter
+from agent_framework.adapters.model.base_adapter import BaseModelAdapter
 from agent_framework.agent.coordinator import RunCoordinator
 from agent_framework.agent.default_agent import DefaultAgent
 from agent_framework.agent.runtime_deps import AgentRuntimeDeps
@@ -17,7 +17,7 @@ from agent_framework.infra.config import FrameworkConfig, load_config
 from agent_framework.infra.logger import configure_logging, get_logger
 from agent_framework.memory.default_manager import DefaultMemoryManager
 from agent_framework.memory.sqlite_store import SQLiteMemoryStore
-from agent_framework.models.agent import AgentRunResult
+from agent_framework.models.agent import AgentRunResult, Skill
 from agent_framework.tools.catalog import GlobalToolCatalog
 from agent_framework.tools.confirmation import AutoApproveConfirmationHandler, CLIConfirmationHandler
 from agent_framework.tools.delegation import DelegationExecutor
@@ -57,10 +57,7 @@ class AgentFramework:
         auto_approve_tools: bool = False,
     ) -> None:
         """Initialize all components and wire dependencies."""
-        configure_logging(
-            json_output=self.config.logging.json_output,
-            level=self.config.logging.level,
-        )
+        configure_logging(self.config.logging)
 
         # Memory
         memory_store = SQLiteMemoryStore(db_path=self.config.memory.db_path)
@@ -71,11 +68,11 @@ class AgentFramework:
         )
 
         # Model adapter
-        model_adapter = LiteLLMAdapter(
-            model_name=self.config.model.default_model_name,
-            timeout_ms=self.config.model.timeout_ms,
-            max_retries=self.config.model.max_retries,
-        )
+        model_adapter = self._create_model_adapter()
+
+        # Register built-in tools (filesystem, system, spawn_agent)
+        from agent_framework.tools.builtin import register_all_builtins
+        register_all_builtins(self._catalog)
 
         # Tool registry
         self._registry = ToolRegistry()
@@ -97,6 +94,7 @@ class AgentFramework:
             confirmation_handler=confirmation,
             delegation_executor=delegation_executor,
             mcp_client_manager=self._mcp_manager,
+            parent_agent_getter=lambda: self._agent,
             max_concurrent=self.config.tools.max_concurrent_tool_calls,
         )
 
@@ -113,8 +111,19 @@ class AgentFramework:
             compressor=compressor,
         )
 
-        # Skill router
+        # Skill router — load declarative skills from config
         skill_router = SkillRouter()
+        for skill_def in self.config.skills.definitions:
+            from agent_framework.models.agent import Skill
+            skill_router.register_skill(Skill(
+                skill_id=skill_def.skill_id,
+                name=skill_def.name,
+                description=skill_def.description,
+                trigger_keywords=skill_def.trigger_keywords,
+                system_prompt_addon=skill_def.system_prompt_addon,
+                model_override=skill_def.model_override,
+                temperature_override=skill_def.temperature_override,
+            ))
 
         # Assemble deps
         self._deps = AgentRuntimeDeps(
@@ -158,6 +167,56 @@ class AgentFramework:
             tools_count=len(self._registry.list_tools()),
         )
 
+    def _create_model_adapter(self) -> BaseModelAdapter:
+        """Create model adapter based on config.model.adapter_type.
+
+        SDK imports are lazy — only the selected adapter's SDK is loaded.
+        """
+        cfg = self.config.model
+        common = {
+            "model_name": cfg.default_model_name,
+            "timeout_ms": cfg.timeout_ms,
+            "max_retries": cfg.max_retries,
+        }
+        if cfg.api_key:
+            common["api_key"] = cfg.api_key
+        if cfg.api_base:
+            common["api_base"] = cfg.api_base
+
+        match cfg.adapter_type:
+            case "openai":
+                from agent_framework.adapters.model.openai_adapter import OpenAIAdapter
+                return OpenAIAdapter(**common)
+            case "anthropic":
+                from agent_framework.adapters.model.anthropic_adapter import AnthropicAdapter
+                return AnthropicAdapter(**common)
+            case "google":
+                from agent_framework.adapters.model.google_adapter import GoogleAdapter
+                common.pop("api_base", None)  # google-genai doesn't use api_base
+                return GoogleAdapter(**common)
+            case "deepseek":
+                from agent_framework.adapters.model.openai_compatible_adapter import DeepSeekAdapter
+                return DeepSeekAdapter(**common)
+            case "doubao":
+                from agent_framework.adapters.model.openai_compatible_adapter import DoubaoAdapter
+                return DoubaoAdapter(**common)
+            case "qwen":
+                from agent_framework.adapters.model.openai_compatible_adapter import QwenAdapter
+                return QwenAdapter(**common)
+            case "zhipu":
+                from agent_framework.adapters.model.openai_compatible_adapter import ZhipuAdapter
+                return ZhipuAdapter(**common)
+            case "minimax":
+                from agent_framework.adapters.model.openai_compatible_adapter import MiniMaxAdapter
+                return MiniMaxAdapter(**common)
+            case "custom":
+                from agent_framework.adapters.model.openai_compatible_adapter import CustomAdapter
+                return CustomAdapter(**common)
+            case _:
+                from agent_framework.adapters.model.litellm_adapter import LiteLLMAdapter
+                common.pop("api_key", None)  # litellm reads API keys from env
+                return LiteLLMAdapter(**common)
+
     async def setup_mcp(self) -> None:
         """Connect to configured MCP servers and sync tools."""
         from agent_framework.models.mcp import MCPServerConfig
@@ -186,6 +245,8 @@ class AgentFramework:
         from agent_framework.protocols.a2a.a2a_client_adapter import A2AClientAdapter
 
         self._a2a_adapter = A2AClientAdapter()
+        if self._deps and self._deps.delegation_executor:
+            self._deps.delegation_executor.set_a2a_adapter(self._a2a_adapter)
 
         for agent_dict in self.config.a2a.known_agents:
             url = agent_dict.get("url", "")
@@ -199,6 +260,86 @@ class AgentFramework:
                 for entry in self._catalog.list_all():
                     if entry.meta.source == "a2a" and not self._registry.has_tool(entry.meta.name):
                         self._registry.register(entry)
+
+    def list_memories(self, user_id: str | None = None) -> list:
+        """List saved memories for the current agent."""
+        if not self._setup_done:
+            self.setup()
+        return self._deps.memory_manager.list_memories(self._agent.agent_id, user_id)
+
+    def forget_memory(self, memory_id: str) -> None:
+        """Delete one saved memory by id."""
+        if not self._setup_done:
+            self.setup()
+        self._deps.memory_manager.forget(memory_id)
+
+    def pin_memory(self, memory_id: str) -> None:
+        if not self._setup_done:
+            self.setup()
+        self._deps.memory_manager.pin(memory_id)
+
+    def unpin_memory(self, memory_id: str) -> None:
+        if not self._setup_done:
+            self.setup()
+        self._deps.memory_manager.unpin(memory_id)
+
+    def activate_memory(self, memory_id: str) -> None:
+        if not self._setup_done:
+            self.setup()
+        self._deps.memory_manager.activate(memory_id)
+
+    def deactivate_memory(self, memory_id: str) -> None:
+        if not self._setup_done:
+            self.setup()
+        self._deps.memory_manager.deactivate(memory_id)
+
+    def clear_memories(self, user_id: str | None = None) -> int:
+        if not self._setup_done:
+            self.setup()
+        return self._deps.memory_manager.clear_memories(self._agent.agent_id, user_id)
+
+    def set_memory_enabled(self, enabled: bool) -> None:
+        if not self._setup_done:
+            self.setup()
+        self._deps.memory_manager.set_enabled(enabled)
+
+    # ---------------------------------------------------------------
+    # Skill public API
+    # ---------------------------------------------------------------
+
+    def register_skill(self, skill: Skill) -> None:
+        """Register a skill for keyword-based activation."""
+        if not self._setup_done:
+            self.setup()
+        self._deps.skill_router.register_skill(skill)
+        logger.info("skill.registered", skill_id=skill.skill_id, name=skill.name)
+
+    def list_skills(self) -> list[Skill]:
+        """List all registered skills."""
+        if not self._setup_done:
+            self.setup()
+        return self._deps.skill_router.list_skills()
+
+    def remove_skill(self, skill_id: str) -> bool:
+        """Remove a skill by ID. Returns True if found and removed."""
+        if not self._setup_done:
+            self.setup()
+        router = self._deps.skill_router
+        if skill_id in router._skills:
+            del router._skills[skill_id]
+            logger.info("skill.removed", skill_id=skill_id)
+            return True
+        return False
+
+    def get_active_skill(self) -> Skill | None:
+        """Return the currently active skill, if any."""
+        if not self._setup_done:
+            return None
+        return self._deps.skill_router.get_active_skill()
+
+    # ---------------------------------------------------------------
+    # Tool public API
+    # ---------------------------------------------------------------
 
     def register_tool(self, func: Any) -> None:
         """Register a @tool decorated function."""

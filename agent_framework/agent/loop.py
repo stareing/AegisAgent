@@ -7,6 +7,7 @@ from agent_framework.infra.logger import get_logger
 from agent_framework.models.agent import (
     AgentState,
     AgentStatus,
+    EffectiveRunConfig,
     ErrorStrategy,
     IterationError,
     IterationResult,
@@ -14,18 +15,21 @@ from agent_framework.models.agent import (
     StopSignal,
 )
 from agent_framework.models.context import LLMRequest
-from agent_framework.models.message import Message, ModelResponse, ToolCallRequest
+from agent_framework.models.message import ModelResponse, ToolCallRequest
 from agent_framework.models.tool import ToolExecutionMeta, ToolResult
 
 if TYPE_CHECKING:
     from agent_framework.agent.base_agent import BaseAgent
-    from agent_framework.agent.runtime_deps import AgentRuntimeDeps
+    from agent_framework.protocols.core import ModelAdapterProtocol, ToolExecutorProtocol
 
 logger = get_logger(__name__)
 
 
 class AgentLoop:
     """Executes a single iteration of the agent loop.
+
+    v2.4 §5: AgentLoop does NOT receive full AgentRuntimeDeps.
+    It only receives the minimal deps it needs (model_adapter, tool_executor).
 
     One iteration:
     1. Call LLM with prepared request
@@ -37,9 +41,11 @@ class AgentLoop:
     async def execute_iteration(
         self,
         agent: BaseAgent,
-        deps: AgentRuntimeDeps,
+        model_adapter: ModelAdapterProtocol,
+        tool_executor: ToolExecutorProtocol,
         agent_state: AgentState,
         llm_request: LLMRequest,
+        effective_config: EffectiveRunConfig,
     ) -> IterationResult:
         idx = agent_state.iteration_count
 
@@ -51,7 +57,10 @@ class AgentLoop:
         # 1. Call LLM
         try:
             model_response = await self._call_llm(
-                deps, llm_request.messages, llm_request.tools_schema, agent
+                model_adapter,
+                llm_request.messages,
+                llm_request.tools_schema,
+                effective_config,
             )
         except Exception as e:
             return self._handle_iteration_error(agent, e, agent_state, idx)
@@ -80,7 +89,7 @@ class AgentLoop:
         if model_response.tool_calls:
             agent_state.status = AgentStatus.TOOL_CALLING
             tool_results, tool_metas = await self._dispatch_tool_calls(
-                agent, deps, model_response.tool_calls, agent_state
+                agent, tool_executor, model_response.tool_calls, agent_state
             )
 
         logger.info("iteration.completed", iteration_index=idx)
@@ -94,17 +103,17 @@ class AgentLoop:
 
     async def _call_llm(
         self,
-        deps: AgentRuntimeDeps,
-        messages: list[Message],
+        model_adapter: ModelAdapterProtocol,
+        messages: list,
         tools_schema: list[dict],
-        agent: BaseAgent,
+        effective_config: EffectiveRunConfig,
     ) -> ModelResponse:
-        logger.info("llm.called", model=agent.agent_config.model_name)
-        response = await deps.model_adapter.complete(
+        logger.info("llm.called", model=effective_config.model_name)
+        response = await model_adapter.complete(
             messages=messages,
             tools=tools_schema if tools_schema else None,
-            temperature=agent.agent_config.temperature,
-            max_tokens=agent.agent_config.max_output_tokens,
+            temperature=effective_config.temperature,
+            max_tokens=effective_config.max_output_tokens,
         )
         logger.info(
             "llm.responded",
@@ -120,18 +129,15 @@ class AgentLoop:
         model_response: ModelResponse,
         agent_state: AgentState,
     ) -> StopSignal | None:
-        # LLM says stop and no tool calls
         if model_response.finish_reason == "stop" and not model_response.tool_calls:
             return StopSignal(reason=StopReason.LLM_STOP)
 
-        # Output truncated
         if model_response.finish_reason == "length":
             return StopSignal(
                 reason=StopReason.OUTPUT_TRUNCATED,
                 message="Model output was truncated due to length limit",
             )
 
-        # Max iterations
         if agent_state.iteration_count + 1 >= agent.agent_config.max_iterations:
             return StopSignal(
                 reason=StopReason.MAX_ITERATIONS,
@@ -143,13 +149,21 @@ class AgentLoop:
     async def _dispatch_tool_calls(
         self,
         agent: BaseAgent,
-        deps: AgentRuntimeDeps,
+        tool_executor: ToolExecutorProtocol,
         tool_calls: list[ToolCallRequest],
         agent_state: AgentState,
     ) -> tuple[list[ToolResult], list[ToolExecutionMeta]]:
         """Dispatch tool calls with agent hook checks."""
+        capability_policy = agent.get_capability_policy()
         approved: list[ToolCallRequest] = []
         for tc in tool_calls:
+            if hasattr(tool_executor, "is_tool_allowed"):
+                if not tool_executor.is_tool_allowed(tc.function_name, capability_policy):
+                    logger.warning(
+                        "tool.blocked_by_capability_policy",
+                        tool_name=tc.function_name,
+                    )
+                    continue
             allowed = await agent.on_tool_call_requested(tc)
             if allowed:
                 approved.append(tc)
@@ -159,7 +173,7 @@ class AgentLoop:
         if not approved:
             return [], []
 
-        results_with_meta = await deps.tool_executor.batch_execute(approved)
+        results_with_meta = await tool_executor.batch_execute(approved)
 
         results = []
         metas = []

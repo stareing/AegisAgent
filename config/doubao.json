@@ -1,0 +1,19 @@
+{
+  "model": {
+    "adapter_type": "doubao",
+    "default_model_name": "doubao-seed-2-0-pro-260215",
+    "temperature": 0.7,
+    "max_output_tokens": 4096,
+    "api_key": "df38f4c7-08b2-4e04-96ad-094a11adc935",
+    "api_base": "https://ark.cn-beijing.volces.com/api/v3",
+    "timeout_ms": 60000,
+    "max_retries": 3
+  },
+  "context": {
+    "max_context_tokens": 32768,
+    "reserve_for_output": 4096
+  },
+  "logging": {
+    "level": "INFO"
+  }
+}

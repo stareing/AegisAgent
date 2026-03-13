@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from pydantic import ValidationError
 
 from agent_framework.infra.logger import get_logger
+from agent_framework.agent.capability_policy import apply_capability_policy
+from agent_framework.models.agent import CapabilityPolicy
 from agent_framework.models.message import ToolCallRequest
 from agent_framework.models.tool import (
     FieldError,
@@ -43,12 +45,14 @@ class ToolExecutor:
         confirmation_handler: ConfirmationHandlerProtocol | None = None,
         delegation_executor: DelegationExecutorProtocol | None = None,
         mcp_client_manager: Any = None,
+        parent_agent_getter: Callable[[], Any | None] | None = None,
         max_concurrent: int = 5,
     ) -> None:
         self._registry = registry
         self._confirmation = confirmation_handler
         self._delegation = delegation_executor
         self._mcp = mcp_client_manager
+        self._parent_agent_getter = parent_agent_getter
         self._max_concurrent = max_concurrent
 
     async def execute(
@@ -110,6 +114,14 @@ class ToolExecutor:
 
         return await asyncio.gather(*[_run(r) for r in tool_call_requests])
 
+    def is_tool_allowed(self, tool_name: str, policy: CapabilityPolicy) -> bool:
+        """Hard runtime gate for tool permission ceiling."""
+        if not self._registry.has_tool(tool_name):
+            return False
+        allowed = apply_capability_policy(self._registry.list_tools(), policy)
+        allowed_names = {t.meta.name for t in allowed}
+        return tool_name in allowed_names
+
     def _validate_arguments(
         self, tool_entry: ToolEntry, arguments: dict
     ) -> dict | ToolExecutionError:
@@ -163,7 +175,8 @@ class ToolExecutor:
                 raise RuntimeError("DelegationExecutor not configured")
             result = await self._delegation.delegate_to_a2a(
                 agent_url=tool_entry.meta.a2a_agent_url or "",
-                task_input=str(validated_arguments),
+                task_input=str(validated_arguments.get("task_input", "")),
+                skill_id=validated_arguments.get("skill_id"),
             )
             return result.final_answer if result.success else result.error
 
@@ -182,7 +195,8 @@ class ToolExecutor:
                 tool_category_whitelist=validated_arguments.get("tool_categories"),
                 memory_scope=MemoryScope(scope_str) if scope_str in MemoryScope.__members__ else MemoryScope.ISOLATED,
             )
-            result = await self._delegation.delegate_to_subagent(spec, None)
+            parent_agent = self._parent_agent_getter() if self._parent_agent_getter else None
+            result = await self._delegation.delegate_to_subagent(spec, parent_agent)
             from agent_framework.tools.delegation import DelegationExecutor
             summary = DelegationExecutor.summarize_result(result)
             return summary.model_dump()

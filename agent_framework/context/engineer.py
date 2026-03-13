@@ -61,6 +61,11 @@ class ContextEngineer:
         session_groups = self._source.collect_session_groups(session_state)
         current_input = self._source.collect_current_input(task)
 
+        # Apply compressor before final build when session history is large.
+        budget = getattr(self._builder, "_max_tokens", 8192) - getattr(
+            self._builder, "_reserve_for_output", 1024
+        )
+
         # Calculate per-slot token estimates
         system_msg = Message(role="system", content=system_core)
         system_tokens = self._builder.calculate_tokens([system_msg])
@@ -76,6 +81,11 @@ class ContextEngineer:
             session_tokens += self._builder.calculate_tokens(g.messages)
 
         input_tokens = self._builder.calculate_tokens([current_input])
+        fixed_tokens = system_tokens + memory_tokens + input_tokens
+        target_session_tokens = max(0, budget - fixed_tokens)
+        session_groups = self._compressor.compress_groups(
+            session_groups, target_tokens=target_session_tokens
+        )
 
         # Build context
         messages = self._builder.build_context(

@@ -8,9 +8,11 @@ from pydantic_settings import BaseSettings
 
 
 class ModelConfig(BaseModel):
+    adapter_type: str = "litellm"  # "litellm"|"openai"|"anthropic"|"google"|"deepseek"|"doubao"|"qwen"|"zhipu"|"minimax"|"custom"
     default_model_name: str = "gpt-3.5-turbo"
     temperature: float = 0.7
     max_output_tokens: int = 4096
+    api_key: str | None = None
     api_base: str | None = None
     timeout_ms: int = 30000
     max_retries: int = 3
@@ -49,6 +51,22 @@ class SubAgentConfig(BaseModel):
     allow_recursive_spawn: bool = False
 
 
+class SkillConfig(BaseModel):
+    """Declarative skill definition loaded from config JSON."""
+    skill_id: str
+    name: str = ""
+    description: str = ""
+    trigger_keywords: list[str] = Field(default_factory=list)
+    system_prompt_addon: str = ""
+    model_override: str | None = None
+    temperature_override: float | None = None
+
+
+class SkillsConfig(BaseModel):
+    """Container for skill definitions in config."""
+    definitions: list[SkillConfig] = Field(default_factory=list)
+
+
 class MCPConfig(BaseModel):
     config_file: str | None = None
     servers: list[dict] = Field(default_factory=list)
@@ -70,6 +88,7 @@ class FrameworkConfig(BaseSettings):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     tools: ToolConfig = Field(default_factory=ToolConfig)
     subagent: SubAgentConfig = Field(default_factory=SubAgentConfig)
+    skills: SkillsConfig = Field(default_factory=SkillsConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     a2a: A2AConfig = Field(default_factory=A2AConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)

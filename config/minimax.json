@@ -1,0 +1,19 @@
+{
+  "model": {
+    "adapter_type": "minimax",
+    "default_model_name": "abab6.5s-chat",
+    "temperature": 0.7,
+    "max_output_tokens": 4096,
+    "api_key": "${MINIMAX_API_KEY}",
+    "api_base": "https://api.minimax.chat/v1",
+    "timeout_ms": 60000,
+    "max_retries": 3
+  },
+  "context": {
+    "max_context_tokens": 245760,
+    "reserve_for_output": 4096
+  },
+  "logging": {
+    "level": "INFO"
+  }
+}

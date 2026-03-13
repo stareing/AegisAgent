@@ -4,12 +4,14 @@ import uuid
 from typing import TYPE_CHECKING
 
 from agent_framework.infra.logger import get_logger
+from agent_framework.agent.capability_policy import apply_capability_policy
 from agent_framework.agent.loop import AgentLoop
 from agent_framework.models.agent import (
     AgentConfig,
     AgentRunResult,
     AgentState,
     AgentStatus,
+    EffectiveRunConfig,
     IterationResult,
     Skill,
     StopReason,
@@ -56,16 +58,22 @@ class RunCoordinator:
         agent: BaseAgent,
         deps: AgentRuntimeDeps,
         task: str,
+        initial_session_messages: list[Message] | None = None,
     ) -> AgentRunResult:
         run_id = str(uuid.uuid4())
         agent_state = self._initialize_state(agent, task, run_id)
         session_state = SessionState(session_id=str(uuid.uuid4()), run_id=run_id)
+        if initial_session_messages:
+            for msg in initial_session_messages:
+                session_state.append_message(msg)
 
         logger.info("run.started", run_id=run_id, agent_id=agent.agent_id, task=task[:100])
 
+        session_started = False
         try:
             # Begin session
             deps.memory_manager.begin_session(run_id, agent.agent_id, None)
+            session_started = True
 
             # Skill detection
             self._apply_skill_if_needed(agent, deps, task, agent_state)
@@ -90,9 +98,10 @@ class RunCoordinator:
                     task=task,
                 )
 
-                # Execute iteration
+                # Execute iteration — pass only minimal deps (v2.4 §5)
                 iteration_result = await self._loop.execute_iteration(
-                    agent, deps, agent_state, llm_request
+                    agent, deps.model_adapter, deps.tool_executor,
+                    agent_state, llm_request, effective_config,
                 )
 
                 # Write to session state
@@ -113,8 +122,6 @@ class RunCoordinator:
             # Post-run
             agent_state.status = AgentStatus.FINISHED
             deps.memory_manager.record_turn(task, final_answer, agent_state.iteration_history)
-            deps.memory_manager.end_session()
-            deps.skill_router.deactivate_current_skill()
 
             await agent.on_final_answer(final_answer, agent_state)
 
@@ -127,6 +134,13 @@ class RunCoordinator:
         except Exception as e:
             logger.error("run.failed", run_id=run_id, error=str(e))
             return self._handle_run_error(agent, e, agent_state)
+        finally:
+            if session_started:
+                try:
+                    deps.memory_manager.end_session()
+                except Exception as e:
+                    logger.warning("run.end_session_failed", run_id=run_id, error=str(e))
+            self._deactivate_skill_if_needed(deps)
 
     def _initialize_state(
         self, agent: BaseAgent, task: str, run_id: str
@@ -139,20 +153,35 @@ class RunCoordinator:
 
     def _build_effective_config(
         self, agent: BaseAgent, active_skill: Skill | None
-    ) -> AgentConfig:
-        """Build effective config merging agent config with skill overrides.
+    ) -> EffectiveRunConfig:
+        """Build effective run config from AgentConfig + Skill override.
 
-        Skill overrides only apply to current run (section 13.5).
+        v2.4 §8: Skill override can only modify whitelisted fields
+        (model_name, temperature). Safety fields like max_iterations are
+        never overridden by skills.
         """
-        config = agent.agent_config.model_copy()
+        cfg = agent.agent_config
+        model_name = cfg.model_name
+        temperature = cfg.temperature
 
+        # Skill override — whitelist only (v2.4 §8)
         if active_skill is not None:
             if active_skill.model_override:
-                config.model_name = active_skill.model_override
+                model_name = active_skill.model_override
             if active_skill.temperature_override is not None:
-                config.temperature = active_skill.temperature_override
+                temperature = active_skill.temperature_override
 
-        return config
+        return EffectiveRunConfig(
+            model_name=model_name,
+            temperature=temperature,
+            max_output_tokens=cfg.max_output_tokens,
+            max_iterations=cfg.max_iterations,
+        )
+
+    def _deactivate_skill_if_needed(self, deps: AgentRuntimeDeps) -> None:
+        """v2.4 §9/§18: Skill deactivation is RunCoordinator's exclusive responsibility."""
+        deps.context_engineer.set_skill_context(None)
+        deps.skill_router.deactivate_current_skill()
 
     def _prepare_llm_request(
         self,
@@ -161,7 +190,7 @@ class RunCoordinator:
         agent_state: AgentState,
         *,
         session_state: SessionState,
-        effective_config: AgentConfig,
+        effective_config: EffectiveRunConfig,
         active_skill: Skill | None,
         task: str,
     ) -> LLMRequest:
@@ -170,8 +199,9 @@ class RunCoordinator:
         memories = deps.memory_manager.select_for_context(task, agent_state)
 
         # Prepare context materials
+        # agent_config carries system_prompt etc.; effective_config carries runtime overrides
         context_materials = {
-            "agent_config": effective_config,
+            "agent_config": agent.agent_config,
             "session_state": session_state,
             "memories": memories,
             "task": task,
@@ -183,8 +213,15 @@ class RunCoordinator:
             agent_state, context_materials
         )
 
-        # Export tool schemas
-        tools_schema = deps.tool_registry.export_schemas()
+        # Export tool schemas with capability ceiling applied first.
+        capability_policy = agent.get_capability_policy()
+        allowed_tools = apply_capability_policy(
+            deps.tool_registry.list_tools(),
+            capability_policy,
+        )
+        tools_schema = deps.tool_registry.export_schemas(
+            whitelist=[t.meta.name for t in allowed_tools]
+        )
 
         return LLMRequest(messages=llm_messages, tools_schema=tools_schema)
 

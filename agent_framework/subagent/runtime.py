@@ -63,6 +63,23 @@ class SubAgentRuntime:
             spec, parent_agent
         )
 
+        # Doc 16.2 step 3: ensure spawn seed is built for child run context.
+        if spec.context_seed is None:
+            spec.context_seed = self._parent_deps.context_engineer.build_spawn_seed(
+                session_messages=[],
+                query=spec.task_input,
+                token_budget=spec.token_budget,
+            )
+
+        # Avoid duplicating the current child query: it is provided as `task_input`.
+        initial_session_messages = list(spec.context_seed or [])
+        if (
+            initial_session_messages
+            and initial_session_messages[-1].role == "user"
+            and (initial_session_messages[-1].content or "") == spec.task_input
+        ):
+            initial_session_messages = initial_session_messages[:-1]
+
         # Get or create coordinator
         coordinator = self._coordinator
         if coordinator is None:
@@ -72,7 +89,10 @@ class SubAgentRuntime:
         # Schedule execution
         async def _run() -> SubAgentResult:
             run_result = await coordinator.run(
-                sub_agent, sub_deps, spec.task_input
+                sub_agent,
+                sub_deps,
+                spec.task_input,
+                initial_session_messages=initial_session_messages,
             )
             return SubAgentResult(
                 spawn_id=spec.spawn_id,

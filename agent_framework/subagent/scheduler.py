@@ -184,6 +184,9 @@ class SubAgentScheduler:
         try:
             self.submit(handle, coro, deadline_ms)
         except RuntimeError as e:
+            # If submit fails before scheduling, close the coroutine to avoid warnings.
+            if hasattr(coro, "close"):
+                coro.close()
             return SubAgentResult(
                 spawn_id=handle.spawn_id,
                 success=False,

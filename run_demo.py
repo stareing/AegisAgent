@@ -512,6 +512,36 @@ async def demo_10_spawn_denied(model, deps):
     print(f"  错误信息: {result.error}")
 
 
+async def demo_11_skill(model, deps):
+    """演示 11：Skill 技能系统 — 关键词检测 + 上下文注入"""
+    print_header("演示 11：Skill 技能系统")
+    print("  注册技能: math_expert (关键词: 数学, 计算)")
+    print("  用户输入: 帮我用数学方法计算 42 * 13")
+
+    from agent_framework.models.agent import Skill
+
+    # Register a skill
+    skill = Skill(
+        skill_id="math_expert",
+        name="数学专家",
+        description="激活数学专家模式",
+        trigger_keywords=["数学", "计算"],
+        system_prompt_addon="你是一位数学专家。请用清晰的步骤解释计算过程。",
+    )
+    deps.skill_router.register_skill(skill)
+
+    model.set_scenario("calc")
+    agent = DefaultAgent(agent_id="demo", system_prompt="你是一个助手。", model_name="mock")
+    result = await RunCoordinator().run(agent, deps, "帮我用数学方法计算 42 * 13")
+    print_result(result)
+
+    # Show that skill was detected
+    print(f"\n  --- Skill 状态 ---")
+    print(f"  已注册技能: {[s.skill_id for s in deps.skill_router.list_skills()]}")
+    print(f"  当前活跃技能: {deps.skill_router.get_active_skill()}")
+    print(f"  (技能在 run 结束后自动反激活)")
+
+
 async def demo_8_context_stats(model, deps):
     """演示 8：上下文统计"""
     print_header("演示 8：上下文工程 - 统计信息")
@@ -554,6 +584,7 @@ async def main():
     await demo_8_context_stats(model, deps)
     await demo_9_subagent(model, deps)
     await demo_10_spawn_denied(model, deps)
+    await demo_11_skill(model, deps)
 
     print(f"\n{'='*60}")
     print("  全部演示完成！")

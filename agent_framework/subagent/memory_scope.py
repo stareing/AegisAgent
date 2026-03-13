@@ -55,21 +55,20 @@ class IsolatedMemoryManager(BaseMemoryManager):
 class InheritReadMemoryManager(BaseMemoryManager):
     """INHERIT_READ scope: subagent can read parent memories, writes are local only.
 
-    Parent memories are injected into context but subagent writes go to its own store.
+    v2.4 §10: Reads a frozen snapshot of parent memories captured at spawn time,
+    NOT a live view. Sub-agent does not see parent memory changes during its run.
+    Subagent writes go to its own local store.
     """
 
     def __init__(
         self,
         store: MemoryStoreProtocol,
-        parent_manager: MemoryManagerProtocol,
-        parent_agent_id: str,
-        parent_user_id: str | None = None,
+        parent_snapshot: list[MemoryRecord],
         max_inherited: int = 5,
     ) -> None:
         super().__init__(store)
-        self._parent_manager = parent_manager
-        self._parent_agent_id = parent_agent_id
-        self._parent_user_id = parent_user_id
+        # v2.4 §10: frozen snapshot captured at spawn time
+        self._parent_snapshot: list[MemoryRecord] = list(parent_snapshot)
         self._max_inherited = max_inherited
 
     def select_for_context(
@@ -80,8 +79,7 @@ class InheritReadMemoryManager(BaseMemoryManager):
             own = self._store.list_by_user(
                 self._agent_id, self._user_id, active_only=True
             )
-        parent = self._parent_manager.select_for_context(task, agent_state)
-        inherited = parent[: self._max_inherited]
+        inherited = self._parent_snapshot[: self._max_inherited]
         return inherited + own
 
     def record_turn(
@@ -107,17 +105,21 @@ class InheritReadMemoryManager(BaseMemoryManager):
 
 
 class SharedWriteMemoryManager(BaseMemoryManager):
-    """SHARED_WRITE scope: subagent reads and writes through parent's MemoryManager.
+    """SHARED_WRITE scope: subagent reads frozen snapshot, writes through parent.
 
-    Per doc 14.3: subagent never directly writes to parent store,
-    only through parent MemoryManager.remember().
+    v2.4 §10: Reads a frozen snapshot of parent memories captured at spawn time,
+    NOT a live view. Writes still go through parent MemoryManager.remember().
+    Per doc 14.3: subagent never directly writes to parent store.
     """
 
     def __init__(
         self,
         parent_manager: MemoryManagerProtocol,
+        parent_snapshot: list[MemoryRecord],
     ) -> None:
         self._parent = parent_manager
+        # v2.4 §10: frozen snapshot captured at spawn time
+        self._parent_snapshot: list[MemoryRecord] = list(parent_snapshot)
         super().__init__(None)  # type: ignore[arg-type]
         self._enabled = True
 
@@ -131,7 +133,8 @@ class SharedWriteMemoryManager(BaseMemoryManager):
     def select_for_context(
         self, task: str, agent_state: AgentState
     ) -> list[MemoryRecord]:
-        return self._parent.select_for_context(task, agent_state)
+        # v2.4 §10: return frozen snapshot, not live parent view
+        return list(self._parent_snapshot)
 
     def record_turn(
         self,

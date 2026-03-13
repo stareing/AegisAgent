@@ -19,6 +19,16 @@ dev = [
 tiktoken = [
     "tiktoken>=0.5",
 ]
+openai = [
+    "openai>=1.0",
+    "tiktoken>=0.5",
+]
+anthropic = [
+    "anthropic>=0.40",
+]
+google = [
+    "google-genai>=1.0",
+]
 mcp = [
     "mcp>=1.0",
 ]
@@ -26,6 +36,10 @@ a2a = [
     "a2a-python>=0.2",
 ]
 all = [
+    "litellm>=1.0",
+    "openai>=1.0",
+    "anthropic>=0.40",
+    "google-genai>=1.0",
     "tiktoken>=0.5",
     "mcp>=1.0",
     "a2a-python>=0.2",
@@ -33,6 +47,7 @@ all = [
 
 [project.scripts]
 agent-cli = "agent_framework.cli:main"
+agent-interactive = "agent_framework.main:main"
 
 [build-system]
 requires = ["setuptools>=68.0"]

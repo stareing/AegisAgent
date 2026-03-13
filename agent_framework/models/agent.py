@@ -108,3 +108,43 @@ class Skill(BaseModel):
     model_override: str | None = None
     temperature_override: float | None = None
     recommended_capability_policy_id: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Run-scoped policies (v2.4 §3 — defect 13)
+# These are per-run policies, NOT process-level global config.
+# ---------------------------------------------------------------------------
+
+class ContextPolicy(BaseModel):
+    """Run-scoped context strategy. Controls compression and history behavior."""
+
+    allow_compression: bool = True
+    prefer_recent_history: bool = True
+    max_session_groups: int | None = None
+    force_include_saved_memory: bool = False
+
+
+class MemoryPolicy(BaseModel):
+    """Run-scoped memory strategy. Controls extraction and save behavior."""
+
+    memory_enabled: bool = True
+    auto_extract: bool = True
+    allow_overwrite_pinned: bool = False
+    allow_auto_save_from_tools: bool = False
+
+
+class EffectiveRunConfig(BaseModel):
+    """Final effective config for a single run.
+
+    Built by RunCoordinator from FrameworkConfig + AgentConfig + Skill override.
+    Skill override can only modify whitelisted fields (model_name, temperature).
+    """
+
+    model_name: str = "gpt-3.5-turbo"
+    temperature: float = 0.7
+    max_output_tokens: int = 4096
+    max_iterations: int = 20
+    reserve_for_output: int = 1024
+    max_concurrent_tool_calls: int = 5
+    subagent_token_budget: int = 4096
+    allow_parallel_tool_calls: bool = True

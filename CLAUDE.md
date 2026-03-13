@@ -17,14 +17,13 @@
 * **禁止魔法值**：重复使用的常量必须提取命名。
 * **配置外置**：可变参数放配置，不写死在逻辑中。
 * **副作用集中**：I/O、网络、数据库调用集中在边界层。
-* **日志结构化**：日志要可检索、可追踪、可关联 run_id。
 * **注释解释原因**：注释优先说明“为什么”，不是重复“做什么”。
 * **兼容性优先**：公共接口变更必须考虑向后兼容。
 * **测试友好**：设计必须便于 mock、替换和单元测试。
-* **默认安全**：高风险操作默认拒绝，显式授权后再放行。
 * **边界清晰**：跨层调用必须通过正式接口，禁止越层访问。
 * **一处定义**：同一规则、常量、协议只保留一个权威定义。
 * **记忆进度**：热跟新CLAUDE.md
+* **代码审核**：将由codex排查代码是否和需求一致
 
 ## Project Overview
 Offline-first, extensible AI Agent Framework built in Python 3.11+ with pydantic v2.
@@ -48,7 +47,7 @@ Memory          → memory/ (sqlite_store, base_manager, default_manager)
 Context         → context/ (transaction_group, source_provider, builder, compressor, engineer)
 Protocols       → protocols/ (core.py, mcp/mcp_client_manager.py, a2a/a2a_client_adapter.py)
 Models          → models/ (message, tool, agent, session, memory, subagent, context, mcp)
-Adapters        → adapters/model/ (base_adapter, litellm_adapter)
+Adapters        → adapters/model/ (base_adapter, litellm_adapter, openai_adapter, anthropic_adapter, google_adapter, openai_compatible_adapter)
 Infrastructure  → infra/ (config, logger, event_bus, disk_store)
 ```
 
@@ -81,6 +80,51 @@ Infrastructure  → infra/ (config, logger, event_bus, disk_store)
 - [x] **#21** 多智能体协调演示 — run_demo.py 新增 demo_9(子Agent派生) + demo_10(递归防护)
 - [x] **#22** spawn_agent 工具 source="subagent" 正确路由，ContextBuilder 构造函数支持 max_context_tokens/reserve_for_output
 
+### Completed (Tasks #23-#27: v2.4 架构升级)
+- [x] **#23** 新增 `ContextPolicy`, `MemoryPolicy`, `EffectiveRunConfig` pydantic 模型 (v2.4 §3)
+- [x] **#24** SessionState 写入权限收归 RunCoordinator 独占 (v2.4 §4)
+- [x] **#25** AgentLoop 最小依赖传递 — 只接收 model_adapter + tool_executor，不接收完整 AgentRuntimeDeps (v2.4 §5)
+- [x] **#26** RunCoordinator: EffectiveRunConfig 构建 + Skill 反激活保证（正常/异常路径均清理）(v2.4 §8/§9/§18)
+- [x] **#27** MemoryScope 快照语义 — InheritRead/SharedWrite 在 spawn 时刻捕获父记忆冻结快照，运行期间不感知父记忆变化 (v2.4 §10)
+
+### Completed (Task #29: 多模型 SDK 适配)
+- [x] **#29** 原生 SDK 适配器 — OpenAIAdapter / AnthropicAdapter / GoogleAdapter
+  - `adapters/model/openai_adapter.py` — 官方 openai SDK，格式与 LiteLLM 兼容
+  - `adapters/model/anthropic_adapter.py` — 官方 anthropic SDK，处理 content blocks、system 分离、tool_result 合并
+  - `adapters/model/google_adapter.py` — 官方 google-genai SDK，处理 role 映射、function_call/response parts、合成 tool_call_id
+  - `ModelConfig.adapter_type` 字段选择适配器 ("litellm"|"openai"|"anthropic"|"google")
+  - `entry.py` 适配器工厂方法 `_create_model_adapter()`，懒加载 SDK
+  - `__init__.py` 条件导入，缺少 SDK 不影响框架启动
+  - `pyproject.toml` 可选依赖组: `[openai]`, `[anthropic]`, `[google]`, `[all]`
+
+### Completed (Task #30: 国产模型 + 自定义适配)
+- [x] **#30** OpenAI-compatible 适配器 — DeepSeek / 豆包 / 通义千问 / 智谱 / MiniMax / Custom
+  - `adapters/model/openai_compatible_adapter.py` — `OpenAICompatibleAdapter` 基类 + 6 个子类
+  - 各厂商预设 `api_base` 和默认模型名：DeepSeek(`deepseek-chat`), Doubao(`doubao-pro-32k`), Qwen(`qwen-plus`), Zhipu(`glm-4`), MiniMax(`abab6.5s-chat`)
+  - `CustomAdapter` 支持任意 OpenAI-compatible 端点（需手动传 `api_base`）
+  - 中文文本 token 估算优化（CJK ~1.5 chars/token）
+  - `extra_headers` 支持（部分厂商需自定义 Header）
+  - `config.model.adapter_type` 新增: `"deepseek"|"doubao"|"qwen"|"zhipu"|"minimax"|"custom"`
+  - `entry.py` 工厂方法扩展，全部走 `openai` SDK（无额外依赖）
+
+### Completed (Task #31: 全模块严格测试)
+- [x] **#31** 严格单元测试覆盖全部功能模块 — 426 tests total
+  - `test_tools.py` (80 tests) — @tool 装饰器、Catalog、Registry、Executor、Delegation、CapabilityPolicy
+  - `test_memory.py` (55 tests) — SQLiteStore CRUD、DefaultManager 抽取/合并、MemoryScope 快照语义
+  - `test_context.py` (30 tests) — TransactionGroup、SourceProvider、Builder 5-slot 组装/裁剪/spawn seed、Compressor
+  - `test_agent.py` (35 tests) — BaseAgent hooks、DefaultAgent、ReActAgent、SkillRouter、AgentLoop、RunCoordinator
+  - `test_subagent.py` (20 tests) — Scheduler 配额/超时/取消、Factory 内存域/工具过滤/快照捕获
+  - `test_infra.py` (18 tests) — EventBus 发布/订阅、DiskStore JSON/文本/原子写入
+  - `test_openai_compatible_adapters.py` (30 tests) — 6 个厂商默认值、构建参数、token 计数、complete/retry、Entry 工厂
+
+### Completed (Task #32-#34: Skill 系统修复 + 交互终端)
+- [x] **#32** Skill 公开 API — `AgentFramework.register_skill()`, `list_skills()`, `remove_skill()`, `get_active_skill()`
+- [x] **#33** Skill 配置加载 — `SkillConfig` / `SkillsConfig` 模型，`FrameworkConfig.skills` 字段，setup() 自动加载
+- [x] **#34** CLI skills 命令 — REPL 新增 `skills` 命令，显示注册技能列表和激活状态
+- [x] **#35** 交互终端 `main.py` — 彩色 ANSI 输出、命令系统（help/tools/skills/memories/config/stats/clear/reset）、内置 Mock 模型 + 3 个 demo 工具 + 3 个 demo 技能
+- [x] **#36** Skill 演示 — run_demo.py 新增 demo_11（技能注册→检测→激活→反激活完整流程）
+- [x] **#37** 入口点 — `python -m agent_framework.main` + `agent-interactive` CLI 命令
+
 ### Bug Fixes (本轮)
 - [x] SubAgentFactory 使用 DefaultAgent 构造函数替代 `__new__` + `BaseAgent.__init__` 直接调用
 - [x] SubAgentFactory 清理冗余 AgentConfig，移除未使用参数
@@ -94,18 +138,29 @@ Infrastructure  → infra/ (config, logger, event_bus, disk_store)
 - **Qualified tool naming**: `local::<name>`, `mcp::<server_id>::<name>`, `a2a::<alias>::<name>`, `subagent::spawn_agent`
 - **Context slots**: System Core → Skill Addon → Saved Memories → Session History → Current Input
 - **Tool permission chain**: CapabilityPolicy → ScopedToolRegistry → on_tool_call_requested()
-- **Memory scopes for subagents**: ISOLATED, INHERIT_READ, SHARED_WRITE
+- **Memory scopes for subagents**: ISOLATED, INHERIT_READ, SHARED_WRITE (v2.4: spawn-time frozen snapshot for reads)
 - **Error strategies**: ABORT, SKIP, RETRY (per agent policy)
 - **子Agent递归防护**: SubAgentFactory 强制 allow_spawn_children=False，DelegationExecutor 检查并返回 PERMISSION_DENIED
 - **子Agent派生流**: spawn_agent tool_call → ToolExecutor(source=subagent) → DelegationExecutor → SubAgentRuntime → Factory + Scheduler
+- **多模型适配**: BaseModelAdapter ABC → LiteLLM/OpenAI/Anthropic/Google + DeepSeek/Doubao/Qwen/Zhipu/MiniMax/Custom，`config.model.adapter_type` 选择
+- **OpenAI-compatible 模式**: 国产模型均通过 `openai` SDK + 自定义 `base_url` 接入，`OpenAICompatibleAdapter` 基类统一管理
 
 ## Commands
 ```bash
 # Install
 pip install -e ".[dev]"
 
-# Tests (when available)
+# Tests
 pytest tests/
+
+# Interactive terminal (Mock 模型, 无需 API Key)
+python -m agent_framework.main
+
+# Interactive terminal (真实模型)
+python -m agent_framework.main --config config/deepseek.json
+
+# Demo (Mock 模型)
+python run_demo.py
 ```
 
 ## File Conventions

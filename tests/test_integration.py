@@ -23,8 +23,10 @@ from agent_framework.context.engineer import ContextEngineer
 from agent_framework.context.source_provider import ContextSourceProvider
 from agent_framework.memory.default_manager import DefaultMemoryManager
 from agent_framework.memory.sqlite_store import SQLiteMemoryStore
-from agent_framework.models.agent import AgentConfig, AgentStatus, StopReason
+from agent_framework.models.agent import AgentConfig, AgentStatus, CapabilityPolicy, Skill, StopReason
 from agent_framework.models.message import Message, ModelResponse, TokenUsage, ToolCallRequest
+from agent_framework.models.subagent import SubAgentSpec, SubAgentResult
+from agent_framework.models.tool import ToolEntry, ToolMeta
 from agent_framework.tools.confirmation import AutoApproveConfirmationHandler
 from agent_framework.tools.decorator import tool
 from agent_framework.tools.executor import ToolExecutor
@@ -590,3 +592,276 @@ class TestSubAgentScheduler:
         result = await scheduler.schedule(h, slow_task(), deadline_ms=100)
         assert result.success is False
         assert "timed out" in result.error.lower()
+
+
+class TestRegressionFixes:
+    """Regression tests for architecture-review fixes."""
+
+    @pytest.mark.asyncio
+    async def test_skill_override_applies_to_model_call(self):
+        class CaptureModel(MockModelAdapter):
+            def __init__(self, responses):
+                super().__init__(responses)
+                self.last_temperature = None
+                self.last_tools = None
+
+            async def complete(self, messages, tools=None, temperature=None, max_tokens=None):
+                self.last_temperature = temperature
+                self.last_tools = tools
+                return await super().complete(messages, tools, temperature, max_tokens)
+
+        model = CaptureModel([
+            ModelResponse(
+                content="done",
+                tool_calls=[],
+                finish_reason="stop",
+                usage=TokenUsage(total_tokens=5),
+            )
+        ])
+        deps = build_deps(model, register_tools=False)
+        deps.skill_router.register_skill(
+            Skill(
+                skill_id="s1",
+                name="override",
+                trigger_keywords=["override"],
+                system_prompt_addon="Skill prompt",
+                temperature_override=0.05,
+            )
+        )
+        agent = DefaultAgent(model_name="mock", temperature=0.7)
+        result = await RunCoordinator().run(agent, deps, "please override now")
+        assert result.success is True
+        assert model.last_temperature == 0.05
+        assert deps.context_engineer._skill_prompt is None  # cleared after run
+
+    @pytest.mark.asyncio
+    async def test_capability_policy_filters_tools_schema(self):
+        @tool(name="danger", description="danger tool", category="system")
+        def danger_tool() -> str:
+            return "x"
+
+        class PolicyAgent(DefaultAgent):
+            def get_capability_policy(self) -> CapabilityPolicy:
+                return CapabilityPolicy(
+                    allow_network_tools=False,
+                    allow_system_tools=False,
+                    allow_spawn=False,
+                )
+
+        class CaptureModel(MockModelAdapter):
+            def __init__(self, responses):
+                super().__init__(responses)
+                self.last_tools = None
+
+            async def complete(self, messages, tools=None, temperature=None, max_tokens=None):
+                self.last_tools = tools or []
+                return await super().complete(messages, tools, temperature, max_tokens)
+
+        model = CaptureModel([
+            ModelResponse(
+                content="ok",
+                tool_calls=[],
+                finish_reason="stop",
+                usage=TokenUsage(total_tokens=5),
+            )
+        ])
+        deps = build_deps(model, register_tools=True)
+        from agent_framework.tools.catalog import GlobalToolCatalog
+
+        catalog = GlobalToolCatalog()
+        catalog.register_function(danger_tool)
+        for entry in catalog.list_all():
+            deps.tool_registry.register(entry)
+
+        agent = PolicyAgent(model_name="mock")
+        result = await RunCoordinator().run(agent, deps, "hello")
+        assert result.success is True
+        names = {s["function"]["name"] for s in model.last_tools}
+        assert "danger" not in names
+
+    @pytest.mark.asyncio
+    async def test_capability_policy_runtime_blocks_tool_execution(self):
+        called = {"danger": False}
+
+        @tool(name="danger_runtime", description="danger runtime tool", category="system")
+        def danger_runtime_tool() -> str:
+            called["danger"] = True
+            return "boom"
+
+        class PolicyAgent(DefaultAgent):
+            def get_capability_policy(self) -> CapabilityPolicy:
+                return CapabilityPolicy(
+                    allow_network_tools=False,
+                    allow_system_tools=False,
+                    allow_spawn=False,
+                )
+
+        model = MockModelAdapter([
+            ModelResponse(
+                content=None,
+                tool_calls=[ToolCallRequest(id="tc1", function_name="danger_runtime", arguments={})],
+                finish_reason="tool_calls",
+                usage=TokenUsage(total_tokens=10),
+            ),
+            ModelResponse(
+                content="done",
+                tool_calls=[],
+                finish_reason="stop",
+                usage=TokenUsage(total_tokens=5),
+            ),
+        ])
+        deps = build_deps(model, register_tools=False)
+        from agent_framework.tools.catalog import GlobalToolCatalog
+
+        catalog = GlobalToolCatalog()
+        catalog.register_function(danger_runtime_tool)
+        for entry in catalog.list_all():
+            deps.tool_registry.register(entry)
+
+        agent = PolicyAgent(model_name="mock")
+        result = await RunCoordinator().run(agent, deps, "try blocked tool")
+        assert result.success is True
+        assert called["danger"] is False
+
+    @pytest.mark.asyncio
+    async def test_a2a_task_input_mapping(self):
+        class FakeDelegation:
+            def __init__(self):
+                self.task_input = None
+
+            async def delegate_to_subagent(self, spec, parent_agent):
+                return SubAgentResult(spawn_id="s1", success=False, error="not used")
+
+            async def delegate_to_a2a(self, agent_url, task_input, skill_id=None):
+                self.task_input = task_input
+                return SubAgentResult(spawn_id="s1", success=True, final_answer="ok")
+
+        registry = ToolRegistry()
+        registry.register(
+            ToolEntry(
+                meta=ToolMeta(
+                    name="delegate_to_x",
+                    source="a2a",
+                    a2a_agent_url="https://a2a.example",
+                    is_async=True,
+                ),
+                callable_ref=None,
+                validator_model=None,
+            )
+        )
+        delegation = FakeDelegation()
+        executor = ToolExecutor(registry=registry, delegation_executor=delegation)
+        result, _meta = await executor.execute(
+            ToolCallRequest(
+                id="tc1",
+                function_name="delegate_to_x",
+                arguments={"task_input": "hello a2a"},
+            )
+        )
+        assert result.success is True
+        assert delegation.task_input == "hello a2a"
+
+    def test_subagent_factory_uses_scoped_executor(self):
+        from agent_framework.subagent.factory import SubAgentFactory
+        from agent_framework.tools.catalog import GlobalToolCatalog
+        from agent_framework.tools.builtin.spawn_agent import spawn_agent
+        from agent_framework.tools.builtin.system import run_command
+
+        model = MockModelAdapter([])
+        deps = build_deps(model, register_tools=True)
+        catalog = GlobalToolCatalog()
+        catalog.register_function(spawn_agent)
+        catalog.register_function(run_command)
+        for entry in catalog.list_all():
+            deps.tool_registry.register(entry)
+
+        parent_agent = DefaultAgent(model_name="mock", allow_spawn_children=True)
+        spec = SubAgentSpec(task_input="child task")
+        child_agent, child_deps = SubAgentFactory(deps).create_agent_and_deps(spec, parent_agent)
+        assert child_agent.agent_config.allow_spawn_children is False
+        assert child_deps.tool_executor is not deps.tool_executor
+        assert child_deps.tool_registry.has_tool("spawn_agent") is False
+        assert child_deps.tool_registry.has_tool("run_command") is False
+
+    @pytest.mark.asyncio
+    async def test_subagent_runtime_uses_context_seed(self):
+        from agent_framework.subagent.runtime import SubAgentRuntime
+
+        class CaptureModel(MockModelAdapter):
+            def __init__(self):
+                super().__init__([
+                    ModelResponse(
+                        content="child done",
+                        tool_calls=[],
+                        finish_reason="stop",
+                        usage=TokenUsage(total_tokens=5),
+                    )
+                ])
+                self.last_messages: list[Message] = []
+
+            async def complete(self, messages, tools=None, temperature=None, max_tokens=None):
+                self.last_messages = list(messages)
+                return await super().complete(messages, tools, temperature, max_tokens)
+
+        model = CaptureModel()
+        deps = build_deps(model, register_tools=False)
+        runtime = SubAgentRuntime(parent_deps=deps, coordinator=RunCoordinator())
+
+        parent_agent = DefaultAgent(model_name="mock", allow_spawn_children=True)
+        spec = SubAgentSpec(
+            parent_run_id="run-parent",
+            task_input="child task",
+            context_seed=[
+                Message(role="assistant", content="seeded context"),
+                Message(role="user", content="child task"),
+            ],
+            deadline_ms=5000,
+        )
+        result = await runtime.spawn(spec, parent_agent)
+        assert result.success is True
+
+        contents = [m.content for m in model.last_messages]
+        assert "seeded context" in contents
+        assert contents.count("child task") == 1
+
+    @pytest.mark.asyncio
+    async def test_setup_a2a_wires_delegation_adapter(self, monkeypatch):
+        from agent_framework.entry import AgentFramework
+
+        class FakeA2AAdapter:
+            def __init__(self):
+                self.discovered = []
+
+            async def discover_agent(self, url, alias=None):
+                self.discovered.append((url, alias))
+                return {}
+
+            def sync_agents_to_catalog(self, catalog):
+                return 0
+
+        monkeypatch.setattr(
+            "agent_framework.protocols.a2a.a2a_client_adapter.A2AClientAdapter",
+            FakeA2AAdapter,
+        )
+
+        framework = AgentFramework()
+        framework.setup(auto_approve_tools=True)
+        framework.config.a2a.known_agents = [{"url": "https://a2a.example", "alias": "x"}]
+        await framework.setup_a2a()
+        assert framework._deps.delegation_executor._a2a_adapter is framework._a2a_adapter
+
+    def test_mcp_sync_tools_to_catalog_supports_server_filter(self):
+        from agent_framework.protocols.mcp.mcp_client_manager import MCPClientManager
+        from agent_framework.models.mcp import MCPToolInfo
+        from agent_framework.tools.catalog import GlobalToolCatalog
+
+        manager = MCPClientManager()
+        manager._discovered_tools = {
+            "s1": [MCPToolInfo(name="t1", description="", input_schema={}, server_id="s1")],
+            "s2": [MCPToolInfo(name="t2", description="", input_schema={}, server_id="s2")],
+        }
+        catalog = GlobalToolCatalog()
+        count = manager.sync_tools_to_catalog(catalog, server_id="s1")
+        assert count == 1
+        names = {e.meta.name for e in catalog.list_all()}
+        assert names == {"t1"}

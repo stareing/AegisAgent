@@ -70,20 +70,27 @@ class MCPClientManager:
         for sid in server_ids:
             await self.disconnect_server(sid)
 
-    def sync_tools_to_catalog(self, catalog: Any) -> int:
-        """Register all discovered MCP tools into a GlobalToolCatalog.
+    def sync_tools_to_catalog(
+        self, catalog: Any, server_id: str | None = None
+    ) -> int:
+        """Register discovered MCP tools into a GlobalToolCatalog.
 
         Returns the number of tools registered.
         """
         count = 0
-        for server_id, tools in self._discovered_tools.items():
+        if server_id is not None:
+            items = [(server_id, self._discovered_tools.get(server_id, []))]
+        else:
+            items = list(self._discovered_tools.items())
+
+        for sid, tools in items:
             for tool_info in tools:
                 meta = ToolMeta(
                     name=tool_info.name,
                     description=tool_info.description,
                     parameters_schema=tool_info.input_schema,
                     source="mcp",
-                    mcp_server_id=server_id,
+                    mcp_server_id=sid,
                     is_async=True,
                 )
                 entry = ToolEntry(meta=meta, callable_ref=None, validator_model=None)
