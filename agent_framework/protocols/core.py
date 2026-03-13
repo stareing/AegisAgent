@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, AsyncIterator, Protocol, runtime_checkable
 
-from agent_framework.models.memory import MemoryCandidate, MemoryKind, MemoryRecord
+from agent_framework.models.memory import MemoryCandidate, MemoryKind, MemoryRecord, MemorySourceContext
 from agent_framework.models.message import Message, ModelResponse, ToolCallRequest
 from agent_framework.models.tool import ToolEntry, ToolExecutionMeta, ToolResult
 
@@ -123,7 +123,11 @@ class MemoryManagerProtocol(Protocol):
         final_answer: str | None,
         iteration_results: list[IterationResult],
     ) -> None: ...
-    def remember(self, candidate: MemoryCandidate) -> str | None: ...
+    def remember(
+        self,
+        candidate: MemoryCandidate,
+        source_context: MemorySourceContext | None = None,
+    ) -> str | None: ...
     def forget(self, memory_id: str) -> None: ...
     def list_memories(
         self, agent_id: str, user_id: str | None

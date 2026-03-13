@@ -1,3 +1,13 @@
+"""Structured logging infrastructure.
+
+ARCHITECTURAL CONSTRAINT — Logs are for observation ONLY:
+- Logs serve observability, debugging, and audit purposes.
+- NO business logic may depend on log content as a state source.
+- Runtime state MUST be passed through structured objects (IterationResult,
+  AgentState, ToolResult, etc.), never extracted from log messages.
+- If logging is disabled or fails, correctness MUST NOT be affected.
+- A module that "only logs" its result but does not return it has a design bug.
+"""
 from __future__ import annotations
 
 import logging

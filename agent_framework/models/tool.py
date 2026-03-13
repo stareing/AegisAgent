@@ -6,7 +6,18 @@ from pydantic import BaseModel, Field
 
 
 class ToolMeta(BaseModel):
-    """Metadata describing a tool."""
+    """Metadata describing a tool.
+
+    Immutability contract:
+    - ToolMeta is FROZEN after registration. No module may modify fields
+      (especially parameters_schema) at runtime.
+    - Visibility can be controlled via ScopedToolRegistry (show/hide tools),
+      but the tool's CONTRACT (schema, description, category) is immutable.
+    - This prevents race conditions in concurrent runs, A2A sync, and
+      MCP schema caching.
+    """
+
+    model_config = {"frozen": True}
 
     name: str
     description: str = ""
@@ -58,7 +69,15 @@ class ToolExecutionError(BaseModel):
 
 
 class ToolResult(BaseModel):
-    """Result of a tool execution."""
+    """Result of a tool execution.
+
+    output contract:
+    - output MUST be JSON-serializable (str, int, float, bool, None, dict, list).
+    - Callables, connection objects, raw SDK clients, exception objects are FORBIDDEN.
+    - Large outputs must be summarised by the tool/delegation layer before returning.
+    - The output is what gets projected into SessionState messages and LLM context.
+      It is NOT a raw internal data structure — it is a message-safe projection.
+    """
 
     model_config = {"arbitrary_types_allowed": True}
 

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from agent_framework.models.memory import (
     MemoryCandidate,
     MemoryRecord,
+    MemorySourceContext,
     MemoryUpdateAction,
 )
 
@@ -80,10 +81,27 @@ class BaseMemoryManager(ABC):
         """Decide how to handle a candidate against existing records."""
         ...
 
-    def remember(self, candidate: MemoryCandidate) -> str | None:
-        """Save or update a memory from a candidate."""
+    def remember(
+        self,
+        candidate: MemoryCandidate,
+        source_context: MemorySourceContext | None = None,
+    ) -> str | None:
+        """Save or update a memory from a candidate.
+
+        Args:
+            candidate: The memory to save.
+            source_context: Provenance metadata — distinguishes user-explicit
+                saves from auto-extraction or sub-agent writes. If None,
+                defaults to source_type="agent" with current run_id.
+        """
         if not self._enabled or not self._agent_id:
             return None
+
+        if source_context is None:
+            source_context = MemorySourceContext(
+                source_type="agent",
+                source_run_id=self._run_id or "",
+            )
 
         existing = self._store.list_by_user(
             self._agent_id, self._user_id, active_only=False
@@ -103,6 +121,11 @@ class BaseMemoryManager(ABC):
         # UPSERT
         import uuid
 
+        # Build source string from context for auditing
+        source_str = source_context.source_type
+        if source_context.source_spawn_id:
+            source_str += f":spawn:{source_context.source_spawn_id}"
+
         match = None
         for r in existing:
             if (
@@ -117,6 +140,7 @@ class BaseMemoryManager(ABC):
                 return match.memory_id
             match.content = candidate.content
             match.tags = candidate.tags
+            match.source = source_str
             match.version += 1
             self._store.update(match)
             return match.memory_id
@@ -129,7 +153,7 @@ class BaseMemoryManager(ABC):
                 title=candidate.title,
                 content=candidate.content,
                 tags=candidate.tags,
-                source="auto",
+                source=source_str,
             )
             return self._store.save(record)
 

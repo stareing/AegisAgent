@@ -106,6 +106,18 @@ class ToolRegistry:
 class ScopedToolRegistry:
     """Read-only view of a ToolRegistry filtered by whitelist.
 
+    IMPORTANT — visibility vs execution boundary:
+    ScopedToolRegistry provides VISIBILITY FILTERING only. It controls which
+    tools appear in export_schemas() (what the LLM can see), but it is NOT
+    a security boundary.
+
+    The true execution security boundary is ToolExecutor.is_tool_allowed()
+    which re-checks CapabilityPolicy at execution time. Even if a tool is
+    invisible in the scoped registry, a crafted tool_call name could bypass
+    this layer. Therefore:
+    - ScopedToolRegistry → visibility optimisation (what the LLM sees)
+    - ToolExecutor.is_tool_allowed() → security enforcement (what can run)
+
     Whitelist matches against bare tool names.
     """
 

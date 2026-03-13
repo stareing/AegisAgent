@@ -1,4 +1,26 @@
-"""Entry point: AgentFramework class wiring all components together."""
+"""Entry point: AgentFramework class wiring all components together.
+
+Framework vs Integration Layer boundary:
+
+FRAMEWORK CORE (this package) is responsible for:
+- Agent runtime (loop, coordinator, state)
+- Tool execution and routing
+- Context engineering
+- Memory management
+- Sub-agent orchestration
+
+INTEGRATION LAYER (external consumers) is responsible for:
+- User authentication and authorization
+- Session ID generation and mapping
+- API DTO conversion (REST/WebSocket/gRPC)
+- UI rendering and display
+- Memory admin tool exposure strategy
+- Deployment-specific confirmation policies
+
+This boundary ensures the framework core is not coupled to any specific
+deployment model (CLI, REST API, SDK, REPL). Product-level behaviours
+(auth, admin UI, streaming) belong in the integration layer.
+"""
 
 from __future__ import annotations
 

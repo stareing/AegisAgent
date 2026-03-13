@@ -499,7 +499,12 @@ class TestSharedWriteMemoryManager:
     def test_remember_delegates_to_parent(self):
         candidate = _make_candidate()
         self.mgr.remember(candidate)
-        self.parent_mgr.remember.assert_called_once_with(candidate)
+        # SharedWrite forces source_type="subagent" when delegating to parent
+        self.parent_mgr.remember.assert_called_once()
+        call_args = self.parent_mgr.remember.call_args
+        assert call_args[0][0] == candidate
+        source_ctx = call_args[1]["source_context"]
+        assert source_ctx.source_type == "subagent"
 
     def test_forget_delegates_to_parent(self):
         self.mgr.forget("mid")

@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 from agent_framework.infra.logger import get_logger
 from agent_framework.models.subagent import (
     ArtifactRef,
+    DelegationErrorCode,
     DelegationSummary,
     SubAgentResult,
     SubAgentSpec,
@@ -111,12 +112,16 @@ class DelegationExecutor:
         task_input: str,
         skill_id: str | None = None,
     ) -> SubAgentResult:
-        """Delegate to a remote A2A agent."""
+        """Delegate to a remote A2A agent.
+
+        All failure modes are mapped to unified DelegationErrorCode so the
+        main agent loop sees the same error vocabulary as local subagent failures.
+        """
         if self._a2a_adapter is None:
             return SubAgentResult(
                 spawn_id="",
                 success=False,
-                error="A2A adapter not configured",
+                error=f"{DelegationErrorCode.REMOTE_UNAVAILABLE}: A2A adapter not configured",
             )
 
         # Find alias by URL
@@ -141,14 +146,32 @@ class DelegationExecutor:
             return SubAgentResult(
                 spawn_id="",
                 success=False,
-                error=f"A2A agent at {agent_url} not discoverable",
+                error=f"{DelegationErrorCode.REMOTE_UNAVAILABLE}: A2A agent at {agent_url} not discoverable",
             )
 
-        return await self._a2a_adapter.delegate_task(alias, task_input, skill_id)
+        try:
+            return await self._a2a_adapter.delegate_task(alias, task_input, skill_id)
+        except TimeoutError:
+            return SubAgentResult(
+                spawn_id="",
+                success=False,
+                error=f"{DelegationErrorCode.TIMEOUT}: A2A delegation timed out for {agent_url}",
+            )
+        except Exception as e:
+            return SubAgentResult(
+                spawn_id="",
+                success=False,
+                error=f"{DelegationErrorCode.DELEGATION_FAILED}: {e}",
+            )
 
     @staticmethod
     def summarize_result(result: SubAgentResult) -> DelegationSummary:
-        """Convert a SubAgentResult to a DelegationSummary for LLM consumption."""
+        """Convert a SubAgentResult to a DelegationSummary for LLM consumption.
+
+        Error codes are unified across local subagent and remote A2A delegation
+        via DelegationErrorCode enum, so the main agent loop sees a consistent
+        error vocabulary regardless of delegation target.
+        """
         summary_text = result.final_answer or result.error or ""
         # Add termination hint so the model knows to stop calling spawn_agent
         if result.success:
@@ -156,6 +179,12 @@ class DelegationExecutor:
                 "\n\n[Sub-agent task completed successfully. "
                 "Summarize this result for the user. Do NOT call spawn_agent again.]"
             )
+
+        # Classify error code from error message
+        error_code: str | None = None
+        if not result.success:
+            error_code = DelegationExecutor._classify_error_code(result.error)
+
         return DelegationSummary(
             status="success" if result.success else "failed",
             summary=summary_text,
@@ -168,5 +197,26 @@ class DelegationExecutor:
                 )
                 for a in result.artifacts
             ],
-            error_code=None if result.success else "DELEGATION_FAILED",
+            error_code=error_code,
         )
+
+    @staticmethod
+    def _classify_error_code(error: str | None) -> str:
+        """Map error messages to unified DelegationErrorCode.
+
+        Both local subagent and A2A failures are classified into the same
+        vocabulary so the main loop can handle them uniformly.
+        """
+        if not error:
+            return DelegationErrorCode.DELEGATION_FAILED
+
+        error_upper = error.upper()
+        if "TIMEOUT" in error_upper or "TIMED OUT" in error_upper:
+            return DelegationErrorCode.TIMEOUT
+        if "QUOTA" in error_upper:
+            return DelegationErrorCode.QUOTA_EXCEEDED
+        if "PERMISSION_DENIED" in error_upper:
+            return DelegationErrorCode.PERMISSION_DENIED
+        if "UNAVAILABLE" in error_upper or "NOT CONFIGURED" in error_upper:
+            return DelegationErrorCode.REMOTE_UNAVAILABLE
+        return DelegationErrorCode.DELEGATION_FAILED

@@ -67,8 +67,8 @@ class ToolExecutor:
 
         entry = self._registry.get_tool(tool_name)
 
-        # Confirmation
-        if entry.meta.require_confirm and self._confirmation:
+        # Confirmation — decision is policy + tool metadata, handler only executes flow
+        if self._should_confirm(entry) and self._confirmation:
             approved = await self._confirmation.request_confirmation(
                 tool_name, tool_call_request.arguments, entry.meta.description
             )
@@ -91,6 +91,7 @@ class ToolExecutor:
         # Execute
         try:
             output = await self._route_execution(entry, validated)
+            output = self._sanitize_output(output, tool_name)
             return (
                 ToolResult(
                     tool_call_id=tool_call_request.id,
@@ -115,7 +116,12 @@ class ToolExecutor:
         return await asyncio.gather(*[_run(r) for r in tool_call_requests])
 
     def is_tool_allowed(self, tool_name: str, policy: CapabilityPolicy) -> bool:
-        """Hard runtime gate for tool permission ceiling."""
+        """Hard runtime gate for tool permission ceiling.
+
+        This is the SECURITY BOUNDARY — schema-level filtering (export_schemas)
+        is a visibility optimization, NOT a security check. Execution-time
+        validation here is the authoritative enforcement point.
+        """
         if not self._registry.has_tool(tool_name):
             return False
         allowed = apply_capability_policy(self._registry.list_tools(), policy)
@@ -308,6 +314,86 @@ class ToolExecutor:
                 source="local",
             ),
         )
+
+    # ------------------------------------------------------------------
+    # Output sanitization — enforces JSON-serializable boundary (#9)
+    # ------------------------------------------------------------------
+
+    # Maximum output size in characters before truncation
+    _MAX_OUTPUT_CHARS = 50_000
+
+    @staticmethod
+    def _sanitize_output(output: Any, tool_name: str) -> Any:
+        """Ensure tool output is JSON-serializable and bounded in size.
+
+        Contract:
+        - output must be JSON-serializable (str, int, float, bool, None, dict, list).
+        - Callables, connection objects, exception objects are coerced to str.
+        - Large outputs are truncated with a warning suffix.
+        - This is the LAST gate before output enters ToolResult and gets
+          projected into SessionState / LLM context.
+        """
+        import json
+
+        # Fast path: primitives
+        if output is None or isinstance(output, (str, int, float, bool)):
+            if isinstance(output, str) and len(output) > ToolExecutor._MAX_OUTPUT_CHARS:
+                return output[: ToolExecutor._MAX_OUTPUT_CHARS] + f"\n... [truncated, tool={tool_name}]"
+            return output
+
+        # Try JSON serialization to validate
+        try:
+            json.dumps(output, default=str)
+        except (TypeError, ValueError):
+            logger.warning(
+                "tool.output_not_serializable",
+                tool_name=tool_name,
+                output_type=type(output).__name__,
+            )
+            output = str(output)
+
+        # Size check for serialized form
+        if isinstance(output, (dict, list)):
+            serialized = json.dumps(output, default=str, ensure_ascii=False)
+            if len(serialized) > ToolExecutor._MAX_OUTPUT_CHARS:
+                logger.warning(
+                    "tool.output_truncated",
+                    tool_name=tool_name,
+                    original_chars=len(serialized),
+                    limit=ToolExecutor._MAX_OUTPUT_CHARS,
+                )
+                return serialized[: ToolExecutor._MAX_OUTPUT_CHARS] + f"\n... [truncated, tool={tool_name}]"
+
+        return output
+
+    # ------------------------------------------------------------------
+    # Confirmation decision (#12) — policy can escalate confirmation
+    # ------------------------------------------------------------------
+
+    def _should_confirm(
+        self, entry: ToolEntry, policy: CapabilityPolicy | None = None
+    ) -> bool:
+        """Determine if tool execution requires user confirmation.
+
+        Decision hierarchy:
+        1. CapabilityPolicy.force_confirm_categories → always confirm tools in these categories
+        2. ToolMeta.require_confirm=True → tool-level declaration
+        3. Default: no confirmation required
+
+        The ConfirmationHandler only executes the confirmation flow.
+        The decision of WHETHER to confirm lives here.
+        """
+        # Tool-level declaration
+        if entry.meta.require_confirm:
+            return True
+
+        # Policy-level escalation
+        if policy is not None:
+            force_categories = getattr(policy, "force_confirm_categories", None)
+            if force_categories and entry.meta.category in force_categories:
+                return True
+
+        return False
 
     def _meta(self, entry: ToolEntry, start: float) -> ToolExecutionMeta:
         return ToolExecutionMeta(

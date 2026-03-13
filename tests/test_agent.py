@@ -542,30 +542,30 @@ class TestRunCoordinator:
         deps.skill_router.activate_skill.assert_called_once()
 
     def test_build_effective_config_no_skill(self):
+        from agent_framework.agent.run_policy import RunPolicyResolver
         agent = DefaultAgent(model_name="gpt-4", temperature=0.5)
-        coordinator = RunCoordinator()
-        config = coordinator._build_effective_config(agent, None)
+        config = RunPolicyResolver.build_effective_config(agent, None)
         assert config.model_name == "gpt-4"
         assert config.temperature == 0.5
 
     def test_build_effective_config_with_skill_override(self):
+        from agent_framework.agent.run_policy import RunPolicyResolver
         agent = DefaultAgent(model_name="gpt-3.5-turbo", temperature=0.7)
         skill = Skill(
             skill_id="code",
             model_override="gpt-4",
             temperature_override=0.2,
         )
-        coordinator = RunCoordinator()
-        config = coordinator._build_effective_config(agent, skill)
+        config = RunPolicyResolver.build_effective_config(agent, skill)
         assert config.model_name == "gpt-4"
         assert config.temperature == 0.2
         # Safety fields not overridden
         assert config.max_iterations == agent.agent_config.max_iterations
 
     def test_initialize_state(self):
-        agent = DefaultAgent()
-        coordinator = RunCoordinator()
-        state = coordinator._initialize_state(agent, "my task", "run_123")
+        from agent_framework.agent.run_state import RunStateController
+        ctrl = RunStateController()
+        state = ctrl.initialize_state("my task", "run_123")
         assert state.run_id == "run_123"
         assert state.task == "my task"
         assert state.status == AgentStatus.IDLE

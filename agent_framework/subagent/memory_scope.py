@@ -6,6 +6,7 @@ from agent_framework.memory.base_manager import BaseMemoryManager
 from agent_framework.models.memory import (
     MemoryCandidate,
     MemoryRecord,
+    MemorySourceContext,
     MemoryUpdateAction,
 )
 
@@ -152,8 +153,18 @@ class SharedWriteMemoryManager(BaseMemoryManager):
     ) -> list[MemoryCandidate]:
         return []
 
-    def remember(self, candidate: MemoryCandidate) -> str | None:
-        return self._parent.remember(candidate)
+    def remember(
+        self,
+        candidate: MemoryCandidate,
+        source_context: MemorySourceContext | None = None,
+    ) -> str | None:
+        # Force source_type to "subagent" regardless of caller claim
+        ctx = MemorySourceContext(
+            source_type="subagent",
+            source_run_id=self._run_id or "",
+            source_spawn_id=source_context.source_spawn_id if source_context else None,
+        )
+        return self._parent.remember(candidate, source_context=ctx)
 
     def forget(self, memory_id: str) -> None:
         self._parent.forget(memory_id)

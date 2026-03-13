@@ -349,7 +349,7 @@ class AgentLoop:
                             "Do NOT call it again. Summarize the previous result for the user."
                         ),
                     ),
-                    ToolExecutionMeta(execution_time_ms=0, source="dedup_guard"),
+                    ToolExecutionMeta(execution_time_ms=0, source="local"),
                 ))
                 continue
 

@@ -22,7 +22,16 @@ class TokenUsage(BaseModel):
 
 
 class Message(BaseModel):
-    """A single message in conversation history."""
+    """A single message in conversation history.
+
+    metadata boundary:
+    - ``metadata`` is for INTERNAL framework use only (trace_id, timing, etc.).
+    - metadata is NEVER sent to the LLM. ContextSourceProvider and ContextBuilder
+      strip metadata when constructing messages for the model.
+    - metadata is NEVER exposed to external APIs without explicit sanitization.
+    - Only ``role``, ``content``, ``tool_calls``, ``tool_call_id``, and ``name``
+      are LLM-safe fields that may enter the model context.
+    """
 
     role: Literal["system", "user", "assistant", "tool"]
     content: str | None = None

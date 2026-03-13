@@ -36,14 +36,51 @@ class MemoryRecord(BaseModel):
     extra: dict | None = None
 
 
+class MemoryCandidateSource(str, Enum):
+    """Origin of a memory candidate — determines write priority."""
+
+    EXPLICIT_USER = "EXPLICIT_USER"  # User explicitly stated (highest trust)
+    INFERRED = "INFERRED"            # Model-inferred from conversation
+    TOOL_DERIVED = "TOOL_DERIVED"    # Extracted from tool output
+    ADMIN = "ADMIN"                  # Administrative override
+
+
+class MemoryConfidence(str, Enum):
+    """Confidence level for a memory candidate."""
+
+    HIGH = "HIGH"
+    MEDIUM = "MEDIUM"
+    LOW = "LOW"
+
+
 class MemoryCandidate(BaseModel):
-    """A candidate memory to be evaluated for saving."""
+    """A candidate memory to be evaluated for saving.
+
+    Write priority rules:
+    - EXPLICIT_USER + HIGH → always write (user said it directly)
+    - INFERRED + LOW → conservative, ignore by default
+    - TOOL_DERIVED → only write when structured, unambiguous, low-conflict
+    """
 
     kind: MemoryKind = MemoryKind.CUSTOM
     title: str = ""
     content: str = ""
     tags: list[str] = Field(default_factory=list)
     reason: str | None = None
+    candidate_source: MemoryCandidateSource = MemoryCandidateSource.INFERRED
+    confidence: MemoryConfidence = MemoryConfidence.MEDIUM
+
+
+class MemorySourceContext(BaseModel):
+    """Provenance metadata for a memory write operation.
+
+    Tracks WHO wrote a memory so audit/governance can distinguish
+    user-explicit saves from auto-extraction or sub-agent writes.
+    """
+
+    source_type: str = "agent"  # "user" | "agent" | "subagent" | "admin"
+    source_run_id: str = ""
+    source_spawn_id: str | None = None
 
 
 class MemoryUpdateAction(str, Enum):

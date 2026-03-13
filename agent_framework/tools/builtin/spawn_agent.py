@@ -16,6 +16,7 @@ from agent_framework.tools.decorator import tool
     description="Spawn a sub-agent to handle a specific sub-task. The sub-agent runs independently and returns a result.",
     category="subagent",
     require_confirm=False,
+    source="subagent",
 )
 async def spawn_agent(
     task_input: str,
@@ -41,7 +42,3 @@ async def spawn_agent(
         "spawn_agent should not be called directly. "
         "It must be routed through the ToolExecutor."
     )
-
-
-# Override source to "subagent" so ToolExecutor routes correctly
-spawn_agent.__tool_meta__.source = "subagent"  # type: ignore[attr-defined]

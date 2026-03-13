@@ -95,6 +95,10 @@ class CapabilityPolicy(BaseModel):
     # §11.10: Memory admin tools (remember/forget/list_memories) are dangerous
     # and default-blocked even if manually registered. Only exposed when True.
     allow_memory_admin: bool = False
+    # §12: Policy-level confirmation escalation. Tools in these categories
+    # require user confirmation even if ToolMeta.require_confirm=False.
+    # Decision hierarchy: force_confirm_categories > ToolMeta.require_confirm > default(no).
+    force_confirm_categories: list[str] | None = None
 
 
 class ErrorStrategy(str, Enum):
@@ -140,9 +144,18 @@ class MemoryPolicy(BaseModel):
 class EffectiveRunConfig(BaseModel):
     """Final effective config for a single run.
 
-    Built by RunCoordinator from FrameworkConfig + AgentConfig + Skill override.
+    Built by RunPolicyResolver from AgentConfig + Skill override.
     Skill override can only modify whitelisted fields (model_name, temperature).
+
+    Invariants:
+    - Frozen after construction — no module may modify it during a run.
+    - Only RunPolicyResolver creates instances.
+    - This is a static configuration snapshot, NOT a state object.
+      Runtime statistics (token counts, iteration progress) belong in AgentState.
+    - Downstream modules (AgentLoop, ContextEngineer) may READ but never WRITE.
     """
+
+    model_config = {"frozen": True}
 
     model_name: str = "gpt-3.5-turbo"
     temperature: float = 0.7

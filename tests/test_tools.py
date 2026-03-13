@@ -689,11 +689,21 @@ class TestDelegationExecutor:
         assert summary.error_code is None
 
     def test_summarize_result_failure(self):
-        result = SubAgentResult(spawn_id="s1", success=False, error="timeout")
+        result = SubAgentResult(spawn_id="s1", success=False, error="something went wrong")
         summary = DelegationExecutor.summarize_result(result)
         assert summary.status == "failed"
-        assert summary.summary == "timeout"
+        assert summary.summary == "something went wrong"
         assert summary.error_code == "DELEGATION_FAILED"
+
+    def test_summarize_result_timeout_error(self):
+        result = SubAgentResult(spawn_id="s1", success=False, error="Sub-agent timed out")
+        summary = DelegationExecutor.summarize_result(result)
+        assert summary.error_code == "TIMEOUT"
+
+    def test_summarize_result_permission_error(self):
+        result = SubAgentResult(spawn_id="s1", success=False, error="PERMISSION_DENIED: not allowed")
+        summary = DelegationExecutor.summarize_result(result)
+        assert summary.error_code == "PERMISSION_DENIED"
 
     def test_set_a2a_adapter(self):
         de = DelegationExecutor()

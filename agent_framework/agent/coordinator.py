@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING
 from agent_framework.infra.logger import get_logger
 from agent_framework.agent.capability_policy import apply_capability_policy
 from agent_framework.agent.loop import AgentLoop
+from agent_framework.agent.run_policy import RunPolicyResolver
+from agent_framework.agent.run_state import RunStateController
 from agent_framework.models.agent import (
     AgentRunResult,
     AgentState,
@@ -36,19 +38,23 @@ logger = get_logger(__name__)
 class RunCoordinator:
     """Manages the full lifecycle of an agent run.
 
+    Responsibilities (v2.4 separation):
+    - Orchestration ONLY — sequencing the run lifecycle steps.
+    - Delegates state mutation to RunStateController.
+    - Delegates config composition to RunPolicyResolver.
+    - Delegates context/memory policy interpretation to their respective modules:
+      * ContextPolicy -> ContextEngineer (exclusive consumer)
+      * MemoryPolicy  -> MemoryManager  (exclusive consumer)
+
     Flow (section 13.9):
     1. Initialize state + SessionState
     2. memory_manager.begin_session()
     3. Detect and activate skill
-    4. Build effective config
+    4. Build effective config (via RunPolicyResolver)
     5. Iteration loop:
-       - Get saved memories
-       - Get session history
-       - Build context
        - Prepare LLM request
-       - Execute iteration
-       - Write to SessionState
-       - Record iteration
+       - Execute iteration (AgentLoop)
+       - Project to SessionState (RunStateController)
        - Check stop
     6. memory_manager.record_turn()
     7. memory_manager.end_session()
@@ -57,6 +63,8 @@ class RunCoordinator:
 
     def __init__(self, loop: AgentLoop | None = None) -> None:
         self._loop = loop or AgentLoop()
+        self._state_ctrl = RunStateController()
+        self._policy_resolver = RunPolicyResolver()
 
     async def run(
         self,
@@ -68,7 +76,7 @@ class RunCoordinator:
         cancel_event: asyncio.Event | None = None,
     ) -> AgentRunResult:
         run_id = str(uuid.uuid4())
-        agent_state = self._initialize_state(agent, task, run_id)
+        agent_state = self._state_ctrl.initialize_state(task, run_id)
         session_state = SessionState(session_id=str(uuid.uuid4()), run_id=run_id)
         if initial_session_messages:
             for msg in initial_session_messages:
@@ -91,8 +99,7 @@ class RunCoordinator:
         session_started = False
         try:
             # Defensive reset: clear any stale skill state from a prior run
-            # that may not have cleaned up (e.g. SIGKILL). This is safe because
-            # _apply_skill_if_needed() below will re-detect and activate as needed.
+            # that may not have cleaned up (e.g. SIGKILL).
             self._deactivate_skill_if_needed(deps)
 
             # Begin session
@@ -110,8 +117,10 @@ class RunCoordinator:
                     skill_name=active_skill.name,
                 )
 
-            # Build effective config
-            effective_config = self._build_effective_config(agent, active_skill)
+            # Build effective config (delegated to RunPolicyResolver)
+            effective_config = self._policy_resolver.build_effective_config(
+                agent, active_skill
+            )
 
             await agent.on_before_run(task, agent_state)
 
@@ -164,13 +173,13 @@ class RunCoordinator:
                     agent_state, llm_request, effective_config,
                 )
 
-                # Write to session state
-                self._record_iteration(
-                    deps, session_state, iteration_result, agent_state
+                # Project iteration to session (RunStateController)
+                self._state_ctrl.project_iteration_to_session(
+                    session_state, iteration_result
                 )
 
-                agent_state.iteration_count += 1
-                agent_state.iteration_history.append(iteration_result)
+                # Advance iteration counter (RunStateController)
+                self._state_ctrl.advance_iteration(agent_state, iteration_result)
 
                 # Check stop
                 if agent.should_stop(iteration_result, agent_state):
@@ -180,7 +189,7 @@ class RunCoordinator:
                     break
 
             # Post-run
-            agent_state.status = AgentStatus.FINISHED
+            self._state_ctrl.mark_finished(agent_state)
             deps.memory_manager.record_turn(task, final_answer, agent_state.iteration_history)
 
             await agent.on_final_answer(final_answer, agent_state)
@@ -219,42 +228,6 @@ class RunCoordinator:
                     logger.warning("run.end_session_failed", run_id=run_id, error=str(e))
             self._deactivate_skill_if_needed(deps)
 
-    def _initialize_state(
-        self, agent: BaseAgent, task: str, run_id: str
-    ) -> AgentState:
-        return AgentState(
-            run_id=run_id,
-            task=task,
-            status=AgentStatus.IDLE,
-        )
-
-    def _build_effective_config(
-        self, agent: BaseAgent, active_skill: Skill | None
-    ) -> EffectiveRunConfig:
-        """Build effective run config from AgentConfig + Skill override.
-
-        v2.4 §8: Skill override can only modify whitelisted fields
-        (model_name, temperature). Safety fields like max_iterations are
-        never overridden by skills.
-        """
-        cfg = agent.agent_config
-        model_name = cfg.model_name
-        temperature = cfg.temperature
-
-        # Skill override — whitelist only (v2.4 §8)
-        if active_skill is not None:
-            if active_skill.model_override:
-                model_name = active_skill.model_override
-            if active_skill.temperature_override is not None:
-                temperature = active_skill.temperature_override
-
-        return EffectiveRunConfig(
-            model_name=model_name,
-            temperature=temperature,
-            max_output_tokens=cfg.max_output_tokens,
-            max_iterations=cfg.max_iterations,
-        )
-
     def _deactivate_skill_if_needed(self, deps: AgentRuntimeDeps) -> None:
         """v2.4 §9/§18: Skill deactivation is RunCoordinator's exclusive responsibility."""
         deps.context_engineer.set_skill_context(None)
@@ -288,7 +261,6 @@ class RunCoordinator:
         memories = deps.memory_manager.select_for_context(task, agent_state)
 
         # Prepare context materials
-        # agent_config carries system_prompt etc.; effective_config carries runtime overrides
         context_materials = {
             "agent_config": agent.agent_config,
             "session_state": session_state,
@@ -299,11 +271,15 @@ class RunCoordinator:
         }
 
         # Build LLM context
+        # NOTE: ContextPolicy is consumed exclusively by ContextEngineer.
+        # RunCoordinator passes it but never interprets its fields.
         llm_messages = deps.context_engineer.prepare_context_for_llm(
             agent_state, context_materials
         )
 
         # Export tool schemas with capability ceiling applied first.
+        # This is VISIBILITY filtering. The security boundary is
+        # ToolExecutor.is_tool_allowed() at execution time.
         capability_policy = agent.get_capability_policy()
         allowed_tools = apply_capability_policy(
             deps.tool_registry.list_tools(),
@@ -325,38 +301,7 @@ class RunCoordinator:
         skill = deps.skill_router.detect_skill(task)
         if skill:
             deps.skill_router.activate_skill(skill, deps.context_engineer)
-            agent_state.active_skill_id = skill.skill_id
-
-    def _record_iteration(
-        self,
-        deps: AgentRuntimeDeps,
-        session_state: SessionState,
-        iteration_result: IterationResult,
-        agent_state: AgentState,
-    ) -> None:
-        """Record iteration results into session state."""
-        # Add assistant message
-        if iteration_result.model_response:
-            resp = iteration_result.model_response
-            session_state.append_message(
-                Message(
-                    role="assistant",
-                    content=resp.content,
-                    tool_calls=resp.tool_calls if resp.tool_calls else None,
-                )
-            )
-
-        # Add tool results
-        for tr in iteration_result.tool_results:
-            output_str = str(tr.output) if tr.success else str(tr.error)
-            session_state.append_message(
-                Message(
-                    role="tool",
-                    content=output_str,
-                    tool_call_id=tr.tool_call_id,
-                    name=tr.tool_name,
-                )
-            )
+            self._state_ctrl.set_active_skill(agent_state, skill.skill_id)
 
     def _finalize_run(
         self,
@@ -413,7 +358,7 @@ class RunCoordinator:
         error: Exception,
         agent_state: AgentState,
     ) -> AgentRunResult:
-        agent_state.status = AgentStatus.ERROR
+        self._state_ctrl.mark_error(agent_state)
         return AgentRunResult(
             run_id=agent_state.run_id,
             success=False,

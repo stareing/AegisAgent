@@ -25,11 +25,19 @@ logger = get_logger(__name__)
 class SubAgentFactory:
     """Creates sub-agent instances with appropriate deps based on SubAgentSpec.
 
-    Responsibilities:
+    Responsibilities (STRICT — do not expand):
     - Create agent config from spec overrides
     - Build scoped memory manager based on MemoryScope
     - Assemble AgentRuntimeDeps for the sub-agent
     - Apply tool whitelist filtering
+
+    Anti-bloat boundary:
+    - Factory ONLY assembles instances. It does NOT contain business rules.
+    - Policy resolution (e.g. which tools to allow) belongs in the policy layer.
+    - Dependency creation (stores, adapters) belongs in the deps builder layer.
+    - Tracing, metrics, hooks, env config must NOT be added here.
+    - If this class grows beyond ~200 lines, it needs decomposition into
+      SubAgentPolicyResolver + SubAgentDependencyBuilder.
     """
 
     def __init__(self, parent_deps: AgentRuntimeDeps) -> None:

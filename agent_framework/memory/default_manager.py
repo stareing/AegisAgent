@@ -5,9 +5,12 @@ from typing import TYPE_CHECKING
 
 from agent_framework.memory.base_manager import BaseMemoryManager
 from agent_framework.models.memory import (
+    MemoryCandidateSource,
     MemoryCandidate,
+    MemoryConfidence,
     MemoryKind,
     MemoryRecord,
+    MemorySourceContext,
     MemoryUpdateAction,
 )
 
@@ -42,6 +45,13 @@ class DefaultMemoryManager(BaseMemoryManager):
     Follows GPT-style Saved Memory principles:
     - Save user preferences, constraints, project context
     - Don't save temporary questions, chat logs, tool outputs
+
+    Extraction boundary:
+    - record_turn() is the SOLE automatic extraction entry point.
+    - One conversation turn triggers AT MOST one extraction pass.
+    - Iteration-level intermediate state does NOT trigger extraction.
+    - Tool execution mid-flight does NOT trigger extraction.
+    - Low-confidence inferred candidates are discarded by default.
     """
 
     def __init__(
@@ -101,11 +111,26 @@ class DefaultMemoryManager(BaseMemoryManager):
         final_answer: str | None,
         iteration_results: list[IterationResult],
     ) -> None:
+        """Sole automatic extraction entry point. One turn = one extraction pass.
+
+        Low-confidence inferred candidates are filtered out to prevent
+        "memory hallucinations" from speculative model reasoning.
+        """
         if not self._enabled or not self._auto_extract:
             return
         candidates = self.extract_candidates(user_input, final_answer, iteration_results)
         for c in candidates:
-            self.remember(c)
+            # Filter out low-confidence inferred candidates
+            if (
+                c.candidate_source == MemoryCandidateSource.INFERRED
+                and c.confidence == MemoryConfidence.LOW
+            ):
+                continue
+            source_ctx = MemorySourceContext(
+                source_type="agent",
+                source_run_id=self._run_id or "",
+            )
+            self.remember(c, source_context=source_ctx)
 
     def extract_candidates(
         self,

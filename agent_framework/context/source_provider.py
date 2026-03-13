@@ -17,6 +17,13 @@ class ContextSourceProvider:
 
     This is where Saved Memory formatting happens (section 12.4).
     The memory layer only returns MemoryRecord lists.
+
+    Format stability contract:
+    - Same input MUST produce identical output (deterministic).
+    - Memory display order: pinned first, then by kind, then alphabetical title.
+    - Same memory kind uses a fixed template — no per-call variation.
+    - Saved Memories block always uses role="system" in slot 3.
+    - No randomness, no time-dependent formatting, no caller-dependent branching.
     """
 
     def collect_system_core(
@@ -41,16 +48,25 @@ class ContextSourceProvider:
         """Format saved memories into a text block for injection.
 
         This is where memory formatting happens - memory layer never does this.
+
+        Deterministic ordering: pinned first, then by kind, then alphabetical title.
+        Same input always produces identical output.
         """
         if not records:
             return None
 
+        # Stable sort: pinned first → kind → title (alphabetical)
+        sorted_records = sorted(
+            records,
+            key=lambda r: (not r.is_pinned, r.kind.value, r.title.lower()),
+        )
+
         lines = ["## Saved Memories", ""]
-        for r in records:
+        for r in sorted_records:
             prefix = "[pinned] " if r.is_pinned else ""
             lines.append(f"- {prefix}**{r.title}**: {r.content}")
             if r.tags:
-                lines.append(f"  (tags: {', '.join(r.tags)})")
+                lines.append(f"  (tags: {', '.join(sorted(r.tags))})")
         return "\n".join(lines)
 
     def collect_session_groups(

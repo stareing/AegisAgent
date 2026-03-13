@@ -47,6 +47,7 @@ def tool(
     require_confirm: bool = False,
     tags: list[str] | None = None,
     namespace: str | None = None,
+    source: str = "local",
 ) -> Callable:
     """Decorator to register a function as a tool.
 
@@ -71,7 +72,7 @@ def tool(
             require_confirm=require_confirm,
             is_async=is_async,
             tags=tags or [],
-            source="local",
+            source=source,
             namespace=namespace,
         )
 
