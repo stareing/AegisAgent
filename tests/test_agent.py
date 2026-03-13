@@ -458,7 +458,10 @@ class TestAgentLoop:
             agent, AgentLoopDeps(model_adapter=mock_adapter, tool_executor=mock_executor),
             state, request, config
         )
-        assert len(result.tool_results) == 0
+        # Blocked tool calls now return rejection feedback to the LLM
+        assert len(result.tool_results) == 1
+        assert result.tool_results[0].success is False
+        assert "denied" in result.tool_results[0].output.lower()
         mock_executor.batch_execute.assert_not_called()
 
 

@@ -382,6 +382,20 @@ class AgentLoop:
                         "tool.blocked_by_capability_policy",
                         tool_name=tc.function_name,
                     )
+                    # Return an error result so the LLM knows the tool was rejected
+                    dedup_results.append((
+                        ToolResult(
+                            tool_call_id=tc.id,
+                            tool_name=tc.function_name,
+                            success=False,
+                            output=(
+                                f"Tool '{tc.function_name}' is not available. "
+                                "Check available tools and try a different approach. "
+                                "Do NOT retry this tool call."
+                            ),
+                        ),
+                        ToolExecutionMeta(execution_time_ms=0, source="local"),
+                    ))
                     continue
             decision = await agent.on_tool_call_requested(tc)
             if decision.allowed:
@@ -392,8 +406,20 @@ class AgentLoop:
                     tool_name=tc.function_name,
                     reason=decision.reason,
                 )
+                # Return rejection feedback so the LLM knows why and doesn't retry
+                dedup_results.append((
+                    ToolResult(
+                        tool_call_id=tc.id,
+                        tool_name=tc.function_name,
+                        success=False,
+                        output=f"Tool call denied: {decision.reason or 'rejected by agent policy'}. Try a different approach.",
+                    ),
+                    ToolExecutionMeta(execution_time_ms=0, source="local"),
+                ))
 
         if not approved and not dedup_results:
+            # All tool calls were silently blocked with no feedback — shouldn't happen
+            # after the fixes above, but keep as safety net
             logger.warning(
                 "tool.all_blocked",
                 requested=[tc.function_name for tc in tool_calls],
