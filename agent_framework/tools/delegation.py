@@ -36,8 +36,19 @@ class DelegationExecutor:
         self, spec: SubAgentSpec, parent_agent: Any
     ) -> SubAgentResult:
         """Delegate task to a sub-agent with permission checks (doc 16.2/20.2)."""
+        parent_id = getattr(parent_agent, "agent_id", "unknown") if parent_agent else "none"
+
+        logger.info(
+            "delegation.subagent.requested",
+            parent_agent_id=parent_id,
+            task_input=spec.task_input[:150],
+            mode=spec.mode.value if hasattr(spec.mode, "value") else str(spec.mode),
+            memory_scope=spec.memory_scope.value if hasattr(spec.memory_scope, "value") else str(spec.memory_scope),
+        )
+
         # Check: SubAgentRuntime must be configured
         if self._sub_agent_runtime is None:
+            logger.error("delegation.subagent.no_runtime", parent_agent_id=parent_id)
             return SubAgentResult(
                 spawn_id=spec.spawn_id,
                 success=False,
@@ -48,6 +59,11 @@ class DelegationExecutor:
         if parent_agent is not None and hasattr(parent_agent, "on_spawn_requested"):
             allowed = await parent_agent.on_spawn_requested(spec)
             if not allowed:
+                logger.warning(
+                    "delegation.subagent.hook_denied",
+                    parent_agent_id=parent_id,
+                    reason="on_spawn_requested returned False",
+                )
                 return SubAgentResult(
                     spawn_id=spec.spawn_id,
                     success=False,
@@ -62,9 +78,10 @@ class DelegationExecutor:
                 # so they will be blocked here
                 if not getattr(config, "allow_spawn_children", True):
                     logger.warning(
-                        "subagent.spawn_denied",
-                        agent_id=getattr(parent_agent, "agent_id", "unknown"),
+                        "delegation.subagent.spawn_denied",
+                        agent_id=parent_id,
                         reason="allow_spawn_children=False",
+                        hint="Sub-agents cannot spawn children (recursive spawn protection)",
                     )
                     return SubAgentResult(
                         spawn_id=spec.spawn_id,
@@ -72,6 +89,11 @@ class DelegationExecutor:
                         error="PERMISSION_DENIED: This agent is not allowed to spawn children",
                     )
 
+        logger.info(
+            "delegation.subagent.approved",
+            parent_agent_id=parent_id,
+            task_input=spec.task_input[:80],
+        )
         return await self._sub_agent_runtime.spawn(spec, parent_agent)
 
     def set_a2a_adapter(self, adapter: Any) -> None:
@@ -122,9 +144,16 @@ class DelegationExecutor:
     @staticmethod
     def summarize_result(result: SubAgentResult) -> DelegationSummary:
         """Convert a SubAgentResult to a DelegationSummary for LLM consumption."""
+        summary_text = result.final_answer or result.error or ""
+        # Add termination hint so the model knows to stop calling spawn_agent
+        if result.success:
+            summary_text += (
+                "\n\n[Sub-agent task completed successfully. "
+                "Summarize this result for the user. Do NOT call spawn_agent again.]"
+            )
         return DelegationSummary(
             status="success" if result.success else "failed",
-            summary=result.final_answer or result.error or "",
+            summary=summary_text,
             artifacts_digest=[a.name for a in result.artifacts],
             error_code=None if result.success else "DELEGATION_FAILED",
         )

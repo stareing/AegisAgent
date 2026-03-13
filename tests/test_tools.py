@@ -684,7 +684,8 @@ class TestDelegationExecutor:
         result = SubAgentResult(spawn_id="s1", success=True, final_answer="answer")
         summary = DelegationExecutor.summarize_result(result)
         assert summary.status == "success"
-        assert summary.summary == "answer"
+        assert "answer" in summary.summary
+        assert "Do NOT call spawn_agent again" in summary.summary
         assert summary.error_code is None
 
     def test_summarize_result_failure(self):

@@ -18,6 +18,8 @@ from agent_framework.infra.logger import configure_logging, get_logger
 from agent_framework.memory.default_manager import DefaultMemoryManager
 from agent_framework.memory.sqlite_store import SQLiteMemoryStore
 from agent_framework.models.agent import AgentRunResult, Skill
+from agent_framework.models.message import Message
+from agent_framework.models.session import SessionState
 from agent_framework.tools.catalog import GlobalToolCatalog
 from agent_framework.tools.confirmation import AutoApproveConfirmationHandler, CLIConfirmationHandler
 from agent_framework.tools.delegation import DelegationExecutor
@@ -358,11 +360,27 @@ class AgentFramework:
                     self._registry.register(entry)
         return count
 
-    async def run(self, task: str) -> AgentRunResult:
-        """Run the agent on a task."""
+    async def run(
+        self,
+        task: str,
+        initial_session_messages: list[Message] | None = None,
+    ) -> AgentRunResult:
+        """Run the agent on a task.
+
+        Args:
+            task: The user input / task description.
+            initial_session_messages: Prior conversation history. Injected into
+                the session so the model sees multi-turn context. The ContextBuilder
+                automatically trims older messages when the token budget is tight.
+        """
         if not self._setup_done:
             self.setup()
-        return await self._coordinator.run(self._agent, self._deps, task)
+        return await self._coordinator.run(
+            self._agent,
+            self._deps,
+            task,
+            initial_session_messages=initial_session_messages,
+        )
 
     async def shutdown(self) -> None:
         """Clean up resources."""

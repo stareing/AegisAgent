@@ -1,4 +1,8 @@
-"""CLI entry point: interactive REPL for the agent framework."""
+"""CLI entry point: lightweight REPL for the agent framework.
+
+Supports both bare commands (``tools``) and slash commands (``/tools``).
+For the full interactive terminal with colored output, use ``main.py``.
+"""
 
 from __future__ import annotations
 
@@ -22,9 +26,15 @@ def _print_result(result) -> None:
         print(f"Iterations: {result.iterations_used} | Tokens: {result.usage.total_tokens}")
 
 
+def _normalize_cmd(text: str) -> str:
+    """Strip optional leading ``/`` and lowercase."""
+    stripped = text.lstrip("/")
+    return stripped.lower()
+
+
 async def _repl(framework: AgentFramework) -> None:
     """Interactive REPL loop."""
-    print("Agent Framework REPL (type 'exit' or 'quit' to stop)")
+    print("Agent Framework REPL (type '/help' or 'help' to see commands)")
     print("-" * 50)
 
     while True:
@@ -36,19 +46,34 @@ async def _repl(framework: AgentFramework) -> None:
 
         if not user_input:
             continue
-        if user_input.lower() in ("exit", "quit", "q"):
+
+        cmd = _normalize_cmd(user_input)
+
+        if cmd in ("exit", "quit", "q"):
             break
-        if user_input.lower() == "help":
-            print("Commands: exit/quit, help, tools, memories, skills")
+
+        if cmd == "help":
+            print("Commands (use with or without / prefix):")
+            print("  /help       — Show this help")
+            print("  /tools      — List registered tools")
+            print("  /skills     — List registered skills")
+            print("  /memories   — List saved memories")
+            print("  /config     — Show config summary")
+            print("  /exit       — Exit (also: quit, q, Ctrl+C)")
+            print()
+            print("  Plain text is sent to the Agent as conversation.")
             continue
-        if user_input.lower() == "tools":
+
+        if cmd == "tools":
             tools = framework._registry.list_tools() if framework._registry else []
             for t in tools:
-                print(f"  - {t.meta.name} ({t.meta.source}): {t.meta.description[:60]}")
+                confirm = " [confirm]" if t.meta.require_confirm else ""
+                print(f"  - {t.meta.name} ({t.meta.source}/{t.meta.category or '-'}){confirm}: {t.meta.description[:60]}")
             if not tools:
                 print("  (no tools registered)")
             continue
-        if user_input.lower() == "skills":
+
+        if cmd == "skills":
             skills = framework.list_skills()
             for s in skills:
                 kw = ", ".join(s.trigger_keywords) if s.trigger_keywords else "(none)"
@@ -60,7 +85,8 @@ async def _repl(framework: AgentFramework) -> None:
             if not skills:
                 print("  (no skills registered)")
             continue
-        if user_input.lower() == "memories":
+
+        if cmd == "memories":
             mm = framework._deps.memory_manager if framework._deps else None
             if mm:
                 records = mm.list_memories(
@@ -71,6 +97,20 @@ async def _repl(framework: AgentFramework) -> None:
                     print(f"  [{r.kind.value}] {r.title}")
                 if not records:
                     print("  (no memories)")
+            continue
+
+        if cmd == "config":
+            cfg = framework.config
+            print(f"  Adapter:  {cfg.model.adapter_type}")
+            print(f"  Model:    {cfg.model.default_model_name}")
+            print(f"  Temp:     {cfg.model.temperature}")
+            print(f"  Context:  {cfg.context.max_context_tokens}")
+            print(f"  API Base: {cfg.model.api_base or '(default)'}")
+            continue
+
+        # Unknown /command
+        if user_input.startswith("/"):
+            print(f"  Unknown command: {user_input}. Type /help for available commands.")
             continue
 
         result = await framework.run(user_input)

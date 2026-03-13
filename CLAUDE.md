@@ -125,6 +125,25 @@ Infrastructure  → infra/ (config, logger, event_bus, disk_store)
 - [x] **#36** Skill 演示 — run_demo.py 新增 demo_11（技能注册→检测→激活→反激活完整流程）
 - [x] **#37** 入口点 — `python -m agent_framework.main` + `agent-interactive` CLI 命令
 
+### Completed (Task #38-#39: 终止条件闭环 + 详细日志)
+- [x] **#38** 终止条件统一闭环修复
+  - `coordinator.py`: 全局 `run_timeout_ms` 超时（默认5分钟），防止主Agent无限挂起
+  - `coordinator.py`: `cancel_event: asyncio.Event` 支持外部取消，触发 `USER_CANCEL` StopReason
+  - `loop.py`: `finish_reason="stop"` + tool_calls 边界修复 — 优先终止，丢弃工具调用
+  - `loop.py`: 重复工具调用检测 — 连续3次相同调用自动强制 ERROR 停止
+  - `loop.py`: 连续3次 LLM 错误强制 ABORT（防止 RETRY 策略死循环）
+  - `executor.py`: spawn_agent 路由时传递 `parent_run_id`，修复子Agent配额跟踪失效
+- [x] **#39** 全链路详细日志增强
+  - `loop.py`: iteration 级日志含 max_iterations/tokens/context_messages/tools_available
+  - `loop.py`: LLM 调用日志含 temperature/token 分项/response_preview/tool_names
+  - `loop.py`: 工具执行日志含 execution_time_ms/source/output_preview
+  - `coordinator.py`: run 级日志含 model/max_iterations/allow_spawn/elapsed_ms
+  - `executor.py`: 工具路由日志含 source/arguments_keys/subagent详情
+  - `delegation.py`: 子Agent委托全流程日志（requested/approved/denied/hook_denied）
+  - `runtime.py`: 子Agent生命周期日志（spawning/creating/created/quota_check/run_started/finished）
+  - `scheduler.py`: 任务状态日志（running/completed/timeout/cancelled/failed/quota_exceeded）
+  - `logger.py`: STANDARD_EVENTS 从17个扩展到50+个
+
 ### Bug Fixes (本轮)
 - [x] SubAgentFactory 使用 DefaultAgent 构造函数替代 `__new__` + `BaseAgent.__init__` 直接调用
 - [x] SubAgentFactory 清理冗余 AgentConfig，移除未使用参数
@@ -133,13 +152,22 @@ Infrastructure  → infra/ (config, logger, event_bus, disk_store)
 - [x] ContextEngineer.build_spawn_seed 委托给 ContextBuilder（消除重复逻辑）
 - [x] run_demo.py SmartMockModel `_tool_results` 累积 bug 修复（跟踪 `_last_seen_msg_count`）
 - [x] structlog 日志噪音抑制（demo 中设 WARNING 级别）
+- [x] `_rl_wrap` regex 替换崩溃修复 — `\x01`/`\x02` 在 re.sub 替换串中是非法转义，改用 lambda
+- [x] SubAgentSpec.parent_run_id 未传递导致配额跟踪失效 — executor 路由时从 parent_agent 获取
 
 ## Key Design Patterns
 - **Qualified tool naming**: `local::<name>`, `mcp::<server_id>::<name>`, `a2a::<alias>::<name>`, `subagent::spawn_agent`
 - **Context slots**: System Core → Skill Addon → Saved Memories → Session History → Current Input
 - **Tool permission chain**: CapabilityPolicy → ScopedToolRegistry → on_tool_call_requested()
 - **Memory scopes for subagents**: ISOLATED, INHERIT_READ, SHARED_WRITE (v2.4: spawn-time frozen snapshot for reads)
-- **Error strategies**: ABORT, SKIP, RETRY (per agent policy)
+- **Error strategies**: ABORT, SKIP, RETRY (per agent policy, 连续3次错误强制 ABORT)
+- **终止条件闭环 (6层)**:
+  1. `LLM_STOP` — finish_reason="stop" 无 tool_calls（含 stop+tool_calls 边界修复）
+  2. `MAX_ITERATIONS` — 迭代次数硬限制（主20/子10）
+  3. `OUTPUT_TRUNCATED` — finish_reason="length"
+  4. `ERROR` — 不可恢复错误/连续3次错误/重复工具调用3次
+  5. `USER_CANCEL` — asyncio.Event 外部取消
+  6. `run_timeout_ms` — 全局墙钟超时（默认5分钟）
 - **子Agent递归防护**: SubAgentFactory 强制 allow_spawn_children=False，DelegationExecutor 检查并返回 PERMISSION_DENIED
 - **子Agent派生流**: spawn_agent tool_call → ToolExecutor(source=subagent) → DelegationExecutor → SubAgentRuntime → Factory + Scheduler
 - **多模型适配**: BaseModelAdapter ABC → LiteLLM/OpenAI/Anthropic/Google + DeepSeek/Doubao/Qwen/Zhipu/MiniMax/Custom，`config.model.adapter_type` 选择

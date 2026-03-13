@@ -12,23 +12,66 @@ from agent_framework.infra.config import LoggingConfig
 _configured = False
 
 STANDARD_EVENTS = [
+    # Run lifecycle
     "run.started",
     "run.finished",
     "run.failed",
+    "run.skill_activated",
+    # Iteration lifecycle
     "iteration.started",
     "iteration.completed",
-    "llm.called",
+    "iteration.stopped",
+    "iteration.dispatching_tools",
+    "iteration.tools_done",
+    "iteration.no_tool_no_stop",
+    # LLM
+    "llm.calling",
     "llm.responded",
-    "tool.dispatched",
+    "llm.error",
+    "llm.error.forced_abort",
+    "llm.error.continuing",
+    # Tool execution
+    "tool.routing",
+    "tool.routing.mcp",
+    "tool.routing.a2a",
+    "tool.routing.subagent",
+    "tool.routing.subagent.done",
+    "tool.batch_executing",
     "tool.completed",
     "tool.failed",
+    "tool.all_blocked",
+    "tool.blocked_by_capability_policy",
+    "tool.blocked",
+    # Loop safety
+    "loop.repeated_tool_calls_detected",
+    # Context
     "context.compressed",
+    # Memory
     "memory.saved",
     "memory.updated",
     "memory.deleted",
-    "subagent.spawned",
-    "subagent.completed",
-    "subagent.failed",
+    # Delegation
+    "delegation.subagent.requested",
+    "delegation.subagent.approved",
+    "delegation.subagent.hook_denied",
+    "delegation.subagent.spawn_denied",
+    "delegation.subagent.no_runtime",
+    # SubAgent lifecycle
+    "subagent.spawning",
+    "subagent.creating",
+    "subagent.created",
+    "subagent.context_seed_built",
+    "subagent.quota_check",
+    "subagent.run_started",
+    "subagent.run_finished",
+    "subagent.spawn_completed",
+    # Scheduler
+    "scheduler.task_running",
+    "scheduler.task_completed",
+    "scheduler.task_timeout",
+    "scheduler.task_cancelled",
+    "scheduler.task_failed",
+    "scheduler.quota_exceeded",
 ]
 
 

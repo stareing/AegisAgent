@@ -70,6 +70,7 @@ class AgentRunResult(BaseModel):
     )
     usage: TokenUsage = Field(default_factory=TokenUsage)
     iterations_used: int = 0
+    iteration_history: list[IterationResult] = Field(default_factory=list)
     artifacts: list[Artifact] = Field(default_factory=list)
     error: str | None = None
 

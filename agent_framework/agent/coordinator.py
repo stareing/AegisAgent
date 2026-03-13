@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import time
 import uuid
 from typing import TYPE_CHECKING
 
@@ -20,6 +22,9 @@ from agent_framework.models.agent import (
 from agent_framework.models.context import LLMRequest
 from agent_framework.models.message import Message, TokenUsage
 from agent_framework.models.session import SessionState
+
+# Default global run timeout (5 minutes). Prevents hangs from slow models.
+DEFAULT_RUN_TIMEOUT_MS = 300_000
 
 if TYPE_CHECKING:
     from agent_framework.agent.base_agent import BaseAgent
@@ -59,6 +64,8 @@ class RunCoordinator:
         deps: AgentRuntimeDeps,
         task: str,
         initial_session_messages: list[Message] | None = None,
+        run_timeout_ms: int | None = None,
+        cancel_event: asyncio.Event | None = None,
     ) -> AgentRunResult:
         run_id = str(uuid.uuid4())
         agent_state = self._initialize_state(agent, task, run_id)
@@ -67,7 +74,19 @@ class RunCoordinator:
             for msg in initial_session_messages:
                 session_state.append_message(msg)
 
-        logger.info("run.started", run_id=run_id, agent_id=agent.agent_id, task=task[:100])
+        timeout_ms = run_timeout_ms or DEFAULT_RUN_TIMEOUT_MS
+        run_start = time.monotonic()
+
+        logger.info(
+            "run.started",
+            run_id=run_id,
+            agent_id=agent.agent_id,
+            model=agent.agent_config.model_name,
+            max_iterations=agent.agent_config.max_iterations,
+            allow_spawn=agent.agent_config.allow_spawn_children,
+            run_timeout_ms=timeout_ms,
+            task=task[:200],
+        )
 
         session_started = False
         try:
@@ -78,6 +97,13 @@ class RunCoordinator:
             # Skill detection
             self._apply_skill_if_needed(agent, deps, task, agent_state)
             active_skill = deps.skill_router.get_active_skill()
+            if active_skill:
+                logger.info(
+                    "run.skill_activated",
+                    run_id=run_id,
+                    skill_id=active_skill.skill_id,
+                    skill_name=active_skill.name,
+                )
 
             # Build effective config
             effective_config = self._build_effective_config(agent, active_skill)
@@ -89,6 +115,35 @@ class RunCoordinator:
             last_stop_signal: StopSignal | None = None
 
             while True:
+                # Global timeout check (wall-clock)
+                elapsed_ms = int((time.monotonic() - run_start) * 1000)
+                if elapsed_ms >= timeout_ms:
+                    logger.warning(
+                        "run.timeout",
+                        run_id=run_id,
+                        elapsed_ms=elapsed_ms,
+                        timeout_ms=timeout_ms,
+                        iterations_used=agent_state.iteration_count,
+                    )
+                    last_stop_signal = StopSignal(
+                        reason=StopReason.MAX_ITERATIONS,
+                        message=f"Run timed out after {elapsed_ms}ms (limit: {timeout_ms}ms)",
+                    )
+                    break
+
+                # External cancel check
+                if cancel_event and cancel_event.is_set():
+                    logger.info(
+                        "run.cancelled",
+                        run_id=run_id,
+                        iterations_used=agent_state.iteration_count,
+                    )
+                    last_stop_signal = StopSignal(
+                        reason=StopReason.USER_CANCEL,
+                        message="Run cancelled by external signal",
+                    )
+                    break
+
                 # Prepare LLM request
                 llm_request = self._prepare_llm_request(
                     agent, deps, agent_state,
@@ -128,11 +183,28 @@ class RunCoordinator:
             result = self._finalize_run(
                 agent, agent_state, final_answer, last_stop_signal
             )
-            logger.info("run.finished", run_id=run_id, success=result.success)
+            elapsed_ms = int((time.monotonic() - run_start) * 1000)
+            logger.info(
+                "run.finished",
+                run_id=run_id,
+                success=result.success,
+                iterations_used=result.iterations_used,
+                total_tokens=result.usage.total_tokens,
+                stop_reason=result.stop_signal.reason.value if result.stop_signal else "none",
+                elapsed_ms=elapsed_ms,
+                answer_preview=(final_answer or "")[:120],
+            )
             return result
 
         except Exception as e:
-            logger.error("run.failed", run_id=run_id, error=str(e))
+            logger.error(
+                "run.failed",
+                run_id=run_id,
+                error_type=type(e).__name__,
+                error=str(e),
+                iterations_used=agent_state.iteration_count,
+                total_tokens=agent_state.total_tokens_used,
+            )
             return self._handle_run_error(agent, e, agent_state)
         finally:
             if session_started:
@@ -285,6 +357,7 @@ class RunCoordinator:
             stop_signal=stop_signal,
             usage=TokenUsage(total_tokens=agent_state.total_tokens_used),
             iterations_used=agent_state.iteration_count,
+            iteration_history=list(agent_state.iteration_history),
         )
 
     def _handle_run_error(
@@ -303,5 +376,6 @@ class RunCoordinator:
             ),
             usage=TokenUsage(total_tokens=agent_state.total_tokens_used),
             iterations_used=agent_state.iteration_count,
+            iteration_history=list(agent_state.iteration_history),
             error=str(error),
         )

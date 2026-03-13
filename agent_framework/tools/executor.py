@@ -153,10 +153,18 @@ class ToolExecutor:
     async def _route_execution(self, tool_entry: ToolEntry, validated_arguments: dict) -> Any:
         """Route to appropriate executor based on tool source."""
         source = tool_entry.meta.source
+        tool_name = tool_entry.meta.name
+
+        logger.info(
+            "tool.routing",
+            tool_name=tool_name,
+            source=source,
+            arguments_keys=list(validated_arguments.keys()),
+        )
 
         if source == "local":
             if tool_entry.callable_ref is None:
-                raise RuntimeError(f"No callable for tool {tool_entry.meta.name}")
+                raise RuntimeError(f"No callable for tool {tool_name}")
             if tool_entry.meta.is_async:
                 return await tool_entry.callable_ref(**validated_arguments)
             else:
@@ -166,6 +174,7 @@ class ToolExecutor:
             if self._mcp is None:
                 raise RuntimeError("MCPClientManager not configured")
             server_id = tool_entry.meta.mcp_server_id
+            logger.info("tool.routing.mcp", tool_name=tool_name, server_id=server_id)
             return await self._mcp.call_mcp_tool(
                 server_id, tool_entry.meta.name, validated_arguments
             )
@@ -173,8 +182,10 @@ class ToolExecutor:
         if source == "a2a":
             if self._delegation is None:
                 raise RuntimeError("DelegationExecutor not configured")
+            agent_url = tool_entry.meta.a2a_agent_url or ""
+            logger.info("tool.routing.a2a", tool_name=tool_name, agent_url=agent_url)
             result = await self._delegation.delegate_to_a2a(
-                agent_url=tool_entry.meta.a2a_agent_url or "",
+                agent_url=agent_url,
                 task_input=str(validated_arguments.get("task_input", "")),
                 skill_id=validated_arguments.get("skill_id"),
             )
@@ -188,15 +199,41 @@ class ToolExecutor:
             # Map all spawn_agent params (doc 14.6)
             mode_str = validated_arguments.get("mode", "ephemeral").upper()
             scope_str = validated_arguments.get("memory_scope", "isolated").upper()
+            parent_agent = self._parent_agent_getter() if self._parent_agent_getter else None
+            # Propagate parent_run_id for quota tracking
+            parent_run_id = ""
+            if parent_agent and hasattr(parent_agent, "agent_id"):
+                parent_run_id = parent_agent.agent_id
+
             spec = SubAgentSpec(
+                parent_run_id=parent_run_id,
                 task_input=validated_arguments.get("task_input", ""),
                 mode=SpawnMode(mode_str) if mode_str in SpawnMode.__members__ else SpawnMode.EPHEMERAL,
                 skill_id=validated_arguments.get("skill_id"),
                 tool_category_whitelist=validated_arguments.get("tool_categories"),
                 memory_scope=MemoryScope(scope_str) if scope_str in MemoryScope.__members__ else MemoryScope.ISOLATED,
             )
-            parent_agent = self._parent_agent_getter() if self._parent_agent_getter else None
+            parent_id = getattr(parent_agent, "agent_id", "unknown") if parent_agent else "none"
+
+            logger.info(
+                "tool.routing.subagent",
+                task_input=spec.task_input[:150],
+                mode=mode_str,
+                memory_scope=scope_str,
+                parent_agent_id=parent_id,
+                allow_spawn=getattr(getattr(parent_agent, "agent_config", None), "allow_spawn_children", "N/A"),
+            )
+
             result = await self._delegation.delegate_to_subagent(spec, parent_agent)
+
+            logger.info(
+                "tool.routing.subagent.done",
+                spawn_id=result.spawn_id,
+                success=result.success,
+                iterations_used=result.iterations_used,
+                answer_preview=(result.final_answer or result.error or "")[:120],
+            )
+
             from agent_framework.tools.delegation import DelegationExecutor
             summary = DelegationExecutor.summarize_result(result)
             return summary.model_dump()

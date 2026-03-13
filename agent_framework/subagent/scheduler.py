@@ -45,8 +45,15 @@ class SubAgentScheduler:
     def _enforce_quota(self, parent_run_id: str) -> None:
         """Raise if quota exceeded."""
         if not self.check_quota(parent_run_id):
+            count = self._run_counts.get(parent_run_id, 0)
+            logger.warning(
+                "scheduler.quota_exceeded",
+                parent_run_id=parent_run_id,
+                current_count=count,
+                max_per_run=self._max_per_run,
+            )
             raise RuntimeError(
-                f"Sub-agent quota exceeded: {self._run_counts.get(parent_run_id, 0)}"
+                f"Sub-agent quota exceeded: {count}"
                 f"/{self._max_per_run} for run {parent_run_id}"
             )
 
@@ -93,6 +100,12 @@ class SubAgentScheduler:
         async def _wrapped() -> SubAgentResult:
             start = time.monotonic()
             handle.status = "RUNNING"
+            logger.info(
+                "scheduler.task_running",
+                spawn_id=spawn_id,
+                deadline_ms=deadline_ms,
+                parent_run_id=parent_run_id,
+            )
             try:
                 async with self._semaphore:
                     result = await asyncio.wait_for(
@@ -102,35 +115,60 @@ class SubAgentScheduler:
                 result.duration_ms = duration
                 handle.status = "COMPLETED" if result.success else "FAILED"
                 logger.info(
-                    "subagent.completed",
+                    "scheduler.task_completed",
                     spawn_id=spawn_id,
                     success=result.success,
                     duration_ms=duration,
+                    status=handle.status,
                 )
                 return result
             except asyncio.TimeoutError:
+                duration = int((time.monotonic() - start) * 1000)
                 handle.status = "TIMEOUT"
+                logger.error(
+                    "scheduler.task_timeout",
+                    spawn_id=spawn_id,
+                    deadline_ms=deadline_ms,
+                    actual_duration_ms=duration,
+                    parent_run_id=parent_run_id,
+                )
                 return SubAgentResult(
                     spawn_id=spawn_id,
                     success=False,
                     error=f"Sub-agent timed out after {deadline_ms}ms",
-                    duration_ms=int((time.monotonic() - start) * 1000),
+                    duration_ms=duration,
                 )
             except asyncio.CancelledError:
+                duration = int((time.monotonic() - start) * 1000)
                 handle.status = "CANCELLED"
+                logger.warning(
+                    "scheduler.task_cancelled",
+                    spawn_id=spawn_id,
+                    duration_ms=duration,
+                    parent_run_id=parent_run_id,
+                )
                 return SubAgentResult(
                     spawn_id=spawn_id,
                     success=False,
                     error="Sub-agent was cancelled",
-                    duration_ms=int((time.monotonic() - start) * 1000),
+                    duration_ms=duration,
                 )
             except Exception as e:
+                duration = int((time.monotonic() - start) * 1000)
                 handle.status = "FAILED"
+                logger.error(
+                    "scheduler.task_failed",
+                    spawn_id=spawn_id,
+                    error_type=type(e).__name__,
+                    error=str(e),
+                    duration_ms=duration,
+                    parent_run_id=parent_run_id,
+                )
                 return SubAgentResult(
                     spawn_id=spawn_id,
                     success=False,
                     error=str(e),
-                    duration_ms=int((time.monotonic() - start) * 1000),
+                    duration_ms=duration,
                 )
             finally:
                 self._active.pop(spawn_id, None)
