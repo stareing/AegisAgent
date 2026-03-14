@@ -246,6 +246,7 @@ class AgentConfig(BaseModel):
 
     Quota semantics:
     - max_iterations: HARD — exceeded → forced stop (MAX_ITERATIONS)
+      Special case: <= 0 means unlimited for the current run owner.
     - max_output_tokens: SOFT — LLM may truncate, reported as OUTPUT_TRUNCATED
     - allow_spawn_children: HARD — False → spawn denied (PERMISSION_DENIED)
     """

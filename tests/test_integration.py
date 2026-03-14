@@ -378,6 +378,38 @@ class TestMaxIterations:
         assert result.iterations_used <= 5
         assert result.stop_signal.reason == StopReason.MAX_ITERATIONS
 
+    @pytest.mark.asyncio
+    async def test_zero_max_iterations_means_unlimited(self):
+        responses = [
+            ModelResponse(
+                content=None,
+                tool_calls=[
+                    ToolCallRequest(id=f"tc{i}", function_name="echo", arguments={"text": f"loop{i}"}),
+                ],
+                finish_reason="tool_calls",
+                usage=TokenUsage(total_tokens=10),
+            )
+            for i in range(6)
+        ]
+        responses.append(
+            ModelResponse(
+                content="done",
+                tool_calls=[],
+                finish_reason="stop",
+                usage=TokenUsage(total_tokens=10),
+            )
+        )
+        model = MockModelAdapter(responses)
+        deps = build_deps(model)
+        agent = DefaultAgent(model_name="mock", max_iterations=0)
+        coordinator = RunCoordinator()
+
+        result = await coordinator.run(agent, deps, "Loop until final answer")
+        assert result.success is True
+        assert result.final_answer == "done"
+        assert result.iterations_used == 7
+        assert result.stop_signal.reason == StopReason.LLM_STOP
+
 
 class TestErrorHandling:
     """Test error handling in the run flow."""

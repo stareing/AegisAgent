@@ -96,13 +96,14 @@ class BaseAgent:
                 reason=f"stop_signal: {iteration_result.stop_signal.reason.value}",
                 stop_signal=iteration_result.stop_signal,
             )
-        if agent_state.iteration_count >= self.agent_config.max_iterations:
+        max_iterations = self.agent_config.max_iterations
+        if max_iterations > 0 and agent_state.iteration_count >= max_iterations:
             return StopDecision(
                 should_stop=True,
-                reason=f"max_iterations ({self.agent_config.max_iterations}) reached",
+                reason=f"max_iterations ({max_iterations}) reached",
                 stop_signal=StopSignal(
                     reason=StopReason.MAX_ITERATIONS,
-                    message=f"Reached max iterations ({self.agent_config.max_iterations})",
+                    message=f"Reached max iterations ({max_iterations})",
                 ),
             )
         return StopDecision(should_stop=False)

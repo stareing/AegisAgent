@@ -192,7 +192,7 @@ class TestOrchestratorAgent:
         agent = OrchestratorAgent()
         assert agent.agent_id == "orchestrator"
         assert agent.agent_config.allow_spawn_children is True
-        assert agent.agent_config.max_iterations == 30
+        assert agent.agent_config.max_iterations == 0
 
     def test_orchestrator_prompt_contains_delegation(self):
         from agent_framework.agent.orchestrator_agent import OrchestratorAgent
@@ -243,7 +243,8 @@ class TestOrchestratorAgent:
         assert "cancel_all" in source
 
     def test_orchestrator_hard_exit_guard(self):
-        """Orchestrator must force stop after N post-spawn iterations."""
+        """Orchestrator must force stop after N post-spawn iterations when enabled."""
+        from unittest.mock import patch
         from agent_framework.agent.orchestrator_agent import OrchestratorAgent
         agent = OrchestratorAgent()
         state = AgentState(run_id="r1", spawn_count=2, iteration_count=10)
@@ -256,9 +257,27 @@ class TestOrchestratorAgent:
                 iteration_index=i, tool_results=tr_list,
             ))
         result = IterationResult(iteration_index=10)
-        decision = agent.should_stop(result, state)
+        # Enable the guard by setting limit to 3
+        with patch("agent_framework.agent.orchestrator_agent._MAX_POST_SPAWN_ITERATIONS", 3):
+            decision = agent.should_stop(result, state)
         assert decision.should_stop is True
         assert "synthesis budget" in decision.reason.lower() or "spawn" in decision.reason.lower()
+
+    def test_orchestrator_hard_exit_guard_disabled(self):
+        """When _MAX_POST_SPAWN_ITERATIONS <= 0, guard does not trigger."""
+        from agent_framework.agent.orchestrator_agent import OrchestratorAgent
+        agent = OrchestratorAgent()
+        state = AgentState(run_id="r1", spawn_count=2, iteration_count=10)
+        for i in range(10):
+            tr_list = []
+            if i == 5:
+                tr_list = [ToolResult(tool_call_id="tc", tool_name="spawn_agent", success=True, output="done")]
+            state.iteration_history.append(IterationResult(
+                iteration_index=i, tool_results=tr_list,
+            ))
+        result = IterationResult(iteration_index=10)
+        decision = agent.should_stop(result, state)
+        assert decision.should_stop is False
 
     def test_spawn_count_updated_on_successful_spawn(self):
         """apply_iteration_result must increment spawn_count on spawn_agent success."""

@@ -11,9 +11,14 @@ Layout (no sidebar — clean copy-paste):
   Footer: Ctrl+C Quit | Ctrl+P Cmds | Ctrl+L Clear | Ctrl+N New
 """
 
+# NOTE: This module requires the following packages to be installed:
+# - rich
+# - textual
+
 from __future__ import annotations
 
 import asyncio
+import sys
 import time
 from typing import Any
 
@@ -75,6 +80,7 @@ class AegisHeader(Static):
     turn_count: reactive[int] = reactive(0)
     total_tokens: reactive[int] = reactive(0)
     is_busy: reactive[bool] = reactive(False)
+    mouse_mode: reactive[str] = reactive("copy")
 
     DEFAULT_CSS = f"""
     AegisHeader {{
@@ -88,9 +94,15 @@ class AegisHeader(Static):
 
     def render(self) -> str:
         status = "[yellow]working[/]" if self.is_busy else "[green]ready[/]"
+        mouse = (
+            f"[bold green]scroll[/]"
+            if self.mouse_mode == "scroll"
+            else f"[bold cyan]copy[/]"
+        )
         return (
             f"[bold {_GOLD}]AegisAgent[/]"
             f"  [dim]|[/]  {status}"
+            f"  [dim]|[/]  [dim]mouse:[/] {mouse}"
             f"  [dim]|[/]  [dim]model:[/] {self.model_name}"
             f"  [dim]|[/]  [dim]tools:[/] {self.tool_count}"
             f"  [dim]|[/]  [dim]turns:[/] {self.turn_count}"
@@ -239,7 +251,14 @@ class AegisAgentApp(App[None]):
         Binding("ctrl+p", "open_palette", priority=True, show=False),
         Binding("ctrl+l", "clear_chat", priority=True, show=False),
         Binding("ctrl+n", "new_session", priority=True, show=False),
+        Binding("f2", "toggle_mouse", priority=True, show=False),
+        Binding("alt+m", "toggle_mouse", priority=True, show=False),
         Binding("escape", "focus_prompt", show=False),
+        # Chat scrolling — works even when Input has focus
+        Binding("pageup", "scroll_chat_up_page", show=False, priority=True),
+        Binding("pagedown", "scroll_chat_down_page", show=False, priority=True),
+        Binding("ctrl+up", "scroll_chat_up", show=False, priority=True),
+        Binding("ctrl+down", "scroll_chat_down", show=False, priority=True),
     ]
 
     DEFAULT_CSS = f"""
@@ -293,13 +312,14 @@ class AegisAgentApp(App[None]):
         self._busy = False
         self._suppress_slash = False
         self._cancel_event: asyncio.Event | None = None
+        self._mouse_captured = False  # default to native terminal selection/copy
 
     def compose(self) -> ComposeResult:
         yield AegisHeader(id="hdr")
         yield RichLog(id="chat", wrap=True, markup=False, highlight=False, auto_scroll=True)
         yield Static("", id="busy-line")
         with Horizontal(id="input-bar"):
-            yield Input(placeholder="Ask anything...  /=cmds  ^P=palette  ^L=clear  ^N=new  Esc=stop  ^C=quit", id="prompt")
+            yield Input(placeholder="Ask anything...  /=cmds  ^P=palette  ^L=clear  ^N=new  Esc=stop  F2=mouse  ^C=quit", id="prompt")
             yield Button("Send", id="btn-send", variant="default")
 
     # ── Mount ──────────────────────────────────────────
@@ -310,6 +330,7 @@ class AegisAgentApp(App[None]):
         hdr = self.query_one("#hdr", AegisHeader)
         hdr.model_name = "Mock" if self._mock else self._fw.config.model.default_model_name
         hdr.tool_count = len(self._fw._registry.list_tools()) if self._fw._registry else 0
+        self._apply_mouse_mode(captured=False, notify=False)
 
         chat = self.query_one("#chat", RichLog)
         mode = hdr.model_name
@@ -434,6 +455,47 @@ class AegisAgentApp(App[None]):
         self.notify("New session started", timeout=2)
         self.query_one("#prompt", Input).focus()
 
+    def action_toggle_mouse(self) -> None:
+        """Toggle mouse between scroll mode (Textual captures) and copy mode (terminal native)."""
+        self._apply_mouse_mode(captured=not self._mouse_captured, notify=True)
+
+    def _apply_mouse_mode(self, captured: bool, notify: bool) -> None:
+        """Switch between terminal-native copy mode and Textual mouse mode."""
+        # xterm mouse tracking escape sequences
+        enable = "\x1b[?1000h\x1b[?1003h\x1b[?1006h"
+        disable = "\x1b[?1000l\x1b[?1003l\x1b[?1006l"
+
+        hdr = self.query_one("#hdr", AegisHeader)
+        if captured:
+            sys.stdout.write(enable)
+            sys.stdout.flush()
+            self.capture_mouse(self.query_one("#chat", RichLog))
+            self._mouse_captured = True
+            hdr.mouse_mode = "scroll"
+            if notify:
+                self.notify("Mouse: scroll mode (wheel routed to chat)", timeout=2)
+            return
+
+        self.capture_mouse(None)
+        sys.stdout.write(disable)
+        sys.stdout.flush()
+        self._mouse_captured = False
+        hdr.mouse_mode = "copy"
+        if notify:
+            self.notify("Mouse: copy mode (native selection enabled)", timeout=2)
+
+    def action_scroll_chat_up_page(self) -> None:
+        self.query_one("#chat", RichLog).scroll_page_up(animate=False)
+
+    def action_scroll_chat_down_page(self) -> None:
+        self.query_one("#chat", RichLog).scroll_page_down(animate=False)
+
+    def action_scroll_chat_up(self) -> None:
+        self.query_one("#chat", RichLog).scroll_up(animate=False)
+
+    def action_scroll_chat_down(self) -> None:
+        self.query_one("#chat", RichLog).scroll_down(animate=False)
+
     def action_focus_prompt(self) -> None:
         if self._busy and self._cancel_event:
             self._cancel_event.set()
@@ -455,5 +517,5 @@ class AegisAgentApp(App[None]):
 
 
 def run_textual_cli(framework: Any, mock_model: Any, config_path: str | None) -> None:
-    # mouse=False: terminal handles text selection natively (copy works everywhere)
-    AegisAgentApp(framework, mock_model, config_path).run(mouse=False)
+    # Keep Textual mouse support available internally, but start in native copy mode.
+    AegisAgentApp(framework, mock_model, config_path).run(mouse=True)

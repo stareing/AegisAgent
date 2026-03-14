@@ -96,7 +96,10 @@ class ReActAgent(BaseAgent):
         self, error: Exception, agent_state: AgentState
     ) -> ErrorStrategy:
         """ReAct agents retry on transient errors to maintain reasoning chain."""
-        if agent_state.iteration_count < self.agent_config.max_iterations - 1:
+        max_iterations = self.agent_config.max_iterations
+        if max_iterations <= 0:
+            return ErrorStrategy.RETRY
+        if agent_state.iteration_count < max_iterations - 1:
             return ErrorStrategy.RETRY
         return ErrorStrategy.ABORT
 

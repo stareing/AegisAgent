@@ -269,15 +269,16 @@ class AgentLoop:
                 message="Model output was truncated due to length limit",
             )
 
-        if agent_state.iteration_count + 1 >= agent.agent_config.max_iterations:
+        max_iterations = agent.agent_config.max_iterations
+        if max_iterations > 0 and agent_state.iteration_count + 1 >= max_iterations:
             logger.warning(
                 "stop_check.max_iterations_reached",
                 iteration_index=agent_state.iteration_count,
-                max_iterations=agent.agent_config.max_iterations,
+                max_iterations=max_iterations,
             )
             return StopSignal(
                 reason=StopReason.MAX_ITERATIONS,
-                message=f"Reached max iterations ({agent.agent_config.max_iterations})",
+                message=f"Reached max iterations ({max_iterations})",
             )
 
         # Detect repeated identical tool calls — potential stuck loop.

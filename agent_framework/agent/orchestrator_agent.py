@@ -23,8 +23,9 @@ from agent_framework.models.agent import (
 )
 
 
-# After all spawns complete, allow at most N iterations for synthesis
-_MAX_POST_SPAWN_ITERATIONS = 3
+# After all spawns complete, allow at most N iterations for synthesis.
+# <= 0 means unlimited.
+_MAX_POST_SPAWN_ITERATIONS = 0
 
 
 class OrchestratorAgent(BaseAgent):
@@ -42,7 +43,7 @@ class OrchestratorAgent(BaseAgent):
         agent_id: str = "orchestrator",
         system_prompt: str = "",
         model_name: str = "gpt-3.5-turbo",
-        max_iterations: int = 30,
+        max_iterations: int = 0,
         temperature: float = 0.7,
         allow_spawn_children: bool = True,
         max_concurrent_tool_calls: int = 5,
@@ -89,8 +90,8 @@ class OrchestratorAgent(BaseAgent):
         if parent_decision.should_stop:
             return parent_decision
 
-        # Hard guard: if spawns occurred, enforce synthesis budget
-        if agent_state.spawn_count > 0:
+        # Hard guard: if enabled, enforce synthesis budget after the last spawn
+        if _MAX_POST_SPAWN_ITERATIONS > 0 and agent_state.spawn_count > 0:
             # Find the last iteration that contained a spawn_agent result
             last_spawn_iter = -1
             for i, it in enumerate(agent_state.iteration_history):

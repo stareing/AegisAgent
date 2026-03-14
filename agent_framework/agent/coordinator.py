@@ -408,7 +408,11 @@ class RunCoordinator:
 
         # Dynamic capability injection
         if effective_config:
-            info["max_iterations"] = str(effective_config.max_iterations)
+            info["max_iterations"] = (
+                "unlimited"
+                if effective_config.max_iterations <= 0
+                else str(effective_config.max_iterations)
+            )
 
         if agent:
             can_spawn = agent.agent_config.allow_spawn_children
