@@ -298,17 +298,21 @@ class ContextCompressor:
             # Frozen summary covers everything with matching content — reuse
             summary_group = self._build_summary_group(self._frozen_summary)
             if summary_group.token_estimate <= summary_budget:
-                logger.info("compression.frozen_reuse",
-                            covered=self._frozen_summary_group_count,
-                            hash=current_source_hash[:8])
+                logger.info(
+                    "compression.frozen_reuse covered=%d hash=%s",
+                    self._frozen_summary_group_count,
+                    current_source_hash[:8],
+                )
                 return [summary_group] + recent_groups
 
         # If frozen summary exists but hash doesn't match, invalidate it
         # to prevent stale summary being used as base for uncovered calculation
         if self._frozen_summary and not frozen_hash_valid:
-            logger.info("compression.frozen_invalidated",
-                        old_hash=self._frozen_summary.source_hash[:8],
-                        new_hash=current_source_hash[:8])
+            logger.info(
+                "compression.frozen_invalidated old_hash=%s new_hash=%s",
+                self._frozen_summary.source_hash[:8],
+                current_source_hash[:8],
+            )
             self._frozen_summary = None
             self._frozen_summary_group_count = 0
 
@@ -356,23 +360,21 @@ class ContextCompressor:
 
         # Verify fits
         if summary_group.token_estimate + recent_tokens > target_tokens:
-            logger.warning("compression.summary_too_large",
-                           summary_tokens=summary_group.token_estimate,
-                           budget=summary_budget)
+            logger.warning(
+                "compression.summary_too_large tokens=%d budget=%d",
+                summary_group.token_estimate, summary_budget,
+            )
             return self._sliding_window(groups, target_tokens)
 
         # Freeze the new summary
         self._frozen_summary = new_summary
         self._frozen_summary_group_count = len(old_groups)
 
+        old_tokens = sum(g.token_estimate or self._count_group(g) for g in old_groups)
         logger.info(
-            "compression.llm_summarized",
-            version=new_version,
-            covered_groups=len(old_groups),
-            uncovered_compressed=len(uncovered_groups),
-            old_tokens=sum(g.token_estimate or self._count_group(g) for g in old_groups),
-            summary_tokens=summary_group.token_estimate,
-            recent_groups=len(recent_groups),
+            "compression.llm_summarized v=%d covered=%d uncovered=%d old_tok=%d sum_tok=%d recent=%d",
+            new_version, len(old_groups), len(uncovered_groups),
+            old_tokens, summary_group.token_estimate, len(recent_groups),
         )
 
         return [summary_group] + recent_groups

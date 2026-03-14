@@ -437,27 +437,100 @@ class TestContextCompressor:
         assert comp._frozen_summary is None
         assert comp._frozen_summary_group_count == 0
 
-    def test_source_hash_validates_reuse(self):
-        """Frozen summary reuse must validate source_hash, not just count."""
+    def test_source_hash_validates_reuse_sync(self):
+        """Sync path: stale summary must not appear in compressed result."""
         from agent_framework.context.compressor import SummaryBlock
         comp = ContextCompressor(strategy=CompressionStrategy.LLM_SUMMARIZE)
         groups_v1 = self._make_groups(3, chars=20)
-        hash_v1 = comp._compute_cache_key(groups_v1)
 
         comp._frozen_summary = SummaryBlock(
             covered_group_count=3,
-            source_hash="stale_hash",  # doesn't match current
+            source_hash="stale_hash",  # doesn't match current groups
             summary_text="old summary", token_estimate=20,
         )
         comp._frozen_summary_group_count = 3
 
-        # Should NOT reuse because hash doesn't match
-        # (sync path falls back to sliding window)
+        # Sync path cascades to TOOL_RESULT_SUMMARY → SLIDING_WINDOW
         result = comp.compress_groups(groups_v1, target_tokens=30)
-        # Sliding window result — no summary group
-        has_summary = any(g.group_id.startswith("summary_") for g in result)
-        # Either way, it shouldn't blindly reuse the stale summary
-        assert True  # Just verify no crash
+
+        # Stale summary must NOT appear in output
+        has_stale = any(
+            g.group_id.startswith("summary_") and "old summary" in (g.messages[0].content or "")
+            for g in result
+        )
+        assert not has_stale, "Stale summary must not leak into sync compression output"
+
+    @pytest.mark.asyncio
+    async def test_source_hash_invalidates_frozen_async(self):
+        """Async LLM path: stale hash must invalidate frozen summary entirely."""
+        from unittest.mock import AsyncMock as AM
+        from agent_framework.context.compressor import SummaryBlock
+
+        comp = ContextCompressor(
+            strategy=CompressionStrategy.LLM_SUMMARIZE,
+            token_counter=self.counter,
+        )
+        groups = self._make_groups(5, chars=20)
+
+        comp._frozen_summary = SummaryBlock(
+            covered_group_count=3,
+            source_hash="stale_hash",
+            summary_text="old summary", token_estimate=20,
+        )
+        comp._frozen_summary_group_count = 3
+
+        # Mock adapter — LLM call fails, but hash invalidation should still happen
+        mock_adapter = AM()
+        mock_adapter.complete = AM(side_effect=RuntimeError("fail"))
+
+        await comp.compress_groups_async(groups, target_tokens=50, model_adapter=mock_adapter)
+
+        # Frozen summary must have been invalidated due to hash mismatch
+        assert comp._frozen_summary is None
+        assert comp._frozen_summary_group_count == 0
+
+    @pytest.mark.asyncio
+    async def test_async_cascade_fallback(self):
+        """compress_groups_async must cascade LLM → TOOL_RESULT → SLIDING_WINDOW."""
+        from unittest.mock import AsyncMock as AM
+
+        comp = ContextCompressor(
+            strategy=CompressionStrategy.LLM_SUMMARIZE,
+            token_counter=self.counter,
+        )
+        # 5 groups, each 100 chars, total 500, budget 120
+        groups = self._make_groups(5, chars=100)
+
+        # Mock adapter that returns a summary too large to fit
+        mock_adapter = AM()
+        mock_adapter.complete = AM(return_value=AM(content="X" * 9999))
+
+        result = await comp.compress_groups_async(groups, target_tokens=120, model_adapter=mock_adapter)
+        result_tokens = sum(g.token_estimate or comp._count_group(g) for g in result)
+
+        # Must fit within budget via cascade fallback
+        assert result_tokens <= 120, f"Cascade fallback must fit budget, got {result_tokens}"
+        # Must have fewer groups than original (something was trimmed)
+        assert len(result) < len(groups)
+
+    @pytest.mark.asyncio
+    async def test_async_llm_failure_cascades(self):
+        """LLM call failure in compress_groups_async must cascade to sync strategies."""
+        from unittest.mock import AsyncMock as AM
+
+        comp = ContextCompressor(
+            strategy=CompressionStrategy.LLM_SUMMARIZE,
+            token_counter=self.counter,
+        )
+        groups = self._make_groups(5, chars=100)
+
+        # Mock adapter that raises
+        mock_adapter = AM()
+        mock_adapter.complete = AM(side_effect=RuntimeError("API down"))
+
+        result = await comp.compress_groups_async(groups, target_tokens=120, model_adapter=mock_adapter)
+        result_tokens = sum(g.token_estimate or comp._count_group(g) for g in result)
+        assert result_tokens <= 120
 
 
 # =====================================================================
