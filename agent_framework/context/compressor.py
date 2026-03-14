@@ -1,9 +1,29 @@
+"""Context compressor — manages session history compression with incremental summarization.
+
+Compression boundary rules:
+- Only Session History participates in compression
+- Compression operates on ToolTransactionGroup units (never splits a group)
+- System Core, Saved Memories, Current Input NEVER enter the compressor
+- User input can trigger budget check, but user input itself is never compressed
+
+Incremental compression model:
+- Maintains a frozen summary block covering already-compressed history
+- New groups accumulate in the "uncovered" zone
+- Compression only triggers when uncovered zone exceeds budget
+- Frozen summary is reused across rounds until invalidated
+- Three-segment assembly: [frozen_summary] + [recent_detail] + [current_input]
+"""
+
 from __future__ import annotations
 
 import hashlib
 import logging
+import uuid
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable
+
+from pydantic import BaseModel, Field
 
 from agent_framework.context.transaction_group import ToolTransactionGroup
 from agent_framework.models.message import Message
@@ -18,25 +38,37 @@ class CompressionStrategy(str, Enum):
     LLMLINGUA_COMPRESS = "LLMLINGUA_COMPRESS"
 
 
+class SummaryBlock(BaseModel):
+    """Persistent summary block covering a range of compressed history.
+
+    Reused across rounds until invalidated by new compression.
+    """
+
+    summary_id: str = Field(default_factory=lambda: uuid.uuid4().hex[:12])
+    covered_group_count: int = 0
+    source_hash: str = ""
+    summary_version: int = 1
+    summary_text: str = ""
+    token_estimate: int = 0
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 # Number of most-recent groups protected from compression
 _PROTECTED_RECENT_GROUPS = 2
 
 
 class ContextCompressor:
-    """Compresses context when it exceeds budget.
+    """Compresses session history with incremental LLM summarization.
 
-    Compression boundary rules:
-    - Only Session History participates in compression
-    - Compression operates on ToolTransactionGroup units (never splits a group)
-    - System Core, Saved Memories, Current Input NEVER enter the compressor
-    - Compression results are used for THIS LLM call only
-    - Results do NOT write back to SessionState or iteration_history
+    Three-segment assembly:
+    1. Frozen summary block (covers already-compressed old history)
+    2. Recent detail zone (last N groups, kept intact)
+    3. Current input (never enters compressor)
 
-    Strategies:
-    - SLIDING_WINDOW: drop oldest groups (fast, lossy)
-    - TOOL_RESULT_SUMMARY: truncate long tool outputs, then sliding window
-    - LLM_SUMMARIZE: call LLM to produce structured summary of old groups,
-      keep recent groups intact (best quality, costs 1 extra LLM call)
+    Incremental rules:
+    - Frozen summary reused if no new groups need compression
+    - Only uncovered groups (between frozen summary and recent zone) are compressed
+    - New compression extends the frozen summary, doesn't rebuild from scratch
     """
 
     def __init__(
@@ -46,8 +78,9 @@ class ContextCompressor:
     ) -> None:
         self._strategy = strategy
         self._token_counter = token_counter or self._rough_count
-        # Cache: hash of compressed messages → summary group
-        self._summary_cache: dict[str, ToolTransactionGroup] = {}
+        # Persistent frozen summary — survives across rounds within a run
+        self._frozen_summary: SummaryBlock | None = None
+        self._frozen_summary_group_count: int = 0  # how many groups are covered
 
     def compress_groups(
         self,
@@ -55,31 +88,21 @@ class ContextCompressor:
         target_tokens: int,
         model_adapter: Any = None,
     ) -> list[ToolTransactionGroup]:
-        """Compress session groups to fit within target_tokens.
-
-        Args:
-            groups: Transaction groups from session history.
-            target_tokens: Maximum token budget for session history slot.
-            model_adapter: Required for LLM_SUMMARIZE strategy. If None,
-                falls back to SLIDING_WINDOW.
-        """
+        """Synchronous compression (SLIDING_WINDOW / TOOL_RESULT_SUMMARY)."""
         current_tokens = sum(
             g.token_estimate or self._count_group(g) for g in groups
         )
         if current_tokens <= target_tokens:
-            return groups
+            return self._prepend_frozen_summary(groups)
 
         if self._strategy == CompressionStrategy.SLIDING_WINDOW:
             return self._sliding_window(groups, target_tokens)
         if self._strategy == CompressionStrategy.TOOL_RESULT_SUMMARY:
             return self._tool_result_summary(groups, target_tokens)
-        if self._strategy == CompressionStrategy.LLM_SUMMARIZE:
+        if self._strategy in (CompressionStrategy.LLM_SUMMARIZE, CompressionStrategy.LLMLINGUA_COMPRESS):
             if model_adapter is None:
-                logger.warning("LLM_SUMMARIZE requires model_adapter, falling back to SLIDING_WINDOW")
+                logger.info("compression.llm_strategy_sync_fallback")
                 return self._sliding_window(groups, target_tokens)
-            return self._llm_summarize_sync(groups, target_tokens, model_adapter)
-        if self._strategy == CompressionStrategy.LLMLINGUA_COMPRESS:
-            logger.warning("LLMLINGUA_COMPRESS not implemented, falling back to SLIDING_WINDOW")
             return self._sliding_window(groups, target_tokens)
 
         return self._sliding_window(groups, target_tokens)
@@ -90,18 +113,45 @@ class ContextCompressor:
         target_tokens: int,
         model_adapter: Any = None,
     ) -> list[ToolTransactionGroup]:
-        """Async version — required for LLM_SUMMARIZE strategy."""
+        """Async compression — required for LLM_SUMMARIZE."""
         current_tokens = sum(
             g.token_estimate or self._count_group(g) for g in groups
         )
         if current_tokens <= target_tokens:
-            return groups
+            return self._prepend_frozen_summary(groups)
 
         if self._strategy == CompressionStrategy.LLM_SUMMARIZE and model_adapter:
             return await self._llm_summarize(groups, target_tokens, model_adapter)
 
-        # Non-async strategies
         return self.compress_groups(groups, target_tokens, model_adapter)
+
+    # ------------------------------------------------------------------
+    # Frozen summary management
+    # ------------------------------------------------------------------
+
+    def _prepend_frozen_summary(
+        self, groups: list[ToolTransactionGroup]
+    ) -> list[ToolTransactionGroup]:
+        """If we have a frozen summary and groups don't include it yet, prepend it."""
+        if not self._frozen_summary:
+            return groups
+        # Check if first group is already the summary
+        if groups and groups[0].group_id.startswith("summary_"):
+            return groups
+        summary_group = self._build_summary_group(self._frozen_summary)
+        return [summary_group] + groups
+
+    def _build_summary_group(self, block: SummaryBlock) -> ToolTransactionGroup:
+        """Convert SummaryBlock to a ToolTransactionGroup."""
+        content = f"<context-summary version=\"{block.summary_version}\">\n{block.summary_text}\n</context-summary>"
+        msg = Message(role="user", content=content)
+        return ToolTransactionGroup(
+            group_id=f"summary_{block.summary_id}",
+            group_type="PLAIN_MESSAGES",
+            messages=[msg],
+            token_estimate=block.token_estimate or self._token_counter([msg]),
+            protected=True,
+        )
 
     # ------------------------------------------------------------------
     # SLIDING_WINDOW
@@ -132,9 +182,9 @@ class ContextCompressor:
         groups: list[ToolTransactionGroup],
         target_tokens: int,
     ) -> list[ToolTransactionGroup]:
-        """Summarize long tool results to reduce token usage."""
+        """Truncate long tool results, then sliding window if needed."""
         compressed = []
-        max_tool_output = 200  # chars
+        max_tool_output = 200
 
         for g in groups:
             if g.group_type in ("TOOL_BATCH", "SUBAGENT_BATCH"):
@@ -158,7 +208,7 @@ class ContextCompressor:
         return self._sliding_window(compressed, target_tokens)
 
     # ------------------------------------------------------------------
-    # LLM_SUMMARIZE
+    # LLM_SUMMARIZE — incremental
     # ------------------------------------------------------------------
 
     async def _llm_summarize(
@@ -167,17 +217,17 @@ class ContextCompressor:
         target_tokens: int,
         model_adapter: Any,
     ) -> list[ToolTransactionGroup]:
-        """Compress old groups into a structured summary via LLM call.
+        """Incremental LLM compression with frozen summary reuse.
 
-        Splits groups into:
-        - old_groups: compressed into a single summary message
-        - recent_groups: kept intact (last N groups protected)
-
-        The summary replaces old_groups as a single PLAIN_MESSAGES group
-        with role="user" and <context-summary> XML wrapper.
+        Logic:
+        1. If frozen summary exists and covers some groups, skip those
+        2. Identify uncovered groups that need compression
+        3. If uncovered zone is small enough, just use sliding window
+        4. Otherwise, call LLM to compress uncovered zone
+        5. Merge new summary with existing frozen summary
+        6. Return: [merged_summary] + [recent_detail]
         """
         if len(groups) <= _PROTECTED_RECENT_GROUPS:
-            # Not enough groups to split — fall back to sliding window
             return self._sliding_window(groups, target_tokens)
 
         # Split: old (compressible) vs recent (protected)
@@ -185,37 +235,64 @@ class ContextCompressor:
         old_groups = groups[:split_point]
         recent_groups = groups[split_point:]
 
-        # Check if recent alone fits
         recent_tokens = sum(
             g.token_estimate or self._count_group(g) for g in recent_groups
         )
         if recent_tokens > target_tokens:
-            # Even recent doesn't fit — sliding window as last resort
             return self._sliding_window(groups, target_tokens)
 
-        # Check cache
-        cache_key = self._compute_cache_key(old_groups)
-        if cache_key in self._summary_cache:
-            summary_group = self._summary_cache[cache_key]
-            logger.info("compression.cache_hit", cache_key=cache_key[:8])
-            return [summary_group] + recent_groups
+        summary_budget = target_tokens - recent_tokens
 
-        # Build the text to compress
+        # Check if frozen summary already covers all old groups
+        if (self._frozen_summary
+                and self._frozen_summary_group_count >= len(old_groups)):
+            # Frozen summary covers everything — reuse it
+            summary_group = self._build_summary_group(self._frozen_summary)
+            if summary_group.token_estimate <= summary_budget:
+                logger.info("compression.frozen_reuse",
+                            covered=self._frozen_summary_group_count)
+                return [summary_group] + recent_groups
+
+        # Determine uncovered groups (new since last compression)
+        uncovered_start = self._frozen_summary_group_count if self._frozen_summary else 0
+        uncovered_groups = old_groups[uncovered_start:]
+
+        if not uncovered_groups:
+            # Nothing new to compress — reuse frozen or sliding window
+            if self._frozen_summary:
+                summary_group = self._build_summary_group(self._frozen_summary)
+                return [summary_group] + recent_groups
+            return self._sliding_window(groups, target_tokens)
+
+        # Build full text to compress (frozen summary + uncovered)
         lines: list[str] = []
-        for g in old_groups:
+
+        # Include existing summary as context for the new compression
+        if self._frozen_summary:
+            lines.append(f"[previous summary]\n{self._frozen_summary.summary_text}")
+            lines.append("")
+
+        # Add uncovered groups — full content, no truncation
+        for g in uncovered_groups:
             for msg in g.messages:
                 role = msg.role
                 content = msg.content or ""
                 if msg.tool_calls:
+                    import json
                     tool_names = ", ".join(tc.function_name for tc in msg.tool_calls)
-                    lines.append(f"[{role}] (calls: {tool_names})")
+                    args_preview = ", ".join(
+                        f"{tc.function_name}({json.dumps(tc.arguments, ensure_ascii=False, default=str)})"
+                        for tc in msg.tool_calls
+                    )
+                    lines.append(f"[{role}] (tool_calls: {args_preview})")
                 elif msg.tool_call_id:
-                    lines.append(f"[tool:{msg.name or '?'}] {content[:300]}")
+                    lines.append(f"[tool:{msg.name or '?'}] {content}")
                 else:
-                    lines.append(f"[{role}] {content[:500]}")
+                    lines.append(f"[{role}] {content}")
+
         history_text = "\n".join(lines)
 
-        # Call LLM with compression prompt
+        # Call LLM
         from agent_framework.agent.prompt_templates import CONTEXT_COMPRESSION_PROMPT
 
         compress_messages = [
@@ -227,7 +304,7 @@ class ContextCompressor:
             response = await model_adapter.complete(
                 messages=compress_messages,
                 temperature=0.0,
-                max_tokens=1024,
+                max_tokens=2048,
             )
             summary_text = response.content or ""
         except Exception as e:
@@ -237,50 +314,42 @@ class ContextCompressor:
         if not summary_text.strip():
             return self._sliding_window(groups, target_tokens)
 
-        # Wrap summary as a context-summary message
-        summary_content = f"<context-summary>\n{summary_text.strip()}\n</context-summary>"
-        summary_msg = Message(role="user", content=summary_content)
+        # Create new frozen summary block
+        source_hash = self._compute_cache_key(old_groups)
+        new_version = (self._frozen_summary.summary_version + 1) if self._frozen_summary else 1
 
-        summary_group = ToolTransactionGroup(
-            group_id=f"summary_{cache_key[:8]}",
-            group_type="PLAIN_MESSAGES",
-            messages=[summary_msg],
-            token_estimate=self._token_counter([summary_msg]),
-            protected=True,  # Summary must not be further trimmed
+        new_summary = SummaryBlock(
+            covered_group_count=len(old_groups),
+            source_hash=source_hash,
+            summary_version=new_version,
+            summary_text=summary_text.strip(),
         )
 
-        # Verify total fits
-        total = summary_group.token_estimate + recent_tokens
-        if total > target_tokens:
-            # Summary too large — fall back
+        summary_group = self._build_summary_group(new_summary)
+        new_summary.token_estimate = summary_group.token_estimate
+
+        # Verify fits
+        if summary_group.token_estimate + recent_tokens > target_tokens:
+            logger.warning("compression.summary_too_large",
+                           summary_tokens=summary_group.token_estimate,
+                           budget=summary_budget)
             return self._sliding_window(groups, target_tokens)
 
-        # Cache and return
-        self._summary_cache[cache_key] = summary_group
+        # Freeze the new summary
+        self._frozen_summary = new_summary
+        self._frozen_summary_group_count = len(old_groups)
+
         logger.info(
             "compression.llm_summarized",
-            old_groups=len(old_groups),
+            version=new_version,
+            covered_groups=len(old_groups),
+            uncovered_compressed=len(uncovered_groups),
             old_tokens=sum(g.token_estimate or self._count_group(g) for g in old_groups),
             summary_tokens=summary_group.token_estimate,
             recent_groups=len(recent_groups),
         )
 
         return [summary_group] + recent_groups
-
-    def _llm_summarize_sync(
-        self,
-        groups: list[ToolTransactionGroup],
-        target_tokens: int,
-        model_adapter: Any,
-    ) -> list[ToolTransactionGroup]:
-        """Sync fallback for LLM_SUMMARIZE — uses sliding window.
-
-        The actual LLM call is async. In sync compress_groups(),
-        we fall back to sliding window. Use compress_groups_async()
-        for the real LLM summarization.
-        """
-        logger.info("compression.llm_summarize_sync_fallback")
-        return self._sliding_window(groups, target_tokens)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -301,10 +370,14 @@ class ContextCompressor:
 
     @staticmethod
     def _compute_cache_key(groups: list[ToolTransactionGroup]) -> str:
-        """Deterministic hash of groups for cache lookup."""
         parts = []
         for g in groups:
             for msg in g.messages:
                 parts.append(f"{msg.role}:{(msg.content or '')[:100]}")
         content = "|".join(parts)
         return hashlib.sha256(content.encode()).hexdigest()[:16]
+
+    def reset(self) -> None:
+        """Reset frozen summary — called at run start."""
+        self._frozen_summary = None
+        self._frozen_summary_group_count = 0
