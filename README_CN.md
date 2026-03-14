@@ -99,101 +99,87 @@ python -m agent_framework.main --config config/deepseek.json
 python -m agent_framework.main --config config/anthropic.json
 ```
 
-### 上下文压缩与会话模式
+### 上下文管理与 Token 优化
 
-框架支持两种会话模式，通过配置切换：
-
-```json
-{"model": {"session_mode": "stateless"}}
-{"model": {"session_mode": "stateful"}}
-```
-
-#### 方案 A：STATELESS（默认，兼容所有 provider）
-
-每轮向模型发送完整 messages 列表：
-
-```
-用户第 1 轮输入: "你好"
-用户第 2 轮输入: "1+1等于"
-用户第 3 轮输入: "再见"
-```
+默认每轮发送完整 messages 列表（标准 Chat Completions 协议要求）：
 
 ```python
-# ── Round 1 发送的 messages ──────────────────────
+# ── Round 1 ──────────────────────────────────────
 messages = [
-    {"role": "system",    "content": "<system-identity>You are an Orchestrator agent...</system-identity>\n\n<agent-capabilities>...</agent-capabilities>"},
-    {"role": "user",      "content": "你好"},
+    {"role": "system",    "content": "<system-identity>...</system-identity>\n<agent-capabilities>...</agent-capabilities>"},
+    {"role": "user",      "content": "帮我读取 /tmp/test.txt"},
 ]
 # tools = [{read_file}, {write_file}, {run_command}, ...]
 # 总计: ~2700 tokens
 
-# ── Round 2 发送的 messages ──────────────────────
+# ── Round 2（含工具调用历史）─────────────────────
 messages = [
-    {"role": "system",    "content": "..."},          # ← 重复
-    {"role": "user",      "content": "你好"},          # ← 重复
-    {"role": "assistant", "content": "你好呀！"},      # ← 上轮回复
-    {"role": "user",      "content": "1+1等于"},       # ← 当前输入
+    {"role": "system",    "content": "..."},
+    {"role": "user",      "content": "帮我读取 /tmp/test.txt"},
+    {"role": "assistant", "content": "", "tool_calls": [{"id": "tc1", "function": {"name": "read_file", "arguments": "{\"path\":\"/tmp/test.txt\"}"}}]},
+    {"role": "tool",      "content": "Hello World", "tool_call_id": "tc1", "name": "read_file"},
+    {"role": "assistant", "content": "文件内容是 Hello World"},
+    {"role": "user",      "content": "把内容改成 Hi"},
 ]
-# 总计: ~2900 tokens
+# 总计: ~3000 tokens — 包含完整工具调用链路
 
-# ── Round 3 发送的 messages ──────────────────────
+# ── Round 3 ──────────────────────────────────────
 messages = [
-    {"role": "system",    "content": "..."},          # ← 重复
-    {"role": "user",      "content": "你好"},          # ← 重复
-    {"role": "assistant", "content": "你好呀！"},      # ← 重复
-    {"role": "user",      "content": "1+1等于"},       # ← 重复
-    {"role": "assistant", "content": "等于2"},         # ← 上轮回复
-    {"role": "user",      "content": "再见"},          # ← 当前输入
+    {"role": "system",    "content": "..."},
+    # ... 前两轮全部历史（含 tool_calls + tool results）...
+    {"role": "user",      "content": "确认一下改好了吗"},
 ]
-# 总计: ~3100 tokens — 每轮线性增长
+# 总计: ~3500 tokens — 每轮线性增长
 ```
 
-- 超出预算时启用上下文压缩（滑动窗口裁剪最早的 messages）
-- 冻结前缀可提升 provider 端 KV cache 命中率
+框架自动管理 token 增长：
+- **滑动窗口压缩**：超出预算时裁剪最早的 messages
+- **工具结果截断**：长 tool output 自动截断到 200 字符
+- **冻结前缀**：system prompt 生成不可变前缀，提升 provider 端 KV cache 命中率
 
-#### 方案 B：STATEFUL（首轮全量 + 后续增量）
+#### 有状态会话模式（Token 节省 96%）
 
-首轮发送完整上下文，后续仅发送新增 messages：
+对于支持服务端上下文的 provider，可启用增量发送模式：
+
+```json
+{"model": {"session_mode": "stateful"}}
+```
 
 ```python
-# ── Round 1 发送的 messages ──────────────────────
+# ── Round 1（首轮全量，与默认相同）─────────────────
 messages = [
-    {"role": "system",    "content": "<system-identity>...</system-identity>\n\n<agent-capabilities>...</agent-capabilities>"},
-    {"role": "user",      "content": "你好"},
+    {"role": "system",    "content": "<system-identity>...</system-identity>"},
+    {"role": "user",      "content": "帮我读取 /tmp/test.txt"},
 ]
-# 总计: ~2700 tokens（与 STATELESS 相同）
+# 总计: ~2700 tokens
 
-# ── Round 2 发送的 messages ──────────────────────
+# ── Round 2（仅发送新增消息）──────────────────────
 messages = [
-    {"role": "assistant", "content": "你好呀！"},      # ← 上轮回复（增量）
-    {"role": "user",      "content": "1+1等于"},       # ← 当前输入（增量）
+    {"role": "assistant", "content": "", "tool_calls": [{"id": "tc1", ...}]},
+    {"role": "tool",      "content": "Hello World", "tool_call_id": "tc1"},
+    {"role": "assistant", "content": "文件内容是 Hello World"},
+    {"role": "user",      "content": "把内容改成 Hi"},
 ]
-# 总计: ~100 tokens ← 无 system，无历史重复
+# 总计: ~200 tokens ← 无 system 重复，无历史重复
 
-# ── Round 3 发送的 messages ──────────────────────
+# ── Round 3（仅发送新增消息）──────────────────────
 messages = [
-    {"role": "assistant", "content": "等于2"},         # ← 上轮回复（增量）
-    {"role": "user",      "content": "再见"},          # ← 当前输入（增量）
+    {"role": "assistant", "content": "", "tool_calls": [{"id": "tc2", ...}]},
+    {"role": "tool",      "content": "Written 2 characters", "tool_call_id": "tc2"},
+    {"role": "assistant", "content": "已改好"},
+    {"role": "user",      "content": "确认一下改好了吗"},
 ]
-# 总计: ~50 tokens
+# 总计: ~150 tokens
 ```
 
-- provider 侧保持完整会话上下文，框架只发增量
-- 不启用上下文压缩（压缩会导致 messages 索引偏移）
-- 系统提示 / 技能变化时自动重建会话（重新发送全量）
-
-#### 模式对比
-
-| | STATELESS | STATEFUL |
-|--|-----------|----------|
+| | 默认模式 | stateful 模式 |
+|--|---------|-------------|
 | **Round 1** | ~2700 tokens | ~2700 tokens |
-| **Round 2** | ~2900 tokens | **~100 tokens** |
-| **Round 5** | ~3700 tokens | **~80 tokens** |
-| **Round 10** | ~5200 tokens | **~80 tokens** |
+| **Round 2** | ~3000 tokens | **~200 tokens** |
+| **Round 10** | ~6000 tokens | **~150 tokens** |
 | **趋势** | 线性增长 | 近似常数 |
-| **压缩** | 启用 | 跳过 |
-| **兼容性** | 所有 provider | 需 provider 维持服务端上下文 |
-| **配置** | `"session_mode": "stateless"` | `"session_mode": "stateful"` |
+| **压缩** | 启用（裁剪旧消息） | 跳过（provider 维持完整上下文） |
+| **兼容性** | 所有 provider | 需 provider 支持有状态会话 |
 
 ### 技能系统（SKILL.md）
 

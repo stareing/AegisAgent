@@ -60,72 +60,64 @@ pytest tests/
 - **Frozen prefix**: System identity + skill addon cached as immutable prefix for KV cache reuse
 - **XML-structured injection**: `<system-identity>` / `<agent-capabilities>` / `<available-skills>` / `<saved-memories>` boundaries
 
-### Session Modes (Token Optimization)
+### Context Management & Token Optimization
 
-Controlled via config:
-```json
-{"model": {"session_mode": "stateless"}}
-{"model": {"session_mode": "stateful"}}
-```
-
-#### Mode A: STATELESS (default, all providers)
+Each round sends the full messages list (standard Chat Completions protocol), including tool call chains:
 
 ```python
 # Round 1
 messages = [
     {"role": "system",    "content": "<system-identity>...</system-identity>"},
-    {"role": "user",      "content": "Hello"},
+    {"role": "user",      "content": "Read /tmp/test.txt"},
 ]  # ~2700 tokens
 
-# Round 2
+# Round 2 (with tool call history)
 messages = [
-    {"role": "system",    "content": "..."},         # ← repeated
-    {"role": "user",      "content": "Hello"},        # ← repeated
-    {"role": "assistant", "content": "Hi there!"},    # ← history
-    {"role": "user",      "content": "1+1=?"},        # ← current
-]  # ~2900 tokens
-
-# Round 3
-messages = [
-    {"role": "system",    "content": "..."},         # ← repeated
-    {"role": "user",      "content": "Hello"},        # ← repeated
-    {"role": "assistant", "content": "Hi there!"},    # ← repeated
-    {"role": "user",      "content": "1+1=?"},        # ← repeated
-    {"role": "assistant", "content": "2"},            # ← history
-    {"role": "user",      "content": "Bye"},          # ← current
-]  # ~3100 tokens — linear growth
+    {"role": "system",    "content": "..."},
+    {"role": "user",      "content": "Read /tmp/test.txt"},
+    {"role": "assistant", "content": "", "tool_calls": [{"id": "tc1", "function": {"name": "read_file", ...}}]},
+    {"role": "tool",      "content": "Hello World", "tool_call_id": "tc1", "name": "read_file"},
+    {"role": "assistant", "content": "The file contains Hello World"},
+    {"role": "user",      "content": "Change it to Hi"},
+]  # ~3000 tokens — full tool call chain preserved
 ```
 
-#### Mode B: STATEFUL (first full, then delta only)
+Token growth managed automatically:
+- **Sliding window**: oldest messages trimmed when over budget
+- **Tool result truncation**: long outputs capped at 200 chars
+- **Frozen prefix**: system prompt cached as immutable prefix for provider-side KV cache
+
+#### Stateful Session Mode (96% token savings)
+
+For providers that maintain server-side context:
+
+```json
+{"model": {"session_mode": "stateful"}}
+```
 
 ```python
-# Round 1 — same as STATELESS
+# Round 1 — full (same as default)
 messages = [
     {"role": "system",    "content": "<system-identity>...</system-identity>"},
-    {"role": "user",      "content": "Hello"},
+    {"role": "user",      "content": "Read /tmp/test.txt"},
 ]  # ~2700 tokens
 
-# Round 2 — delta only (no system, no history)
+# Round 2 — delta only (new messages since last send)
 messages = [
-    {"role": "assistant", "content": "Hi there!"},    # ← delta
-    {"role": "user",      "content": "1+1=?"},        # ← delta
-]  # ~100 tokens (96% saved)
-
-# Round 3
-messages = [
-    {"role": "assistant", "content": "2"},            # ← delta
-    {"role": "user",      "content": "Bye"},          # ← delta
-]  # ~50 tokens
+    {"role": "assistant", "content": "", "tool_calls": [{"id": "tc1", ...}]},
+    {"role": "tool",      "content": "Hello World", "tool_call_id": "tc1"},
+    {"role": "assistant", "content": "The file contains Hello World"},
+    {"role": "user",      "content": "Change it to Hi"},
+]  # ~200 tokens — no system, no history repeat
 ```
 
-| | STATELESS | STATEFUL |
-|--|-----------|----------|
+| | Default | stateful |
+|--|---------|----------|
 | Round 1 | ~2700 tokens | ~2700 tokens |
-| Round 2 | ~2900 tokens | **~100 tokens** |
-| Round 10 | ~5200 tokens | **~80 tokens** |
+| Round 2 | ~3000 tokens | **~200 tokens** |
+| Round 10 | ~6000 tokens | **~150 tokens** |
 | Trend | Linear growth | Near-constant |
-| Compression | Active (sliding window) | Skipped |
-| Compatibility | All providers | Requires server-side context |
+| Compression | Active | Skipped |
 
 ### Skills (SKILL.md)
 - File-based skills with YAML frontmatter: `skills/<name>/SKILL.md`
