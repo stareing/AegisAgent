@@ -47,8 +47,38 @@ class ContextSourceProvider:
         """
         parts = [f"<system-identity>\n{agent_config.system_prompt}\n</system-identity>"]
         if runtime_info:
-            info_lines = [f"  <{k}>{v}</{k}>" for k, v in runtime_info.items()]
-            parts.append("<runtime-environment>\n" + "\n".join(info_lines) + "\n</runtime-environment>")
+            # Split into environment vs capabilities
+            env_keys = {"operating_system", "working_directory"}
+            cap_keys = {
+                "can_spawn_subagents", "parallel_tool_calls",
+                "max_iterations", "max_concurrent_subagents", "max_subagents_per_run",
+            }
+
+            env_lines = [
+                f"  <{k}>{v}</{k}>"
+                for k, v in runtime_info.items() if k in env_keys
+            ]
+            cap_lines = [
+                f"  <{k}>{v}</{k}>"
+                for k, v in runtime_info.items() if k in cap_keys
+            ]
+            other_lines = [
+                f"  <{k}>{v}</{k}>"
+                for k, v in runtime_info.items() if k not in env_keys and k not in cap_keys
+            ]
+
+            if env_lines or other_lines:
+                parts.append(
+                    "<runtime-environment>\n"
+                    + "\n".join(env_lines + other_lines)
+                    + "\n</runtime-environment>"
+                )
+            if cap_lines:
+                parts.append(
+                    "<agent-capabilities>\n"
+                    + "\n".join(cap_lines)
+                    + "\n</agent-capabilities>"
+                )
         return "\n\n".join(parts)
 
     def collect_skill_addon(self, active_skill: Skill | None) -> str | None:

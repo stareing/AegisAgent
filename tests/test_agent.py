@@ -233,8 +233,8 @@ class TestOrchestratorAgent:
         from agent_framework.agent.orchestrator_agent import OrchestratorAgent
         agent = OrchestratorAgent()
         prompt = agent.agent_config.system_prompt
-        assert "timeout" in prompt.lower()
-        assert "iteration" in prompt.lower()
+        assert "agent-capabilities" in prompt
+        assert "max_iterations" in prompt or "iteration" in prompt.lower()
 
     def test_coordinator_cancels_subagents_on_exit(self):
         """Coordinator must cancel active sub-agents in finally block."""

@@ -312,16 +312,51 @@ class RunCoordinator:
             deps.context_engineer.set_skill_context(skill.system_prompt_addon)
 
     @staticmethod
-    def _collect_runtime_info() -> dict[str, str]:
-        """Collect runtime environment info for context injection."""
+    def _collect_runtime_info(
+        agent: BaseAgent | None = None,
+        deps: AgentRuntimeDeps | None = None,
+        effective_config: EffectiveRunConfig | None = None,
+    ) -> dict[str, str]:
+        """Collect runtime environment and agent capabilities for context injection.
+
+        Dynamically injects capability constraints so the LLM knows its
+        actual limits (spawn, parallel calls, iterations) without
+        hardcoding values in prompt templates.
+        """
         import os
         import platform
 
         os_map = {"Darwin": "macOS", "Windows": "Windows", "Linux": "Linux"}
-        return {
+        info: dict[str, str] = {
             "operating_system": os_map.get(platform.system(), platform.system()),
             "working_directory": os.getcwd(),
         }
+
+        # Dynamic capability injection
+        if effective_config:
+            info["max_iterations"] = str(effective_config.max_iterations)
+
+        if agent:
+            can_spawn = agent.agent_config.allow_spawn_children
+            info["can_spawn_subagents"] = str(can_spawn).lower()
+
+        if deps:
+            # Parallel tool call support from model adapter
+            adapter = deps.model_adapter
+            if hasattr(adapter, "supports_parallel_tool_calls"):
+                try:
+                    val = adapter.supports_parallel_tool_calls()
+                    info["parallel_tool_calls"] = str(bool(val)).lower()
+                except Exception:
+                    pass
+
+            # Sub-agent quotas
+            if deps.sub_agent_runtime and hasattr(deps.sub_agent_runtime, "_scheduler"):
+                sched = deps.sub_agent_runtime._scheduler
+                info["max_concurrent_subagents"] = str(sched._max_concurrent)
+                info["max_subagents_per_run"] = str(sched._max_per_run)
+
+        return info
 
     def _prepare_llm_request(
         self,
@@ -352,7 +387,7 @@ class RunCoordinator:
             "memories": memories,
             "task": task,
             "active_skill": active_skill,
-            "runtime_info": self._collect_runtime_info(),
+            "runtime_info": self._collect_runtime_info(agent, deps, effective_config),
             "skill_descriptions": skill_descriptions,
         }
 
