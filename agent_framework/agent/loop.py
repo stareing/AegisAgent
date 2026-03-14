@@ -342,19 +342,28 @@ class AgentLoop:
         args_str = json.dumps(tc.arguments, sort_keys=True, default=str)
         return f"{tc.function_name}({args_str})"
 
-    def _collect_succeeded_signatures(self, agent_state: AgentState) -> set[str]:
-        """Collect signatures of all tool calls that succeeded in previous iterations."""
-        sigs: set[str] = set()
+    def _collect_succeeded_signatures(
+        self, agent_state: AgentState
+    ) -> dict[str, str]:
+        """Collect signatures → original output of succeeded tool calls.
+
+        Returns a dict mapping signature → original output string,
+        so dedup guard can replay the real result instead of an instruction.
+        """
+        sigs: dict[str, str] = {}
         for prev in agent_state.iteration_history:
             if not prev.model_response or not prev.model_response.tool_calls:
                 continue
-            # Build a map of tool_call_id -> success from tool_results
-            success_ids = {
-                tr.tool_call_id for tr in prev.tool_results if tr.success
-            }
+            # Build map of tool_call_id -> output from successful results
+            success_outputs: dict[str, str] = {}
+            for tr in prev.tool_results:
+                if tr.success and tr.output is not None:
+                    success_outputs[tr.tool_call_id] = str(tr.output)
             for tc in prev.model_response.tool_calls:
-                if tc.id in success_ids:
-                    sigs.add(self._single_tool_signature(tc))
+                if tc.id in success_outputs:
+                    sig = self._single_tool_signature(tc)
+                    if sig not in sigs:  # keep first occurrence
+                        sigs[sig] = success_outputs[tc.id]
         return sigs
 
     async def _dispatch_tool_calls(
@@ -373,9 +382,10 @@ class AgentLoop:
         dedup_results: list[tuple[ToolResult, ToolExecutionMeta]] = []
 
         for tc in tool_calls:
-            # Dedup guard: block re-execution of identical successful calls
+            # Dedup guard: replay original result for identical successful calls
             sig = self._single_tool_signature(tc)
             if sig in succeeded_sigs:
+                original_output = succeeded_sigs[sig]
                 logger.warning(
                     "tool.duplicate_blocked",
                     tool_name=tc.function_name,
@@ -387,8 +397,8 @@ class AgentLoop:
                         tool_name=tc.function_name,
                         success=True,
                         output=(
-                            "This tool was already called with identical arguments and succeeded. "
-                            "Do NOT call it again. Summarize the previous result for the user."
+                            f"[Cached result — this tool was already called with identical arguments]\n"
+                            f"{original_output}"
                         ),
                     ),
                     ToolExecutionMeta(execution_time_ms=0, source="local"),
