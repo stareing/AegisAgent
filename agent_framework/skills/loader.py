@@ -158,3 +158,53 @@ def load_skill_body(skill_path: str | Path) -> str:
     if match:
         return text[match.end():].strip()
     return text.strip()
+
+
+def load_supporting_file(skill_dir: str | Path, relative_path: str) -> str:
+    """Read a companion file from a skill's directory.
+
+    Used by complex skills that reference supporting files like:
+      agents/grader.md, references/schemas.md, scripts/run_eval.py
+
+    Args:
+        skill_dir: The skill's root directory (where SKILL.md lives).
+        relative_path: Path relative to skill_dir (e.g. "agents/grader.md").
+
+    Returns:
+        File contents as string.
+
+    Raises:
+        FileNotFoundError: If the file doesn't exist.
+        ValueError: If the path escapes the skill directory (path traversal).
+    """
+    base = Path(skill_dir).resolve()
+    target = (base / relative_path).resolve()
+
+    # Prevent path traversal outside skill directory
+    if not str(target).startswith(str(base)):
+        raise ValueError(
+            f"Path traversal blocked: {relative_path} escapes skill directory"
+        )
+
+    if not target.is_file():
+        raise FileNotFoundError(
+            f"Supporting file not found: {relative_path} in {skill_dir}"
+        )
+
+    return target.read_text(encoding="utf-8")
+
+
+def list_skill_files(skill_dir: str | Path) -> list[str]:
+    """List all files in a skill directory (for skill introspection).
+
+    Returns relative paths from skill_dir.
+    """
+    base = Path(skill_dir)
+    if not base.is_dir():
+        return []
+    return sorted(
+        str(p.relative_to(base))
+        for p in base.rglob("*")
+        if p.is_file() and not p.name.startswith(".")
+        and "__pycache__" not in str(p)
+    )

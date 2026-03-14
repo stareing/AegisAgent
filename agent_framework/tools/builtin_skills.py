@@ -57,6 +57,8 @@ def invoke_skill(skill_id: str, arguments: str = "") -> str:
 
     # File-based skill: lazy load body from SKILL.md
     if skill.source_path:
+        from pathlib import Path
+
         from agent_framework.skills.loader import load_skill_body
         from agent_framework.skills.preprocessor import preprocess_skill
 
@@ -65,10 +67,13 @@ def invoke_skill(skill_id: str, arguments: str = "") -> str:
         except FileNotFoundError:
             return f"ERROR: Skill file not found: {skill.source_path}"
 
+        # skill_dir = directory containing SKILL.md (for ${SKILL_DIR} and cwd)
+        skill_dir = str(Path(skill.source_path).parent)
+
         body = preprocess_skill(
             body,
             raw_args=arguments,
-            cwd=None,
+            skill_dir=skill_dir,
             enable_shell=True,
         )
 
@@ -76,6 +81,7 @@ def invoke_skill(skill_id: str, arguments: str = "") -> str:
             "skill.invoked",
             skill_id=skill_id,
             source="file",
+            skill_dir=skill_dir,
             args_preview=arguments[:100],
             body_length=len(body),
         )

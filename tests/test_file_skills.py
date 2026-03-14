@@ -481,3 +481,161 @@ class TestSkillContextInjection:
         from agent_framework.context.source_provider import ContextSourceProvider
         provider = ContextSourceProvider()
         assert provider.collect_skill_catalog([]) is None
+
+
+# =====================================================================
+# Complex Skill Support (skill-creator style)
+# =====================================================================
+
+
+class TestComplexSkillSupport:
+    """Tests for skill-creator-level features: ${SKILL_DIR}, companion files, cwd."""
+
+    def test_skill_dir_substitution(self, tmp_path):
+        from agent_framework.skills.preprocessor import preprocess_skill
+        body = "Read ${SKILL_DIR}/agents/grader.md for grading instructions."
+        result = preprocess_skill(body, skill_dir=str(tmp_path))
+        assert str(tmp_path) in result
+        assert "${SKILL_DIR}" not in result
+
+    def test_claude_skill_dir_alias(self, tmp_path):
+        from agent_framework.skills.preprocessor import preprocess_skill
+        body = "Script at ${CLAUDE_SKILL_DIR}/scripts/run_eval.py"
+        result = preprocess_skill(body, skill_dir=str(tmp_path))
+        assert str(tmp_path) in result
+
+    def test_skill_dir_with_arguments(self, tmp_path):
+        from agent_framework.skills.preprocessor import preprocess_skill
+        body = "Run ${SKILL_DIR}/scripts/test.py on $ARGUMENTS"
+        result = preprocess_skill(body, raw_args="my-skill", skill_dir=str(tmp_path))
+        assert str(tmp_path) in result
+        assert "my-skill" in result
+
+    def test_shell_directive_uses_skill_dir_as_cwd(self, tmp_path):
+        from agent_framework.skills.preprocessor import preprocess_skill
+        # Create a file in the skill directory
+        (tmp_path / "marker.txt").write_text("FOUND_IT")
+        body = "Marker: !`cat marker.txt`"
+        result = preprocess_skill(body, skill_dir=str(tmp_path))
+        assert "FOUND_IT" in result
+
+    def test_load_supporting_file(self, tmp_path):
+        from agent_framework.skills.loader import load_supporting_file
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        (agents_dir / "grader.md").write_text("You are a grader.")
+        content = load_supporting_file(tmp_path, "agents/grader.md")
+        assert "grader" in content
+
+    def test_load_supporting_file_not_found(self, tmp_path):
+        from agent_framework.skills.loader import load_supporting_file
+        with pytest.raises(FileNotFoundError):
+            load_supporting_file(tmp_path, "agents/nonexistent.md")
+
+    def test_load_supporting_file_path_traversal_blocked(self, tmp_path):
+        from agent_framework.skills.loader import load_supporting_file
+        with pytest.raises(ValueError, match="traversal"):
+            load_supporting_file(tmp_path, "../../etc/passwd")
+
+    def test_list_skill_files(self, tmp_path):
+        from agent_framework.skills.loader import list_skill_files
+        (tmp_path / "SKILL.md").write_text("---\nname: x\n---\nBody")
+        agents = tmp_path / "agents"
+        agents.mkdir()
+        (agents / "grader.md").write_text("grade")
+        scripts = tmp_path / "scripts"
+        scripts.mkdir()
+        (scripts / "run.py").write_text("run")
+
+        files = list_skill_files(tmp_path)
+        assert "SKILL.md" in files
+        assert "agents/grader.md" in files
+        assert "scripts/run.py" in files
+
+    def test_invoke_skill_with_skill_dir(self, tmp_path):
+        """invoke_skill passes skill_dir correctly for ${SKILL_DIR} resolution."""
+        from agent_framework.agent.skill_router import SkillRouter
+        from agent_framework.tools.builtin_skills import invoke_skill, set_skill_runtime
+
+        skill_dir = tmp_path / "my-complex-skill"
+        skill_dir.mkdir()
+        refs = skill_dir / "references"
+        refs.mkdir()
+        (refs / "schema.md").write_text("Schema definition here")
+        (skill_dir / "SKILL.md").write_text(textwrap.dedent("""\
+            ---
+            name: my-complex-skill
+            description: A complex skill with supporting files
+            ---
+
+            Read schema from ${SKILL_DIR}/references/schema.md
+            Task: $ARGUMENTS
+        """))
+
+        router = SkillRouter()
+        router.load_file_skills([tmp_path])
+        set_skill_runtime(router, MagicMock())
+
+        result = invoke_skill("my-complex-skill", arguments="do the thing")
+        # ${SKILL_DIR} should be resolved to actual path
+        assert str(skill_dir) in result
+        assert "do the thing" in result
+        assert "${SKILL_DIR}" not in result
+
+    def test_full_complex_skill_structure(self, tmp_path):
+        """Test a skill with structure mirroring skill-creator."""
+        from agent_framework.skills.loader import (
+            discover_skills,
+            list_skill_files,
+            load_skill_body,
+            load_supporting_file,
+        )
+        from agent_framework.skills.preprocessor import preprocess_skill
+
+        # Build a skill-creator-like structure
+        skill = tmp_path / "my-skill"
+        skill.mkdir()
+        (skill / "SKILL.md").write_text(textwrap.dedent("""\
+            ---
+            name: my-skill
+            description: Create and test skills
+            ---
+
+            Use grader at ${SKILL_DIR}/agents/grader.md
+            Run tests: !`echo "3 tests passed"`
+            User request: $ARGUMENTS
+        """))
+        (skill / "agents").mkdir()
+        (skill / "agents" / "grader.md").write_text("You are a grader. Score 1-5.")
+        (skill / "scripts").mkdir()
+        (skill / "scripts" / "run_eval.py").write_text("print('eval')")
+        (skill / "references").mkdir()
+        (skill / "references" / "schemas.md").write_text("{ schema: ... }")
+
+        # Discovery
+        results = discover_skills([tmp_path])
+        assert len(results) == 1
+        assert results[0]["skill_id"] == "my-skill"
+
+        # List files
+        files = list_skill_files(skill)
+        assert "agents/grader.md" in files
+        assert "scripts/run_eval.py" in files
+        assert "references/schemas.md" in files
+
+        # Load body
+        body = load_skill_body(skill / "SKILL.md")
+        assert "${SKILL_DIR}" in body  # Not yet preprocessed
+
+        # Preprocess
+        processed = preprocess_skill(
+            body, raw_args="build my-feature", skill_dir=str(skill)
+        )
+        assert str(skill) in processed  # ${SKILL_DIR} resolved
+        assert "3 tests passed" in processed  # shell executed
+        assert "build my-feature" in processed  # args substituted
+
+        # Read supporting file
+        grader = load_supporting_file(skill, "agents/grader.md")
+        assert "grader" in grader
+        assert "Score 1-5" in grader

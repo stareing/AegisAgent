@@ -13,16 +13,24 @@ logger = get_logger(__name__)
 _SHELL_DIRECTIVE_RE = re.compile(r"!`([^`]+)`")
 
 
-def substitute_arguments(body: str, raw_args: str) -> str:
-    """Replace $ARGUMENTS, $0, $1, ... in skill body.
+def substitute_variables(body: str, raw_args: str, skill_dir: str | None = None) -> str:
+    """Replace all placeholders in skill body.
 
-    $ARGUMENTS — full argument string
-    $0, $1, $2 — positional (whitespace-split)
+    Supported variables:
+    - $ARGUMENTS — full argument string
+    - $0, $1, $2 — positional (whitespace-split)
+    - ${SKILL_DIR} — absolute path to the skill's directory
+    - ${CLAUDE_SKILL_DIR} — alias for ${SKILL_DIR} (Claude Code compat)
+
     If $ARGUMENTS not found in body, append as "ARGUMENTS: <value>"
     """
+    # Replace ${SKILL_DIR} and ${CLAUDE_SKILL_DIR} first (before arg processing)
+    if skill_dir:
+        body = body.replace("${SKILL_DIR}", skill_dir)
+        body = body.replace("${CLAUDE_SKILL_DIR}", skill_dir)
+
     if not raw_args:
         body = body.replace("$ARGUMENTS", "")
-        # Clean positional placeholders
         body = re.sub(r"\$\d+", "", body)
         return body
 
@@ -45,6 +53,11 @@ def substitute_arguments(body: str, raw_args: str) -> str:
         body = f"{body}\n\nARGUMENTS: {raw_args}"
 
     return body
+
+
+# Backward compat alias
+def substitute_arguments(body: str, raw_args: str) -> str:
+    return substitute_variables(body, raw_args)
 
 
 def execute_shell_directives(body: str, cwd: str | None = None) -> str:
@@ -87,11 +100,22 @@ def execute_shell_directives(body: str, cwd: str | None = None) -> str:
 def preprocess_skill(
     body: str,
     raw_args: str = "",
+    skill_dir: str | None = None,
     cwd: str | None = None,
     enable_shell: bool = True,
 ) -> str:
-    """Full preprocessing pipeline: arguments → shell directives."""
-    body = substitute_arguments(body, raw_args)
+    """Full preprocessing pipeline: variables → shell directives.
+
+    Args:
+        body: Raw skill body text.
+        raw_args: User-provided arguments.
+        skill_dir: Absolute path to the skill's directory. Used for
+            ${SKILL_DIR} substitution and as default cwd for shell directives.
+        cwd: Override working directory for shell directives. Falls back to skill_dir.
+        enable_shell: Whether to execute !`command` directives.
+    """
+    body = substitute_variables(body, raw_args, skill_dir=skill_dir)
     if enable_shell and _SHELL_DIRECTIVE_RE.search(body):
-        body = execute_shell_directives(body, cwd=cwd)
+        effective_cwd = cwd or skill_dir
+        body = execute_shell_directives(body, cwd=effective_cwd)
     return body
