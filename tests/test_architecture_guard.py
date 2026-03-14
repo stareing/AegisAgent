@@ -220,10 +220,10 @@ class TestFaultInjection:
         mock_mm.record_turn = MagicMock()
 
         mock_ce = MagicMock()
-        mock_ce.prepare_context_for_llm.return_value = [
+        mock_ce.prepare_context_for_llm = AsyncMock(return_value=[
             Message(role="system", content="sys"),
             Message(role="user", content="task"),
-        ]
+        ])
         mock_ce.set_skill_context = MagicMock()
 
         mock_tr = MagicMock()
@@ -751,10 +751,10 @@ class TestDataFlowInvariants:
         mock_mm.record_turn = MagicMock()
 
         mock_ce = MagicMock()
-        mock_ce.prepare_context_for_llm.return_value = [
+        mock_ce.prepare_context_for_llm = AsyncMock(return_value=[
             Message(role="system", content="sys"),
             Message(role="user", content="task"),
-        ]
+        ])
         mock_ce.set_skill_context = MagicMock()
 
         mock_tr = MagicMock()

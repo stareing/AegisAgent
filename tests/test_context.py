@@ -395,7 +395,8 @@ class TestContextCompressor:
 
 
 class TestContextEngineer:
-    def test_prepare_context_basic(self):
+    @pytest.mark.asyncio
+    async def test_prepare_context_basic(self):
         engineer = ContextEngineer()
         agent_config = AgentConfig(system_prompt="Be helpful")
         session = SessionState()
@@ -408,12 +409,13 @@ class TestContextEngineer:
             "task": "greet",
             "active_skill": None,
         }
-        messages = engineer.prepare_context_for_llm(state, materials)
+        messages = await engineer.prepare_context_for_llm(state, materials)
         assert len(messages) >= 2
         assert messages[0].role == "system"
         assert messages[-1].role == "user"
 
-    def test_prepare_context_with_memories(self):
+    @pytest.mark.asyncio
+    async def test_prepare_context_with_memories(self):
         engineer = ContextEngineer()
         agent_config = AgentConfig(system_prompt="sys")
         session = SessionState()
@@ -428,12 +430,13 @@ class TestContextEngineer:
             "memories": memories,
             "task": "test",
         }
-        messages = engineer.prepare_context_for_llm(state, materials)
+        messages = await engineer.prepare_context_for_llm(state, materials)
         system_content = messages[0].content
         assert "saved-memories" in system_content
         assert "Pref" in system_content
 
-    def test_set_skill_context(self):
+    @pytest.mark.asyncio
+    async def test_set_skill_context(self):
         engineer = ContextEngineer()
         engineer.set_skill_context("custom skill prompt")
         agent_config = AgentConfig(system_prompt="base")
@@ -445,10 +448,11 @@ class TestContextEngineer:
             "session_state": session,
             "task": "test",
         }
-        messages = engineer.prepare_context_for_llm(state, materials)
+        messages = await engineer.prepare_context_for_llm(state, materials)
         assert "custom skill prompt" in messages[0].content
 
-    def test_report_context_stats(self):
+    @pytest.mark.asyncio
+    async def test_report_context_stats(self):
         engineer = ContextEngineer()
         agent_config = AgentConfig(system_prompt="sys")
         session = SessionState()
@@ -458,7 +462,7 @@ class TestContextEngineer:
             "session_state": session,
             "task": "test",
         }
-        engineer.prepare_context_for_llm(state, materials)
+        await engineer.prepare_context_for_llm(state, materials)
         stats = engineer.report_context_stats()
         assert isinstance(stats, ContextStats)
         assert stats.total_tokens > 0
@@ -544,7 +548,8 @@ class TestFrozenPromptPrefix:
         assert mgr.current_prefix is None
         assert mgr.should_rotate("prompt") is True
 
-    def test_context_stats_reports_prefix_reuse(self):
+    @pytest.mark.asyncio
+    async def test_context_stats_reports_prefix_reuse(self):
         engineer = ContextEngineer()
         config = AgentConfig(system_prompt="stable prompt")
         session = SessionState()
@@ -552,11 +557,11 @@ class TestFrozenPromptPrefix:
         materials = {"agent_config": config, "session_state": session, "task": "test"}
 
         # First call — builds prefix
-        engineer.prepare_context_for_llm(state, materials)
+        await engineer.prepare_context_for_llm(state, materials)
         stats1 = engineer.report_context_stats()
 
         # Second call — should reuse prefix
-        engineer.prepare_context_for_llm(state, materials)
+        await engineer.prepare_context_for_llm(state, materials)
         stats2 = engineer.report_context_stats()
         assert stats2.prefix_reused is True
 
@@ -621,7 +626,8 @@ class TestFrozenPromptPrefix:
         assert result[0].role == "assistant"
         assert result[1].content == "1+1"
 
-    def test_stateful_session_skips_compression(self):
+    @pytest.mark.asyncio
+    async def test_stateful_session_skips_compression(self):
         """In stateful mode, compression must be skipped to preserve delta indexing."""
         engineer = ContextEngineer(
             builder=ContextBuilder(max_context_tokens=200, reserve_for_output=20),
@@ -639,7 +645,7 @@ class TestFrozenPromptPrefix:
             "agent_config": config, "session_state": session,
             "task": "q", "stateful_session": False,
         }
-        msgs_stateless = engineer.prepare_context_for_llm(state, materials_stateless)
+        msgs_stateless = await engineer.prepare_context_for_llm(state, materials_stateless)
         stats_stateless = engineer.report_context_stats()
 
         # STATEFUL: compression should be skipped, all session messages kept
@@ -647,13 +653,14 @@ class TestFrozenPromptPrefix:
             "agent_config": config, "session_state": session,
             "task": "q", "stateful_session": True,
         }
-        msgs_stateful = engineer.prepare_context_for_llm(state, materials_stateful)
+        msgs_stateful = await engineer.prepare_context_for_llm(state, materials_stateful)
 
         # Stateful should have MORE messages (no trimming)
         assert len(msgs_stateful) > len(msgs_stateless)
         assert stats_stateless.groups_trimmed > 0 or len(msgs_stateless) < len(msgs_stateful)
 
-    def test_prefix_not_compressed(self):
+    @pytest.mark.asyncio
+    async def test_prefix_not_compressed(self):
         """Frozen prefix must survive compression — only suffix is trimmed."""
         engineer = ContextEngineer(
             builder=ContextBuilder(max_context_tokens=200, reserve_for_output=20),
@@ -666,7 +673,7 @@ class TestFrozenPromptPrefix:
             session.append_message(Message(role="assistant", content=f"reply {i} " + "Z" * 50))
         state = AgentState(run_id="r1", task="test")
         materials = {"agent_config": config, "session_state": session, "task": "q"}
-        messages = engineer.prepare_context_for_llm(state, materials)
+        messages = await engineer.prepare_context_for_llm(state, materials)
         # System message (prefix) must be first and contain full system prompt
         assert messages[0].role == "system"
         assert "X" * 100 in messages[0].content

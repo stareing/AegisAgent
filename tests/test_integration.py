@@ -442,7 +442,8 @@ class TestMemory:
 class TestContextEngineer:
     """Test context building."""
 
-    def test_context_slots_order(self):
+    @pytest.mark.asyncio
+    async def test_context_slots_order(self):
         source = ContextSourceProvider()
         builder = ContextBuilder()
         engineer = ContextEngineer(source_provider=source, builder=builder)
@@ -455,7 +456,7 @@ class TestContextEngineer:
         session.append_message(Message(role="assistant", content="Previous response"))
 
         config = AgentConfig(system_prompt="You are helpful.")
-        messages = engineer.prepare_context_for_llm(
+        messages = await engineer.prepare_context_for_llm(
             agent_state,
             {
                 "agent_config": config,
@@ -471,7 +472,8 @@ class TestContextEngineer:
         assert messages[-1].role == "user"
         assert messages[-1].content == "What is 1+1?"
 
-    def test_context_stats(self):
+    @pytest.mark.asyncio
+    async def test_context_stats(self):
         engineer = ContextEngineer()
         from agent_framework.models.agent import AgentConfig, AgentState
         from agent_framework.models.session import SessionState
@@ -480,7 +482,7 @@ class TestContextEngineer:
         session = SessionState(session_id="s1", run_id="r1")
         config = AgentConfig(system_prompt="Be helpful.")
 
-        engineer.prepare_context_for_llm(
+        await engineer.prepare_context_for_llm(
             agent_state,
             {
                 "agent_config": config,

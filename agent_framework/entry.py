@@ -144,7 +144,13 @@ class AgentFramework:
             max_context_tokens=self.config.context.max_context_tokens,
             reserve_for_output=self.config.context.reserve_for_output,
         )
-        compressor = ContextCompressor()
+        from agent_framework.context.compressor import CompressionStrategy
+        strategy_str = self.config.context.default_compression_strategy
+        try:
+            strategy = CompressionStrategy(strategy_str)
+        except ValueError:
+            strategy = CompressionStrategy.SLIDING_WINDOW
+        compressor = ContextCompressor(strategy=strategy)
         context_engineer = ContextEngineer(
             source_provider=source_provider,
             builder=builder,

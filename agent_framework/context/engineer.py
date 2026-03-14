@@ -49,7 +49,7 @@ class ContextEngineer:
         self._skill_prompt: str | None = None
         self._last_stats = ContextStats()
 
-    def prepare_context_for_llm(
+    async def prepare_context_for_llm(
         self,
         agent_state: AgentState,
         context_materials: dict,
@@ -125,8 +125,11 @@ class ContextEngineer:
         if not is_stateful:
             fixed_tokens = system_tokens + memory_tokens + input_tokens
             target_session_tokens = max(0, budget - fixed_tokens)
-            session_groups = self._compressor.compress_groups(
-                session_groups, target_tokens=target_session_tokens
+            model_adapter = context_materials.get("model_adapter")
+            session_groups = await self._compressor.compress_groups_async(
+                session_groups,
+                target_tokens=target_session_tokens,
+                model_adapter=model_adapter,
             )
 
         # Build final context: prefix.messages + suffix

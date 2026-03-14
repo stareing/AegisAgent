@@ -20,6 +20,7 @@ class ContextStats(BaseModel):
     total_tokens: int = 0
     groups_trimmed: int = 0
     prefix_reused: bool = False
+    compression_strategy: str = ""
 
 
 class FrozenPromptPrefix(BaseModel):

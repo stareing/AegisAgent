@@ -452,12 +452,13 @@ class RunCoordinator:
             "runtime_info": runtime_info,
             "skill_descriptions": skill_descriptions,
             "stateful_session": adapter_stateful,
+            "model_adapter": deps.model_adapter,
         }
 
         # Build LLM context
         # NOTE: ContextPolicy is consumed exclusively by ContextEngineer.
         # RunCoordinator passes it but never interprets its fields.
-        llm_messages = deps.context_engineer.prepare_context_for_llm(
+        llm_messages = await deps.context_engineer.prepare_context_for_llm(
             agent_state, context_materials
         )
 
