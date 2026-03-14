@@ -24,8 +24,10 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# Safety: force stop if the same tool is called N+ times with identical args
-_MAX_REPEATED_TOOL_CALLS = 3
+# Safety: force stop if the same tool is called N+ times with identical args.
+# Set to 2: first call executes, second repeat immediately stops.
+# The dedup guard replays the cached result, so the LLM has the answer.
+_MAX_REPEATED_TOOL_CALLS = 2
 # Safety: force ABORT after N consecutive LLM errors
 _MAX_CONSECUTIVE_ERRORS = 3
 
@@ -274,7 +276,7 @@ class AgentLoop:
             )
 
         # Detect repeated identical tool calls — potential stuck loop.
-        # Force stop if 3+ consecutive identical tool calls detected.
+        # Stop early and use the previous iteration's answer if available.
         if model_response.tool_calls and agent_state.iteration_history:
             repeat_count = self._detect_repeated_tool_calls(model_response, agent_state)
             if repeat_count >= _MAX_REPEATED_TOOL_CALLS:
@@ -283,8 +285,18 @@ class AgentLoop:
                     iteration_index=agent_state.iteration_count,
                     repeat_count=repeat_count,
                 )
+                # Try to extract the previous answer so user gets a result, not an error
+                prev = agent_state.iteration_history[-1]
+                if prev.model_response and prev.model_response.content:
+                    # Inject the previous answer as this response's content
+                    model_response.content = prev.model_response.content
+                    model_response.tool_calls = []
+                    return StopSignal(
+                        reason=StopReason.LLM_STOP,
+                        message="Stopped repeated tool call — using previous result",
+                    )
                 return StopSignal(
-                    reason=StopReason.ERROR,
+                    reason=StopReason.MAX_ITERATIONS,
                     message=f"Stuck loop: same tool called {repeat_count} times consecutively",
                 )
 
