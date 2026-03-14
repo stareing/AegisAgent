@@ -1154,10 +1154,6 @@ async def _repl(fw: Any, mock_model: InteractiveMockModel | None) -> None:
             _print_result(result)
             if result.success:
                 state.append_turn(user_input, result)
-                # Context editing: prune stale duplicate tool calls
-                pruned = state.apply_context_editing()
-                if pruned > 0:
-                    print(f"  {_dim(f'(已自动清理 {pruned} 条重复工具调用)')}")
                 state.trim_to_token_budget()
                 # Auto-compact: if history reaches 95% of budget, compress
                 if state.should_auto_compact() and not mock_model:
