@@ -93,7 +93,7 @@ class ContextCompressor:
             g.token_estimate or self._count_group(g) for g in groups
         )
         if current_tokens <= target_tokens:
-            return self._prepend_frozen_summary(groups)
+            return self._prepend_frozen_summary(groups, target_tokens)
 
         if self._strategy == CompressionStrategy.SLIDING_WINDOW:
             return self._sliding_window(groups, target_tokens)
@@ -118,7 +118,7 @@ class ContextCompressor:
             g.token_estimate or self._count_group(g) for g in groups
         )
         if current_tokens <= target_tokens:
-            return self._prepend_frozen_summary(groups)
+            return self._prepend_frozen_summary(groups, target_tokens)
 
         if self._strategy == CompressionStrategy.LLM_SUMMARIZE and model_adapter:
             return await self._llm_summarize(groups, target_tokens, model_adapter)
@@ -130,16 +130,33 @@ class ContextCompressor:
     # ------------------------------------------------------------------
 
     def _prepend_frozen_summary(
-        self, groups: list[ToolTransactionGroup]
+        self,
+        groups: list[ToolTransactionGroup],
+        target_tokens: int = 0,
     ) -> list[ToolTransactionGroup]:
-        """If we have a frozen summary and groups don't include it yet, prepend it."""
+        """If we have a frozen summary and groups don't include it yet, prepend it.
+
+        Post-prepend budget check: if adding the summary exceeds target_tokens,
+        drop the summary and return groups as-is (prevents token explosion).
+        """
         if not self._frozen_summary:
             return groups
-        # Check if first group is already the summary
         if groups and groups[0].group_id.startswith("summary_"):
             return groups
         summary_group = self._build_summary_group(self._frozen_summary)
-        return [summary_group] + groups
+        result = [summary_group] + groups
+
+        # Budget guard: verify prepending didn't blow the budget
+        if target_tokens > 0:
+            total = sum(g.token_estimate or self._count_group(g) for g in result)
+            if total > target_tokens:
+                logger.warning(
+                    "compression.prepend_exceeds_budget total=%d budget=%d",
+                    total, target_tokens,
+                )
+                return groups  # Drop summary to stay in budget
+
+        return result
 
     def _build_summary_group(self, block: SummaryBlock) -> ToolTransactionGroup:
         """Convert SummaryBlock to a ToolTransactionGroup."""
@@ -244,13 +261,17 @@ class ContextCompressor:
         summary_budget = target_tokens - recent_tokens
 
         # Check if frozen summary already covers all old groups
+        # Validate both count AND content hash to prevent stale reuse
+        current_source_hash = self._compute_cache_key(old_groups)
         if (self._frozen_summary
-                and self._frozen_summary_group_count >= len(old_groups)):
-            # Frozen summary covers everything — reuse it
+                and self._frozen_summary_group_count >= len(old_groups)
+                and self._frozen_summary.source_hash == current_source_hash):
+            # Frozen summary covers everything with matching content — reuse
             summary_group = self._build_summary_group(self._frozen_summary)
             if summary_group.token_estimate <= summary_budget:
                 logger.info("compression.frozen_reuse",
-                            covered=self._frozen_summary_group_count)
+                            covered=self._frozen_summary_group_count,
+                            hash=current_source_hash[:8])
                 return [summary_group] + recent_groups
 
         # Determine uncovered groups (new since last compression)
@@ -261,7 +282,11 @@ class ContextCompressor:
             # Nothing new to compress — reuse frozen or sliding window
             if self._frozen_summary:
                 summary_group = self._build_summary_group(self._frozen_summary)
-                return [summary_group] + recent_groups
+                total = summary_group.token_estimate + recent_tokens
+                if total <= target_tokens:
+                    return [summary_group] + recent_groups
+                # Summary + recent exceeds budget — fall back
+                return self._sliding_window(groups, target_tokens)
             return self._sliding_window(groups, target_tokens)
 
         # Build full text to compress (frozen summary + uncovered)

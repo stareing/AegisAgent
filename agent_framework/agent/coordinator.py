@@ -124,6 +124,9 @@ class RunCoordinator:
 
         # Reset per-run caches
         self._cached_tools_schema = None
+        # Reset frozen summary from previous run (prevents cross-run leakage)
+        if hasattr(deps.context_engineer, "_compressor") and hasattr(deps.context_engineer._compressor, "reset"):
+            deps.context_engineer._compressor.reset()
 
         # Begin stateful adapter session for KV cache optimization
         adapter = deps.model_adapter
