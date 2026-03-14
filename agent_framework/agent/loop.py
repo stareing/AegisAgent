@@ -465,37 +465,67 @@ class AgentLoop:
         tool_calls: list[ToolCallRequest],
         agent_state: AgentState,
     ) -> tuple[list[ToolResult], list[ToolExecutionMeta]]:
-        """Dispatch tool calls with agent hook checks."""
-        # Build set of previously-succeeded tool signatures for dedup guard
+        """Dispatch tool calls with pre-dispatch constraints.
+
+        Three-layer pre-dispatch guard (before any execution):
+        1. Cross-iteration dedup: same tool+args succeeded before → replay cached result
+        2. Intra-batch dedup: same tool+args appears multiple times in this batch → keep first only
+        3. Capability policy + agent hook: is this tool allowed?
+
+        After guards: different tools may execute in parallel.
+        Same tool with different args: allowed (different operations).
+        Same tool with same args: blocked (duplicate, cached result returned).
+        """
+        # Layer 1: Cross-iteration dedup — collect previously succeeded signatures
         succeeded_sigs = self._collect_succeeded_signatures(agent_state)
 
         capability_policy = agent.get_capability_policy()
         approved: list[ToolCallRequest] = []
-        dedup_results: list[tuple[ToolResult, ToolExecutionMeta]] = []
+        pre_results: list[tuple[ToolResult, ToolExecutionMeta]] = []
+
+        # Layer 2: Intra-batch dedup — track signatures within this batch
+        batch_seen_sigs: set[str] = set()
 
         for tc in tool_calls:
-            # Dedup guard: replay original result for identical successful calls
             sig = self._single_tool_signature(tc)
+
+            # Guard 1: Cross-iteration dedup
             if sig in succeeded_sigs:
                 original_output = succeeded_sigs[sig]
-                logger.warning(
-                    "tool.duplicate_blocked",
+                logger.info(
+                    "tool.cross_iter_dedup",
                     tool_name=tc.function_name,
-                    reason="Identical call already succeeded in a previous iteration",
+                    action="replay_cached",
                 )
-                dedup_results.append((
+                pre_results.append((
                     ToolResult(
                         tool_call_id=tc.id,
                         tool_name=tc.function_name,
                         success=True,
-                        output=(
-                            f"[Cached result — this tool was already called with identical arguments]\n"
-                            f"{original_output}"
-                        ),
+                        output=original_output,
                     ),
                     ToolExecutionMeta(execution_time_ms=0, source="local"),
                 ))
                 continue
+
+            # Guard 2: Intra-batch dedup (same tool+args in this response)
+            if sig in batch_seen_sigs:
+                logger.info(
+                    "tool.intra_batch_dedup",
+                    tool_name=tc.function_name,
+                    action="skip_duplicate_in_batch",
+                )
+                pre_results.append((
+                    ToolResult(
+                        tool_call_id=tc.id,
+                        tool_name=tc.function_name,
+                        success=False,
+                        output=f"Duplicate call in same batch — '{tc.function_name}' already queued with identical arguments.",
+                    ),
+                    ToolExecutionMeta(execution_time_ms=0, source="local"),
+                ))
+                continue
+            batch_seen_sigs.add(sig)
 
             if hasattr(tool_executor, "is_tool_allowed"):
                 if not tool_executor.is_tool_allowed(tc.function_name, capability_policy):
@@ -504,7 +534,7 @@ class AgentLoop:
                         tool_name=tc.function_name,
                     )
                     # Return an error result so the LLM knows the tool was rejected
-                    dedup_results.append((
+                    pre_results.append((
                         ToolResult(
                             tool_call_id=tc.id,
                             tool_name=tc.function_name,
@@ -528,7 +558,7 @@ class AgentLoop:
                     reason=decision.reason,
                 )
                 # Return rejection feedback so the LLM knows why and doesn't retry
-                dedup_results.append((
+                pre_results.append((
                     ToolResult(
                         tool_call_id=tc.id,
                         tool_name=tc.function_name,
@@ -538,7 +568,7 @@ class AgentLoop:
                     ToolExecutionMeta(execution_time_ms=0, source="local"),
                 ))
 
-        if not approved and not dedup_results:
+        if not approved and not pre_results:
             # All tool calls were silently blocked with no feedback — shouldn't happen
             # after the fixes above, but keep as safety net
             logger.warning(
@@ -551,7 +581,7 @@ class AgentLoop:
         metas = []
 
         # Include dedup guard results first
-        for result, meta in dedup_results:
+        for result, meta in pre_results:
             results.append(result)
             metas.append(meta)
 
