@@ -177,6 +177,11 @@ class ContextEngineer:
         """Build a seed context for a child agent (doc 8.8). Delegates to ContextBuilder."""
         return self._builder.build_spawn_seed(session_messages, query, token_budget)
 
+    def reset_compressor(self) -> None:
+        """Reset compressor state (frozen summary). Called at run start."""
+        if hasattr(self._compressor, "reset"):
+            self._compressor.reset()
+
     def report_context_stats(self) -> ContextStats:
         return self._last_stats
 

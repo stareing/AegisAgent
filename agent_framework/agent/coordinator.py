@@ -125,15 +125,19 @@ class RunCoordinator:
         # Reset per-run caches
         self._cached_tools_schema = None
         # Reset frozen summary from previous run (prevents cross-run leakage)
-        if hasattr(deps.context_engineer, "_compressor") and hasattr(deps.context_engineer._compressor, "reset"):
-            deps.context_engineer._compressor.reset()
+        if hasattr(deps.context_engineer, "reset_compressor"):
+            deps.context_engineer.reset_compressor()
 
         # Begin stateful adapter session for KV cache optimization
         adapter = deps.model_adapter
         adapter_stateful = False
         if hasattr(adapter, "begin_session"):
-            adapter.begin_session(session_id=run_id)
-            adapter_stateful = getattr(adapter, "supports_stateful_session", lambda: False)()
+            maybe = adapter.begin_session(session_id=run_id)
+            if inspect.isawaitable(maybe):
+                await maybe
+            sfn = getattr(adapter, "supports_stateful_session", None)
+            if sfn and not inspect.iscoroutinefunction(sfn):
+                adapter_stateful = bool(sfn())
             if adapter_stateful:
                 logger.info("run.stateful_session_started", run_id=run_id)
         session_started = False
@@ -325,7 +329,9 @@ class RunCoordinator:
             # End stateful adapter session
             if hasattr(deps.model_adapter, "end_session"):
                 try:
-                    deps.model_adapter.end_session()
+                    maybe = deps.model_adapter.end_session()
+                    if inspect.isawaitable(maybe):
+                        await maybe
                 except Exception:
                     pass
             # Always deactivate skill — run-scoped, must not leak
