@@ -21,7 +21,7 @@ python -m agent_framework.main --config config/openai.json
 # 运行演示
 python run_demo.py
 
-# 运行测试（577 项全部通过）
+# 运行测试（678 项全部通过）
 pytest tests/
 ```
 
@@ -59,6 +59,8 @@ pytest tests/
 - 确定性输出：相同输入 = 相同提示（无随机性）
 - 滑动窗口压缩：超出 token 预算时自动裁剪
 - 只读合约：上下文层绝不修改任何状态
+- **冻结前缀**：系统提示 + 技能 addon 生成不可变前缀，跨迭代复用提升 provider 端 KV cache 命中率
+- **XML 结构化注入**：`<system-identity>` / `<agent-capabilities>` / `<available-skills>` / `<saved-memories>` 分区，LLM 可清晰区分各区域
 
 ### 记忆系统
 
@@ -97,11 +99,45 @@ python -m agent_framework.main --config config/deepseek.json
 python -m agent_framework.main --config config/anthropic.json
 ```
 
+### 上下文压缩与会话模式
+
+| 模式 | 机制 | Token 消耗 |
+|------|------|-----------|
+| **STATELESS**（默认） | 每轮发送完整 messages 列表 | Round 1: ~2700, Round 2: ~2900, Round 3: ~3100 |
+| **STATEFUL** | 首轮全量，后续仅发增量 | Round 1: ~2700, Round 2: ~100, Round 3: ~150 |
+
+- STATELESS 模式下启用上下文压缩（sliding_window / tool_result_summary）
+- STATEFUL 模式下跳过压缩（避免 delta 索引偏移），provider 侧保持完整上下文
+- 工具 schema 每 run 缓存一次，非每迭代重算
+- 适配器通过 `supports_stateful_session()` 声明是否支持有状态会话
+
+### 技能系统（SKILL.md）
+
+```
+skills/
+├── commit/SKILL.md          ← Git 提交助手
+├── explain-code/SKILL.md    ← 代码解释
+└── review-pr/SKILL.md       ← 代码审查
+```
+
+- **文件发现**：`skills/`（项目级）+ `~/.agent/skills/`（个人级）
+- **YAML 前置元数据**：name、description、allowed-tools、argument-hint
+- **渐进式披露**：仅 description 注入上下文，body 在调用时才从磁盘加载
+- **预处理**：`$ARGUMENTS` / `$0` / `$1` 参数替换 + `!`shell`` 命令执行
+- **`${SKILL_DIR}`**：技能目录路径变量，支持引用附属文件
+- **LLM 触发**：通过 `invoke_skill` 工具，LLM 根据 description 语义判断何时调用
+
+### Orchestrator 多智能体编排
+
+- **OrchestratorAgent**：编排感知 prompt，支持并行/串行子 agent 委派
+- **动态能力注入**：`<agent-capabilities>` 实时注入 max_iterations / spawned_subagents / parallel_tool_calls
+- **硬退出守卫**：spawn 后 3 轮无新 spawn 则强制停止（防 LLM 空转）
+- **子 agent 清理**：run 退出时自动 cancel 所有活跃子 agent
+
 ### 协议集成
 
 - **MCP**：客户端管理器，支持 stdio/SSE/HTTP 传输，自动发现工具
 - **A2A**：跨机器 Agent RPC，统一错误码
-- **技能系统**：声明式技能定义、触发关键词、每技能独立模型/温度覆盖
 
 ---
 

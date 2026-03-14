@@ -21,7 +21,7 @@ python -m agent_framework.main --config config/openai.json
 # Run demo
 python run_demo.py
 
-# Run tests (577 passing)
+# Run tests (678 passing)
 pytest tests/
 ```
 
@@ -57,6 +57,31 @@ pytest tests/
 - Deterministic output (same input = same prompt)
 - Sliding-window compression when over token budget
 - Read-only contract: context layer never modifies state
+- **Frozen prefix**: System identity + skill addon cached as immutable prefix for KV cache reuse
+- **XML-structured injection**: `<system-identity>` / `<agent-capabilities>` / `<available-skills>` / `<saved-memories>` boundaries
+
+### Session Modes (Token Optimization)
+
+| Mode | Mechanism | Token per round |
+|------|-----------|----------------|
+| **STATELESS** (default) | Full messages every call | ~2700 → ~2900 → ~3100 |
+| **STATEFUL** | First full, then delta only | ~2700 → ~100 → ~150 |
+
+- STATELESS: compression active (sliding window, tool result summary)
+- STATEFUL: compression skipped (provider holds full context, delta indexing preserved)
+- Tool schemas cached per-run (not recomputed per iteration)
+
+### Skills (SKILL.md)
+- File-based skills with YAML frontmatter: `skills/<name>/SKILL.md`
+- Progressive disclosure: description in context, full body lazy-loaded on invocation
+- `$ARGUMENTS`, `$0`/`$1`, `${SKILL_DIR}`, `!`shell`` preprocessing
+- LLM invokes via `invoke_skill` tool based on semantic description matching
+
+### Orchestrator
+- **OrchestratorAgent**: coordination-aware prompt, parallel/sequential delegation
+- Dynamic capability injection: `<agent-capabilities>` with live iteration/spawn counts
+- Hard exit guard: forces stop after 3 post-spawn iterations without synthesis
+- Sub-agent cleanup on run exit
 
 ### Memory
 - SQLite persistence (`data/memories.db`)
