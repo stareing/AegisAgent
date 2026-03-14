@@ -80,6 +80,8 @@ class RunPolicyResolver:
             temperature=temperature,
             max_output_tokens=cfg.max_output_tokens,
             max_iterations=cfg.max_iterations,
+            max_concurrent_tool_calls=cfg.max_concurrent_tool_calls,
+            allow_parallel_tool_calls=cfg.allow_parallel_tool_calls,
         )
 
     @staticmethod

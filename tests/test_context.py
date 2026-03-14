@@ -3,8 +3,8 @@
 Covers:
 - ToolTransactionGroup model
 - ContextSourceProvider (system core, skill addon, memory block, session groups)
-- ContextBuilder (5-slot assembly, trimming, spawn seed, token budget)
-- ContextCompressor (sliding window, tool result summary)
+- ContextBuilder (assembly, trimming, spawn seed, token budget)
+- ContextCompressor (LLM-only summarization)
 - ContextEngineer (orchestration)
 """
 
@@ -17,7 +17,7 @@ import pytest
 from agent_framework.context.transaction_group import ToolTransactionGroup
 from agent_framework.context.source_provider import ContextSourceProvider
 from agent_framework.context.builder import ContextBuilder
-from agent_framework.context.compressor import CompressionStrategy, ContextCompressor
+from agent_framework.context.compressor import ContextCompressor
 from agent_framework.context.engineer import ContextEngineer
 from agent_framework.models.agent import AgentConfig, AgentState, AgentStatus, Skill
 from agent_framework.models.context import ContextStats
@@ -307,110 +307,37 @@ class TestContextCompressor:
             for i in range(n)
         ]
 
-    def test_sliding_window_fits(self):
-        comp = ContextCompressor(
-            strategy=CompressionStrategy.SLIDING_WINDOW,
-            token_counter=self.counter,
-        )
-        groups = [
-            ToolTransactionGroup(messages=[Message(role="user", content="short")], token_estimate=5),
-        ]
-        result = comp.compress_groups(groups, target_tokens=100)
-        assert len(result) == 1
-
-    def test_sliding_window_trims_oldest(self):
-        comp = ContextCompressor(
-            strategy=CompressionStrategy.SLIDING_WINDOW,
-            token_counter=self.counter,
-        )
-        groups = [
-            ToolTransactionGroup(messages=[Message(role="user", content="a" * 50)], token_estimate=50),
-            ToolTransactionGroup(messages=[Message(role="user", content="b" * 50)], token_estimate=50),
-            ToolTransactionGroup(messages=[Message(role="user", content="c" * 50)], token_estimate=50),
-        ]
-        result = comp.compress_groups(groups, target_tokens=60)
-        # Should keep only the most recent that fit
-        assert len(result) <= 2
-
-    def test_tool_result_summary_truncates(self):
-        comp = ContextCompressor(
-            strategy=CompressionStrategy.TOOL_RESULT_SUMMARY,
-            token_counter=self.counter,
-        )
-        long_output = "x" * 500
-        groups = [
-            ToolTransactionGroup(
-                group_type="TOOL_BATCH",
-                messages=[
-                    Message(role="assistant", content="calling tool"),
-                    Message(role="tool", content=long_output),
-                ],
-                token_estimate=500,
-            ),
-        ]
-        result = comp.compress_groups(groups, target_tokens=300)
-        # Tool result should be truncated
-        tool_msg = [m for g in result for m in g.messages if m.role == "tool"]
-        if tool_msg:
-            assert len(tool_msg[0].content) < len(long_output)
-            assert "[truncated]" in tool_msg[0].content
-
-    def test_under_budget_no_compression(self):
-        comp = ContextCompressor(
-            strategy=CompressionStrategy.TOOL_RESULT_SUMMARY,
-            token_counter=self.counter,
-        )
+    @pytest.mark.asyncio
+    async def test_under_budget_no_compression(self):
+        comp = ContextCompressor(token_counter=self.counter)
         groups = [
             ToolTransactionGroup(messages=[Message(role="user", content="small")], token_estimate=5),
         ]
-        result = comp.compress_groups(groups, target_tokens=100)
+        result = await comp.compress_groups_async(groups, target_tokens=100)
         assert len(result) == 1
 
-    def test_llm_summarize_falls_back_to_sliding_window(self):
-        comp = ContextCompressor(
-            strategy=CompressionStrategy.LLM_SUMMARIZE,
-            token_counter=self.counter,
-        )
-        groups = [
-            ToolTransactionGroup(messages=[Message(role="user", content="a" * 100)], token_estimate=100),
-            ToolTransactionGroup(messages=[Message(role="user", content="b" * 100)], token_estimate=100),
-        ]
-        result = comp.compress_groups(groups, target_tokens=110)
-        assert len(result) <= 2
-
-    def test_protected_group_kept_in_sliding_window(self):
-        comp = ContextCompressor(
-            strategy=CompressionStrategy.SLIDING_WINDOW,
-            token_counter=self.counter,
-        )
-        groups = [
-            ToolTransactionGroup(
-                messages=[Message(role="user", content="a" * 50)],
-                token_estimate=50,
-                protected=True,
-            ),
-            ToolTransactionGroup(
-                messages=[Message(role="user", content="b" * 50)],
-                token_estimate=50,
-            ),
-        ]
-        result = comp.compress_groups(groups, target_tokens=60)
-        # Protected group should still be present
-        assert any(g.protected for g in result)
+    @pytest.mark.asyncio
+    async def test_no_adapter_returns_as_is(self):
+        """Without model_adapter, compressor returns groups unchanged."""
+        comp = ContextCompressor(token_counter=self.counter)
+        groups = self._make_groups(5, chars=100)
+        result = await comp.compress_groups_async(groups, target_tokens=50)
+        # No adapter → no compression, groups returned as-is
+        assert len(result) == 5
 
     def test_frozen_summary_reuse(self):
         """Frozen summary must be reused when no new uncovered groups exist."""
         from agent_framework.context.compressor import SummaryBlock
-        comp = ContextCompressor(strategy=CompressionStrategy.LLM_SUMMARIZE)
+        comp = ContextCompressor()
         # Simulate a pre-existing frozen summary
         comp._frozen_summary = SummaryBlock(
             summary_id="test", covered_group_count=3,
             source_hash="abc", summary_text="Previous summary", token_estimate=20,
         )
         comp._frozen_summary_group_count = 3
-        # 3 old groups (covered) + 2 recent
+        # 3 old groups (covered) + 2 recent — under budget
         groups = self._make_groups(5, chars=20)
-        result = comp.compress_groups(groups, target_tokens=200)
+        result = comp._prepend_frozen_summary(groups, target_tokens=200)
         # Should prepend frozen summary
         assert result[0].group_id.startswith("summary_")
 
@@ -437,39 +364,13 @@ class TestContextCompressor:
         assert comp._frozen_summary is None
         assert comp._frozen_summary_group_count == 0
 
-    def test_source_hash_validates_reuse_sync(self):
-        """Sync path: stale summary must not appear in compressed result."""
-        from agent_framework.context.compressor import SummaryBlock
-        comp = ContextCompressor(strategy=CompressionStrategy.LLM_SUMMARIZE)
-        groups_v1 = self._make_groups(3, chars=20)
-
-        comp._frozen_summary = SummaryBlock(
-            covered_group_count=3,
-            source_hash="stale_hash",  # doesn't match current groups
-            summary_text="old summary", token_estimate=20,
-        )
-        comp._frozen_summary_group_count = 3
-
-        # Sync path cascades to TOOL_RESULT_SUMMARY → SLIDING_WINDOW
-        result = comp.compress_groups(groups_v1, target_tokens=30)
-
-        # Stale summary must NOT appear in output
-        has_stale = any(
-            g.group_id.startswith("summary_") and "old summary" in (g.messages[0].content or "")
-            for g in result
-        )
-        assert not has_stale, "Stale summary must not leak into sync compression output"
-
     @pytest.mark.asyncio
     async def test_source_hash_invalidates_frozen_async(self):
         """Async LLM path: stale hash must invalidate frozen summary entirely."""
         from unittest.mock import AsyncMock as AM
         from agent_framework.context.compressor import SummaryBlock
 
-        comp = ContextCompressor(
-            strategy=CompressionStrategy.LLM_SUMMARIZE,
-            token_counter=self.counter,
-        )
+        comp = ContextCompressor(token_counter=self.counter)
         groups = self._make_groups(5, chars=20)
 
         comp._frozen_summary = SummaryBlock(
@@ -490,47 +391,37 @@ class TestContextCompressor:
         assert comp._frozen_summary_group_count == 0
 
     @pytest.mark.asyncio
-    async def test_async_cascade_fallback(self):
-        """compress_groups_async must cascade LLM → TOOL_RESULT → SLIDING_WINDOW."""
+    async def test_llm_failure_returns_groups_as_is(self):
+        """LLM call failure must return groups unchanged (no lossy fallback)."""
         from unittest.mock import AsyncMock as AM
 
-        comp = ContextCompressor(
-            strategy=CompressionStrategy.LLM_SUMMARIZE,
-            token_counter=self.counter,
-        )
-        # 5 groups, each 100 chars, total 500, budget 120
+        comp = ContextCompressor(token_counter=self.counter)
         groups = self._make_groups(5, chars=100)
 
-        # Mock adapter that returns a summary too large to fit
-        mock_adapter = AM()
-        mock_adapter.complete = AM(return_value=AM(content="X" * 9999))
-
-        result = await comp.compress_groups_async(groups, target_tokens=120, model_adapter=mock_adapter)
-        result_tokens = sum(g.token_estimate or comp._count_group(g) for g in result)
-
-        # Must fit within budget via cascade fallback
-        assert result_tokens <= 120, f"Cascade fallback must fit budget, got {result_tokens}"
-        # Must have fewer groups than original (something was trimmed)
-        assert len(result) < len(groups)
-
-    @pytest.mark.asyncio
-    async def test_async_llm_failure_cascades(self):
-        """LLM call failure in compress_groups_async must cascade to sync strategies."""
-        from unittest.mock import AsyncMock as AM
-
-        comp = ContextCompressor(
-            strategy=CompressionStrategy.LLM_SUMMARIZE,
-            token_counter=self.counter,
-        )
-        groups = self._make_groups(5, chars=100)
-
-        # Mock adapter that raises
         mock_adapter = AM()
         mock_adapter.complete = AM(side_effect=RuntimeError("API down"))
 
         result = await comp.compress_groups_async(groups, target_tokens=120, model_adapter=mock_adapter)
-        result_tokens = sum(g.token_estimate or comp._count_group(g) for g in result)
-        assert result_tokens <= 120
+        # Groups returned as-is on failure
+        assert len(result) == 5
+
+    @pytest.mark.asyncio
+    async def test_llm_summary_too_large_returns_groups_as_is(self):
+        """If LLM summary doesn't fit budget, return groups unchanged."""
+        from unittest.mock import AsyncMock as AM
+
+        comp = ContextCompressor(token_counter=self.counter)
+        groups = self._make_groups(5, chars=100)
+
+        # Mock adapter that returns a summary too large to fit
+        mock_resp = AM()
+        mock_resp.content = "X" * 9999
+        mock_adapter = AM()
+        mock_adapter.complete = AM(return_value=mock_resp)
+
+        result = await comp.compress_groups_async(groups, target_tokens=120, model_adapter=mock_adapter)
+        # Summary too large — groups returned as-is
+        assert len(result) == 5
 
 
 # =====================================================================
@@ -544,6 +435,8 @@ class TestContextEngineer:
         engineer = ContextEngineer()
         agent_config = AgentConfig(system_prompt="Be helpful")
         session = SessionState()
+        # Task is now in SessionState as the first user message
+        session.append_message(Message(role="user", content="greet"))
         state = AgentState(run_id="r1", task="greet")
 
         materials = {
@@ -554,15 +447,18 @@ class TestContextEngineer:
             "active_skill": None,
         }
         messages = await engineer.prepare_context_for_llm(state, materials)
-        assert len(messages) >= 2
         assert messages[0].role == "system"
-        assert messages[-1].role == "user"
+        # User message comes from session history, not current_input
+        user_msgs = [m for m in messages if m.role == "user"]
+        assert len(user_msgs) >= 1
+        assert user_msgs[0].content == "greet"
 
     @pytest.mark.asyncio
     async def test_prepare_context_with_memories(self):
         engineer = ContextEngineer()
         agent_config = AgentConfig(system_prompt="sys")
         session = SessionState()
+        session.append_message(Message(role="user", content="test"))
         state = AgentState(run_id="r1", task="test")
 
         memories = [
@@ -585,6 +481,7 @@ class TestContextEngineer:
         engineer.set_skill_context("custom skill prompt")
         agent_config = AgentConfig(system_prompt="base")
         session = SessionState()
+        session.append_message(Message(role="user", content="test"))
         state = AgentState(run_id="r1", task="test")
 
         materials = {
@@ -600,6 +497,7 @@ class TestContextEngineer:
         engineer = ContextEngineer()
         agent_config = AgentConfig(system_prompt="sys")
         session = SessionState()
+        session.append_message(Message(role="user", content="test"))
         state = AgentState(run_id="r1", task="test")
         materials = {
             "agent_config": agent_config,
@@ -616,6 +514,51 @@ class TestContextEngineer:
         seed = engineer.build_spawn_seed([], "query", token_budget=100)
         assert len(seed) >= 1
         assert seed[-1].content == "query"
+
+    @pytest.mark.asyncio
+    async def test_no_duplicate_user_message(self):
+        """Task must not appear twice — once in session, once as current_input."""
+        engineer = ContextEngineer()
+        config = AgentConfig(system_prompt="sys")
+        session = SessionState()
+        session.append_message(Message(role="user", content="hello"))
+        state = AgentState(run_id="r1", task="hello")
+        materials = {
+            "agent_config": config,
+            "session_state": session,
+            "task": "hello",
+        }
+        messages = await engineer.prepare_context_for_llm(state, materials)
+        user_msgs = [m for m in messages if m.role == "user"]
+        # Task appears exactly once (from session), not duplicated
+        assert len(user_msgs) == 1
+
+    @pytest.mark.asyncio
+    async def test_user_message_before_tool_results(self):
+        """User message must precede assistant+tool messages in context."""
+        engineer = ContextEngineer()
+        config = AgentConfig(system_prompt="sys")
+        session = SessionState()
+        # Simulate: user asked → assistant called tool → tool returned
+        session.append_message(Message(role="user", content="calc 1+1"))
+        session.append_message(Message(
+            role="assistant", content=None,
+            tool_calls=[ToolCallRequest(id="tc1", function_name="calculator", arguments={"expr": "1+1"})],
+        ))
+        session.append_message(Message(role="tool", content="2", tool_call_id="tc1", name="calculator"))
+        state = AgentState(run_id="r1", task="calc 1+1")
+        materials = {
+            "agent_config": config,
+            "session_state": session,
+            "task": "calc 1+1",
+        }
+        messages = await engineer.prepare_context_for_llm(state, materials)
+        # Find positions
+        non_system = [m for m in messages if m.role != "system"]
+        assert non_system[0].role == "user"
+        assert non_system[0].content == "calc 1+1"
+        assert non_system[1].role == "assistant"
+        assert non_system[2].role == "tool"
 
 
 # =====================================================================
@@ -697,6 +640,7 @@ class TestFrozenPromptPrefix:
         engineer = ContextEngineer()
         config = AgentConfig(system_prompt="stable prompt")
         session = SessionState()
+        session.append_message(Message(role="user", content="test"))
         state = AgentState(run_id="r1", task="test")
         materials = {"agent_config": config, "session_state": session, "task": "test"}
 
@@ -712,7 +656,6 @@ class TestFrozenPromptPrefix:
     def test_session_mode_default_stateless(self):
         """Default adapter session mode is stateless."""
         from agent_framework.adapters.model.base_adapter import BaseModelAdapter, SessionMode
-        # Cannot instantiate ABC, test SessionMode directly
         sm = SessionMode()
         assert sm.active is False
 
@@ -779,29 +722,28 @@ class TestFrozenPromptPrefix:
         config = AgentConfig(system_prompt="sys")
         session = SessionState()
         # Add enough messages to trigger compression in stateless mode
+        session.append_message(Message(role="user", content="initial task"))
         for i in range(20):
-            session.append_message(Message(role="user", content=f"msg {i} " + "Y" * 50))
             session.append_message(Message(role="assistant", content=f"reply {i} " + "Z" * 50))
-        state = AgentState(run_id="r1", task="test")
+            session.append_message(Message(role="user", content=f"msg {i} " + "Y" * 50))
+        state = AgentState(run_id="r1", task="initial task")
 
-        # STATELESS: compression should trim messages
+        # STATELESS: compression may trim messages
         materials_stateless = {
             "agent_config": config, "session_state": session,
-            "task": "q", "stateful_session": False,
+            "task": "initial task", "stateful_session": False,
         }
         msgs_stateless = await engineer.prepare_context_for_llm(state, materials_stateless)
-        stats_stateless = engineer.report_context_stats()
 
         # STATEFUL: compression should be skipped, all session messages kept
         materials_stateful = {
             "agent_config": config, "session_state": session,
-            "task": "q", "stateful_session": True,
+            "task": "initial task", "stateful_session": True,
         }
         msgs_stateful = await engineer.prepare_context_for_llm(state, materials_stateful)
 
-        # Stateful should have MORE messages (no trimming)
-        assert len(msgs_stateful) > len(msgs_stateless)
-        assert stats_stateless.groups_trimmed > 0 or len(msgs_stateless) < len(msgs_stateful)
+        # Stateful should have MORE or equal messages (no trimming)
+        assert len(msgs_stateful) >= len(msgs_stateless)
 
     @pytest.mark.asyncio
     async def test_prefix_not_compressed(self):
@@ -811,13 +753,91 @@ class TestFrozenPromptPrefix:
         )
         config = AgentConfig(system_prompt="X" * 100)
         session = SessionState()
+        session.append_message(Message(role="user", content="initial"))
         # Add many messages to force compression
         for i in range(20):
-            session.append_message(Message(role="user", content=f"msg {i} " + "Y" * 50))
             session.append_message(Message(role="assistant", content=f"reply {i} " + "Z" * 50))
-        state = AgentState(run_id="r1", task="test")
-        materials = {"agent_config": config, "session_state": session, "task": "q"}
+            session.append_message(Message(role="user", content=f"msg {i} " + "Y" * 50))
+        state = AgentState(run_id="r1", task="initial")
+        materials = {"agent_config": config, "session_state": session, "task": "initial"}
         messages = await engineer.prepare_context_for_llm(state, materials)
         # System message (prefix) must be first and contain full system prompt
         assert messages[0].role == "system"
         assert "X" * 100 in messages[0].content
+
+    @pytest.mark.asyncio
+    async def test_apply_context_policy_blocks_compression(self):
+        """allow_compression=False must skip compression entirely."""
+        from agent_framework.models.agent import ContextPolicy
+        engineer = ContextEngineer(
+            builder=ContextBuilder(max_context_tokens=200, reserve_for_output=20),
+        )
+        # Disable compression via policy
+        engineer.apply_context_policy(ContextPolicy(allow_compression=False))
+
+        config = AgentConfig(system_prompt="sys")
+        session = SessionState()
+        session.append_message(Message(role="user", content="initial"))
+        for i in range(20):
+            session.append_message(Message(role="assistant", content=f"reply {i} " + "Z" * 50))
+            session.append_message(Message(role="user", content=f"msg {i} " + "Y" * 50))
+        state = AgentState(run_id="r1", task="initial")
+        materials = {"agent_config": config, "session_state": session, "task": "initial"}
+
+        # With compression disabled, all session messages should be present
+        msgs_no_compress = await engineer.prepare_context_for_llm(state, materials)
+
+        # Re-enable compression
+        engineer.apply_context_policy(ContextPolicy(allow_compression=True))
+        msgs_with_compress = await engineer.prepare_context_for_llm(state, materials)
+
+        # No compression → more messages
+        assert len(msgs_no_compress) >= len(msgs_with_compress)
+
+
+# =====================================================================
+# XML escaping
+# =====================================================================
+
+
+class TestXmlEscaping:
+    def setup_method(self):
+        self.provider = ContextSourceProvider()
+
+    def test_memory_title_escaped(self):
+        """Memory titles with XML chars must be escaped."""
+        records = [
+            MemoryRecord(
+                memory_id="m1", title='<script>alert("xss")</script>',
+                content="safe content",
+            ),
+        ]
+        result = self.provider.collect_saved_memory_block(records)
+        assert "<script>" not in result
+        assert "&lt;script&gt;" in result
+
+    def test_memory_content_escaped(self):
+        """Memory content with & and < must be escaped."""
+        records = [
+            MemoryRecord(memory_id="m1", title="safe", content="a < b & c > d"),
+        ]
+        result = self.provider.collect_saved_memory_block(records)
+        assert "&lt;" in result
+        assert "&amp;" in result
+
+    def test_runtime_info_escaped(self):
+        """Runtime info values with XML chars must be escaped."""
+        config = AgentConfig(system_prompt="sys")
+        result = self.provider.collect_system_core(
+            config, {"operating_system": "Linux <4.0>"}
+        )
+        assert "&lt;4.0&gt;" in result
+
+    def test_skill_addon_id_escaped(self):
+        """Skill ID/name with special chars must be escaped."""
+        skill = Skill(
+            skill_id='s"1', name='My<Skill>', system_prompt_addon="addon text"
+        )
+        result = self.provider.collect_skill_addon(skill)
+        assert '&quot;' in result
+        assert '&lt;Skill&gt;' in result

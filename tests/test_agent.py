@@ -486,6 +486,56 @@ class TestAgentLoop:
         assert result.tool_results[0].success is True
 
     @pytest.mark.asyncio
+    async def test_iteration_trims_parallel_tool_calls_when_disabled(self):
+        loop = AgentLoop()
+        agent = self._make_agent()
+        state = self._make_state()
+        config = EffectiveRunConfig(
+            model_name="test-model",
+            allow_parallel_tool_calls=False,
+        )
+        request = self._make_llm_request()
+
+        tc1 = ToolCallRequest(id="tc1", function_name="search", arguments={"q": "a"})
+        tc2 = ToolCallRequest(id="tc2", function_name="search", arguments={"q": "b"})
+
+        mock_adapter = AsyncMock()
+        mock_adapter.complete.return_value = ModelResponse(
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=[tc1, tc2],
+            usage=TokenUsage(total_tokens=20),
+        )
+        mock_executor = AsyncMock()
+        mock_executor.is_tool_allowed = MagicMock(return_value=True)
+        mock_executor.batch_execute.return_value = [
+            (
+                ToolResult(
+                    tool_call_id="tc1",
+                    tool_name="search",
+                    success=True,
+                    output="found-a",
+                ),
+                ToolExecutionMeta(execution_time_ms=10, source="local"),
+            ),
+        ]
+
+        result = await loop.execute_iteration(
+            agent,
+            AgentLoopDeps(model_adapter=mock_adapter, tool_executor=mock_executor),
+            state,
+            request,
+            config,
+        )
+
+        assert len(result.model_response.tool_calls) == 1
+        assert result.model_response.tool_calls[0].id == "tc1"
+        assert len(result.tool_results) == 1
+        dispatched_calls = mock_executor.batch_execute.call_args.args[0]
+        assert len(dispatched_calls) == 1
+        assert dispatched_calls[0].id == "tc1"
+
+    @pytest.mark.asyncio
     async def test_iteration_llm_error_abort(self):
         loop = AgentLoop()
         agent = self._make_agent()
@@ -628,6 +678,26 @@ class TestRunCoordinator:
             skill_router=mock_sr,
         )
 
+    def test_runtime_info_parallel_disabled_by_effective_config(self):
+        deps = self._make_deps()
+        deps.model_adapter.supports_parallel_tool_calls = MagicMock(return_value=True)
+
+        info = RunCoordinator._collect_runtime_info(
+            effective_config=EffectiveRunConfig(allow_parallel_tool_calls=False),
+            deps=deps,
+        )
+        assert info["parallel_tool_calls"] == "false"
+
+    def test_runtime_info_parallel_requires_adapter_support(self):
+        deps = self._make_deps()
+        deps.model_adapter.supports_parallel_tool_calls = MagicMock(return_value=False)
+
+        info = RunCoordinator._collect_runtime_info(
+            effective_config=EffectiveRunConfig(allow_parallel_tool_calls=True),
+            deps=deps,
+        )
+        assert info["parallel_tool_calls"] == "false"
+
     @pytest.mark.asyncio
     async def test_simple_run_success(self):
         deps = self._make_deps()
@@ -648,6 +718,28 @@ class TestRunCoordinator:
         deps.memory_manager.begin_run_session.assert_called_once()
         deps.memory_manager.end_run_session.assert_called_once()
         deps.memory_manager.record_turn.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_run_passes_user_id_to_memory_session(self):
+        deps = self._make_deps()
+        agent = DefaultAgent()
+        coordinator = RunCoordinator()
+
+        mock_loop = AsyncMock(spec=AgentLoop)
+        mock_loop.execute_iteration.return_value = IterationResult(
+            model_response=ModelResponse(
+                content="ok", finish_reason="stop", usage=TokenUsage(total_tokens=5)
+            ),
+            stop_signal=StopSignal(reason=StopReason.LLM_STOP),
+        )
+        coordinator._loop = mock_loop
+
+        result = await coordinator.run(agent, deps, "task", user_id="user_123")
+        assert result.success is True
+        deps.memory_manager.begin_run_session.assert_called_once()
+        call_args = deps.memory_manager.begin_run_session.call_args.args
+        assert call_args[1] == agent.agent_id
+        assert call_args[2] == "user_123"
 
     @pytest.mark.asyncio
     async def test_run_with_error(self):
@@ -706,6 +798,17 @@ class TestRunCoordinator:
         assert config.temperature == 0.2
         # Safety fields not overridden
         assert config.max_iterations == agent.agent_config.max_iterations
+
+    def test_build_effective_config_carries_tool_parallel_policy(self):
+        from agent_framework.agent.run_policy import RunPolicyResolver
+
+        agent = DefaultAgent(
+            allow_parallel_tool_calls=False,
+            max_concurrent_tool_calls=1,
+        )
+        config = RunPolicyResolver.build_effective_config(agent, None)
+        assert config.allow_parallel_tool_calls is False
+        assert config.max_concurrent_tool_calls == 1
 
     def test_initialize_state(self):
         from agent_framework.agent.run_state import RunStateController

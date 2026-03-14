@@ -144,7 +144,14 @@ class SharedWriteMemoryManager(BaseMemoryManager):
         final_answer: str | None,
         iteration_results: list[IterationResult],
     ) -> CommitDecision:
-        return self._parent.record_turn(user_input, final_answer, iteration_results)
+        # SubAgent record_turn should not auto-extract via parent's patterns,
+        # since the parent's extraction logic is designed for parent's conversations.
+        # SubAgent writes go through remember() with forced "subagent" source.
+        return CommitDecision(
+            committed=False,
+            reason="SharedWrite scope — subagent writes via remember() only",
+            source="SharedWriteMemoryManager",
+        )
 
     def extract_candidates(
         self,

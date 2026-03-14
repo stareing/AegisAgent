@@ -171,6 +171,7 @@ class TransactionGroupAttempt(BaseModel):
 
 class IterationResult(BaseModel):
     iteration_index: int = 0
+    llm_input_preview: str | None = None
     model_response: ModelResponse | None = None
     tool_results: list[ToolResult] = Field(default_factory=list)
     tool_execution_meta: list[ToolExecutionMeta] = Field(default_factory=list)
@@ -256,6 +257,8 @@ class AgentConfig(BaseModel):
     max_output_tokens: int = 4096
     max_iterations: int = 20
     allow_spawn_children: bool = False
+    max_concurrent_tool_calls: int = 5
+    allow_parallel_tool_calls: bool = True
 
 
 class CapabilityPolicy(BaseModel):
@@ -314,21 +317,35 @@ class Skill(BaseModel):
 # ---------------------------------------------------------------------------
 
 class ContextPolicy(BaseModel):
-    """Run-scoped context strategy. Controls compression and history behavior."""
+    """Run-scoped context strategy. Controls compression behavior.
+
+    Sole consumer: ContextEngineer (via apply_context_policy).
+    RunCoordinator passes this policy but NEVER reads its fields.
+    """
 
     allow_compression: bool = True
-    prefer_recent_history: bool = True
-    max_session_groups: int | None = None
     force_include_saved_memory: bool = False
 
 
 class MemoryPolicy(BaseModel):
-    """Run-scoped memory strategy. Controls extraction and save behavior."""
+    """Run-scoped memory strategy. Controls extraction and save behavior.
+
+    Sole consumer: MemoryManager (via apply_memory_policy).
+    RunCoordinator passes this policy but NEVER reads its fields.
+    """
 
     memory_enabled: bool = True
     auto_extract: bool = True
+    max_in_context: int = 10
     allow_overwrite_pinned: bool = False
-    allow_auto_save_from_tools: bool = False
+
+
+class MemoryQuota(BaseModel):
+    """Hard limits for memory storage. Enforced by BaseMemoryManager.remember()."""
+
+    max_items_per_user: int = 200
+    max_content_length: int = 2000
+    max_tags_per_item: int = 10
 
 
 class EffectiveRunConfig(BaseModel):

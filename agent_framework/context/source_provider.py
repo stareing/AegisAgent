@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from html import escape as _xml_escape
 from typing import TYPE_CHECKING, Any
 
 from agent_framework.context.transaction_group import ToolTransactionGroup, TransactionGroupIndex
@@ -56,15 +57,15 @@ class ContextSourceProvider:
             }
 
             env_lines = [
-                f"  <{k}>{v}</{k}>"
+                f"  <{k}>{_xml_escape(str(v))}</{k}>"
                 for k, v in runtime_info.items() if k in env_keys
             ]
             cap_lines = [
-                f"  <{k}>{v}</{k}>"
+                f"  <{k}>{_xml_escape(str(v))}</{k}>"
                 for k, v in runtime_info.items() if k in cap_keys
             ]
             other_lines = [
-                f"  <{k}>{v}</{k}>"
+                f"  <{k}>{_xml_escape(str(v))}</{k}>"
                 for k, v in runtime_info.items() if k not in env_keys and k not in cap_keys
             ]
 
@@ -85,8 +86,10 @@ class ContextSourceProvider:
     def collect_skill_addon(self, active_skill: Skill | None) -> str | None:
         """Get skill-specific system prompt addon, wrapped in XML."""
         if active_skill and active_skill.system_prompt_addon:
+            esc_id = _xml_escape(active_skill.skill_id)
+            esc_name = _xml_escape(active_skill.name)
             return (
-                f"<active-skill id=\"{active_skill.skill_id}\" name=\"{active_skill.name}\">\n"
+                f"<active-skill id=\"{esc_id}\" name=\"{esc_name}\">\n"
                 f"{active_skill.system_prompt_addon}\n"
                 f"</active-skill>"
             )
@@ -114,10 +117,11 @@ class ContextSourceProvider:
         lines = ["<saved-memories>"]
         for r in sorted_records:
             pinned_attr = ' pinned="true"' if r.is_pinned else ""
-            tags_attr = f' tags="{",".join(sorted(r.tags))}"' if r.tags else ""
-            lines.append(f'  <memory kind="{r.kind.value}"{pinned_attr}{tags_attr}>')
-            lines.append(f"    <title>{r.title}</title>")
-            lines.append(f"    <content>{r.content}</content>")
+            esc_tags = _xml_escape(",".join(sorted(r.tags)))
+            tags_attr = f' tags="{esc_tags}"' if r.tags else ""
+            lines.append(f'  <memory kind="{_xml_escape(r.kind.value)}"{pinned_attr}{tags_attr}>')
+            lines.append(f"    <title>{_xml_escape(r.title)}</title>")
+            lines.append(f"    <content>{_xml_escape(r.content)}</content>")
             lines.append("  </memory>")
         lines.append("</saved-memories>")
         return "\n".join(lines)
@@ -237,9 +241,12 @@ class ContextSourceProvider:
             '<available-skills hint="Invoke via invoke_skill tool with skill_id">',
         ]
         for desc in skill_descriptions:
-            hint_attr = f' argument-hint="{desc["argument_hint"]}"' if desc.get("argument_hint") else ""
-            lines.append(f'  <skill id="{desc["skill_id"]}" name="{desc["name"]}"{hint_attr}>')
-            lines.append(f"    {desc['description']}")
+            esc_hint = _xml_escape(desc["argument_hint"]) if desc.get("argument_hint") else ""
+            hint_attr = f' argument-hint="{esc_hint}"' if esc_hint else ""
+            esc_id = _xml_escape(desc["skill_id"])
+            esc_name = _xml_escape(desc["name"])
+            lines.append(f'  <skill id="{esc_id}" name="{esc_name}"{hint_attr}>')
+            lines.append(f"    {_xml_escape(desc['description'])}")
             lines.append("  </skill>")
         lines.append("</available-skills>")
         return "\n".join(lines)

@@ -200,10 +200,35 @@ def weather(city: str) -> str:
     return fake_data.get(city, f"未找到 {city} 的天气数据")
 
 
-@tool(name="note", description="保存一条笔记", category="util")
-def note(title: str, content: str) -> str:
-    """保存笔记。"""
-    return f"已保存笔记 [{title}]: {content}"
+def _make_note_tool(memory_manager_ref: list):
+    """Create a note tool that persists to memory_manager when available."""
+
+    @tool(name="note", description="保存一条笔记到长期记忆", category="util")
+    def note(title: str, content: str) -> str:
+        """保存笔记到长期记忆。"""
+        mgr = memory_manager_ref[0] if memory_manager_ref else None
+        if mgr is not None:
+            from agent_framework.models.memory import (
+                MemoryCandidate,
+                MemoryCandidateSource,
+                MemoryConfidence,
+                MemoryKind,
+            )
+            candidate = MemoryCandidate(
+                kind=MemoryKind.CUSTOM,
+                title=title,
+                content=content,
+                tags=["note"],
+                reason="User requested note save via tool",
+                candidate_source=MemoryCandidateSource.EXPLICIT_USER,
+                confidence=MemoryConfidence.HIGH,
+            )
+            result = mgr.remember(candidate)
+            if result:
+                return f"已保存笔记 [{title}] (memory_id={result})"
+        return f"已保存笔记 [{title}]: {content}"
+
+    return note
 
 
 BUILTIN_SKILLS = [
@@ -254,9 +279,13 @@ def _build_framework(
     else:
         framework.setup(auto_approve_tools=auto_approve)
 
+    # Wire note tool to memory_manager for persistence
+    _mm_ref: list = [getattr(framework._deps, "memory_manager", None)] if framework._deps else []
+    note_tool = _make_note_tool(_mm_ref)
+
     framework.register_tool(calculator)
     framework.register_tool(weather)
-    framework.register_tool(note)
+    framework.register_tool(note_tool)
     for skill in BUILTIN_SKILLS:
         framework.register_skill(skill)
 
@@ -276,6 +305,7 @@ class ReplState:
     def __init__(self) -> None:
         self.history: list[Message] = []
         self.turn_count: int = 0
+        self.user_id: str | None = None
 
     def append_turn(self, user_input: str, result: Any) -> None:
         """Record a complete turn including tool calls and results.
@@ -619,6 +649,21 @@ async def _cmd_history(fw, mock, state, args):
 async def _cmd_history_clear(fw, mock, state, args):
     state.clear()
     print(f"  {_green('对话历史已清空')}")
+
+
+@_register_cmd("user", "设置当前 user_id（记忆隔离）", usage="/user <id>|off", category="会话")
+async def _cmd_user(fw, mock, state, args):
+    arg = args.strip()
+    if not arg:
+        current = state.user_id if state.user_id else "(未设置)"
+        print(f"  当前 user_id: {_cyan(current)}")
+        return
+    if arg.lower() in ("off", "none", "clear"):
+        state.user_id = None
+        print(f"  {_green('已清除 user_id')}")
+        return
+    state.user_id = arg
+    print(f"  {_green('已设置 user_id:')} {_cyan(state.user_id)}")
 
 
 @_register_cmd("compact", "压缩对话历史为结构化摘要", usage="/compact [custom instruction]", category="会话")
@@ -1150,6 +1195,7 @@ async def _repl(fw: Any, mock_model: InteractiveMockModel | None) -> None:
             result = await fw.run(
                 user_input,
                 initial_session_messages=state.history,
+                user_id=state.user_id,
             )
             _print_result(result)
             if result.success:

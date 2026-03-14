@@ -11,7 +11,7 @@ from agent_framework.models.context import ContextStats
 from agent_framework.models.message import Message
 
 if TYPE_CHECKING:
-    from agent_framework.models.agent import AgentConfig, AgentState, Skill
+    from agent_framework.models.agent import AgentConfig, AgentState, ContextPolicy, Skill
     from agent_framework.models.memory import MemoryRecord
     from agent_framework.models.session import SessionSnapshot, SessionState
 
@@ -47,6 +47,8 @@ class ContextEngineer:
         self._compressor = compressor or ContextCompressor()
         self._prefix_mgr = PromptPrefixManager()
         self._skill_prompt: str | None = None
+        self._allow_compression = True
+        self._force_include_memory = False
         self._last_stats = ContextStats()
 
     async def prepare_context_for_llm(
@@ -95,10 +97,13 @@ class ContextEngineer:
                           and not self._prefix_mgr.should_rotate(system_core, skill_addon)))
         system_tokens = prefix.token_estimate
 
-        # --- Suffix: memories + session + input ---
+        # --- Suffix: memories + session ---
+        # Task is already in SessionState as the first user message (written by
+        # RunCoordinator at run start).  Do NOT re-inject as current_input —
+        # that would place the user message AFTER tool results, making the LLM
+        # think it is a new request and causing repeated tool calls.
         memory_block = self._source.collect_saved_memory_block(memories)
         session_groups = self._source.collect_session_groups(session_state)
-        current_input = self._source.collect_current_input(task)
 
         memory_tokens = 0
         if memory_block:
@@ -111,19 +116,16 @@ class ContextEngineer:
             session_tokens += self._builder.calculate_tokens(g.messages)
         original_session_msgs_count = sum(len(g.messages) for g in session_groups)
 
-        input_tokens = self._builder.calculate_tokens([current_input])
-
         # Budget = total - output_reserve
         budget = getattr(self._builder, "_max_tokens", 8192) - getattr(
             self._builder, "_reserve_for_output", 1024
         )
 
-        # Compression: only in STATELESS mode.
-        # In STATEFUL mode, provider keeps full context — compression would
-        # break delta indexing (sent_count offset mismatch after compression).
+        # Compression: only when allowed by policy and in STATELESS mode.
+        # In STATEFUL mode, compression would break delta indexing.
         is_stateful = context_materials.get("stateful_session", False)
-        if not is_stateful:
-            fixed_tokens = system_tokens + memory_tokens + input_tokens
+        if not is_stateful and self._allow_compression:
+            fixed_tokens = system_tokens + memory_tokens
             target_session_tokens = max(0, budget - fixed_tokens)
             model_adapter = context_materials.get("model_adapter")
             session_groups = await self._compressor.compress_groups_async(
@@ -132,38 +134,43 @@ class ContextEngineer:
                 model_adapter=model_adapter,
             )
 
-        # Build final context: prefix.messages + suffix
+        # Build final context: prefix.messages + session history
         messages = list(prefix.messages)  # frozen prefix first
 
         # Append memory block to system message if present
         if memory_block:
-            # Extend the system message content with memory block
             sys_content = messages[0].content or ""
             messages[0] = Message(role="system", content=f"{sys_content}\n\n{memory_block}")
 
-        # Append session history
+        # Append session history (includes user task as first message)
         for group in session_groups:
             messages.extend(group.messages)
 
-        # Append current input
-        messages.append(current_input)
-
         total_tokens = self._builder.calculate_tokens(messages)
 
-        actual_session_msgs = [m for m in messages if m.role not in ("system",) and m != current_input]
+        actual_session_msgs = [m for m in messages if m.role not in ("system",)]
         groups_trimmed = max(0, original_session_msgs_count - len(actual_session_msgs))
 
         self._last_stats = ContextStats(
             system_tokens=system_tokens,
             memory_tokens=memory_tokens,
             session_tokens=session_tokens,
-            input_tokens=input_tokens,
+            input_tokens=0,
             total_tokens=total_tokens,
             groups_trimmed=groups_trimmed,
             prefix_reused=prefix_reused,
         )
 
         return messages
+
+    def apply_context_policy(self, policy: ContextPolicy) -> None:
+        """Apply run-scoped context policy. Called by RunCoordinator.
+
+        This is the sole entry point for ContextPolicy consumption.
+        RunCoordinator passes the policy; only ContextEngineer interprets its fields.
+        """
+        self._allow_compression = policy.allow_compression
+        self._force_include_memory = policy.force_include_saved_memory
 
     def set_skill_context(self, skill_prompt: str | None) -> None:
         self._skill_prompt = skill_prompt

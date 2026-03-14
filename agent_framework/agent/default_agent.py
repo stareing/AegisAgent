@@ -20,6 +20,8 @@ class DefaultAgent(BaseAgent):
         max_iterations: int = 20,
         temperature: float = 0.7,
         allow_spawn_children: bool = False,
+        max_concurrent_tool_calls: int = 5,
+        allow_parallel_tool_calls: bool = True,
     ) -> None:
         config = AgentConfig(
             agent_id=agent_id,
@@ -28,5 +30,7 @@ class DefaultAgent(BaseAgent):
             max_iterations=max_iterations,
             temperature=temperature,
             allow_spawn_children=allow_spawn_children,
+            max_concurrent_tool_calls=max_concurrent_tool_calls,
+            allow_parallel_tool_calls=allow_parallel_tool_calls,
         )
         super().__init__(config)

@@ -12,12 +12,9 @@ if TYPE_CHECKING:
 class ContextBuilder:
     """Assembles context from slots and trims to fit token budget.
 
-    Slot order (section 12.2):
-    1. System Core
-    2. Skill Addon
-    3. Saved Memories
-    4. Session History
-    5. Current Input
+    Slot order:
+    1. System Core (+ Skill Addon + Saved Memories)
+    2. Session History (includes user task as first message)
     """
 
     def __init__(

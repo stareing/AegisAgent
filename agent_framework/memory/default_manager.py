@@ -62,6 +62,7 @@ class DefaultMemoryManager(BaseMemoryManager):
         auto_extract: bool = True,
     ) -> None:
         super().__init__(store)
+        # Constructor defaults; overridden by apply_memory_policy() at run start
         self._max_in_context = max_memories_in_context
         self._auto_extract = auto_extract
 

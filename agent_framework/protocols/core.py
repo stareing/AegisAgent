@@ -15,7 +15,9 @@ from agent_framework.models.tool import ToolEntry, ToolExecutionMeta, ToolResult
 
 if TYPE_CHECKING:
     from agent_framework.adapters.model.base_adapter import ModelChunk
-    from agent_framework.models.agent import AgentState, IterationResult, Skill
+    from agent_framework.models.agent import (
+        AgentState, ContextPolicy, IterationResult, MemoryPolicy, MemoryQuota, Skill,
+    )
     from agent_framework.models.context import ContextStats
     from agent_framework.models.subagent import SubAgentHandle, SubAgentResult, SubAgentSpec
 
@@ -161,6 +163,8 @@ class MemoryManagerProtocol(Protocol):
     def deactivate(self, memory_id: str) -> None: ...
     def clear_memories(self, agent_id: str, user_id: str | None) -> int: ...
     def set_enabled(self, enabled: bool) -> None: ...
+    def apply_memory_policy(self, policy: MemoryPolicy) -> None: ...
+    def set_quota(self, quota: MemoryQuota) -> None: ...
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +184,8 @@ class ContextEngineerProtocol(Protocol):
         query: str,
         token_budget: int,
     ) -> list[Message]: ...
+
+    def apply_context_policy(self, policy: ContextPolicy) -> None: ...
 
     def report_context_stats(self) -> ContextStats: ...
 

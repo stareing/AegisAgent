@@ -510,9 +510,16 @@ class TestSharedWriteMemoryManager:
         self.mgr.forget("mid")
         self.parent_mgr.forget.assert_called_once_with("mid")
 
-    def test_record_turn_delegates_to_parent(self):
-        self.mgr.record_turn("input", "answer", [])
-        self.parent_mgr.record_turn.assert_called_once_with("input", "answer", [])
+    def test_record_turn_does_not_delegate_to_parent(self):
+        """SharedWrite record_turn returns local decision, not parent delegation.
+
+        SubAgent extraction uses remember() with forced 'subagent' source,
+        not parent's record_turn which uses parent's extraction patterns.
+        """
+        result = self.mgr.record_turn("input", "answer", [])
+        self.parent_mgr.record_turn.assert_not_called()
+        assert result.committed is False
+        assert "SharedWrite" in result.reason
 
     def test_extract_candidates_returns_empty(self):
         assert self.mgr.extract_candidates("test", None, []) == []
@@ -525,3 +532,111 @@ class TestSharedWriteMemoryManager:
         assert self.mgr._run_id == "r2"
         assert self.mgr._agent_id == "a2"
         assert self.mgr._user_id == "u2"
+
+
+# =====================================================================
+# MemoryPolicy application
+# =====================================================================
+
+
+class TestMemoryPolicyApplication:
+    def setup_method(self):
+        self.store = SQLiteMemoryStore(db_path=":memory:")
+        self.mgr = DefaultMemoryManager(store=self.store)
+        self.mgr.begin_session("run_1", "agent_1", "user_1")
+
+    def teardown_method(self):
+        self.store.close()
+
+    def test_apply_policy_disables_memory(self):
+        """memory_enabled=False should block remember()."""
+        from agent_framework.models.agent import MemoryPolicy
+        self.mgr.apply_memory_policy(MemoryPolicy(memory_enabled=False))
+        c = MemoryCandidate(
+            kind=MemoryKind.USER_PREFERENCE, title="pref", content="val",
+        )
+        assert self.mgr.remember(c) is None
+
+    def test_apply_policy_disables_auto_extract(self):
+        """auto_extract=False should skip extraction in record_turn."""
+        from agent_framework.models.agent import MemoryPolicy
+        self.mgr.apply_memory_policy(MemoryPolicy(auto_extract=False))
+        result = self.mgr.record_turn("Always use Python", None, [])
+        assert result.committed is False
+        assert "disabled" in result.reason.lower()
+
+    def test_apply_policy_max_in_context(self):
+        """max_in_context limits number of memories returned by select_for_context."""
+        from agent_framework.models.agent import AgentState, MemoryPolicy
+        # Insert 5 memories
+        for i in range(5):
+            c = MemoryCandidate(
+                kind=MemoryKind.CUSTOM, title=f"mem_{i}", content=f"content_{i}",
+            )
+            self.mgr.remember(c)
+        # Policy: max 2
+        self.mgr.apply_memory_policy(MemoryPolicy(max_in_context=2))
+        state = AgentState(run_id="r1", task="test")
+        selected = self.mgr.select_for_context("test", state)
+        assert len(selected) <= 2
+
+
+# =====================================================================
+# MemoryQuota enforcement
+# =====================================================================
+
+
+class TestMemoryQuota:
+    def setup_method(self):
+        self.store = SQLiteMemoryStore(db_path=":memory:")
+        self.mgr = DefaultMemoryManager(store=self.store)
+        self.mgr.begin_session("run_1", "agent_1", "user_1")
+
+    def teardown_method(self):
+        self.store.close()
+
+    def test_quota_content_length_rejects(self):
+        """Content exceeding max_content_length should be rejected."""
+        from agent_framework.models.agent import MemoryQuota
+        self.mgr.set_quota(MemoryQuota(max_content_length=10))
+        c = MemoryCandidate(
+            kind=MemoryKind.CUSTOM, title="long", content="x" * 100,
+        )
+        assert self.mgr.remember(c) is None
+
+    def test_quota_content_length_allows_short(self):
+        """Content within max_content_length should be allowed."""
+        from agent_framework.models.agent import MemoryQuota
+        self.mgr.set_quota(MemoryQuota(max_content_length=100))
+        c = MemoryCandidate(
+            kind=MemoryKind.CUSTOM, title="short", content="hello",
+        )
+        assert self.mgr.remember(c) is not None
+
+    def test_quota_max_items_rejects(self):
+        """Exceeding max_items_per_user should reject new inserts."""
+        from agent_framework.models.agent import MemoryQuota
+        self.mgr.set_quota(MemoryQuota(max_items_per_user=2))
+        for i in range(2):
+            c = MemoryCandidate(
+                kind=MemoryKind.CUSTOM, title=f"item_{i}", content=f"val_{i}",
+            )
+            assert self.mgr.remember(c) is not None
+        # Third item should be rejected
+        c = MemoryCandidate(
+            kind=MemoryKind.CUSTOM, title="item_2", content="val_2",
+        )
+        assert self.mgr.remember(c) is None
+
+    def test_quota_tags_truncated(self):
+        """Tags exceeding max_tags_per_item should be truncated, not rejected."""
+        from agent_framework.models.agent import MemoryQuota
+        self.mgr.set_quota(MemoryQuota(max_tags_per_item=2))
+        c = MemoryCandidate(
+            kind=MemoryKind.CUSTOM, title="tagged", content="val",
+            tags=["a", "b", "c", "d"],
+        )
+        mid = self.mgr.remember(c)
+        assert mid is not None
+        record = self.store.get(mid)
+        assert len(record.tags) <= 2

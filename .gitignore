@@ -1,2 +1,4 @@
 config/doubao.json
 config/doubao.local.json
+logs
+data/memories.db

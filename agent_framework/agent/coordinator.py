@@ -90,6 +90,7 @@ class RunCoordinator:
         deps: AgentRuntimeDeps,
         task: str,
         initial_session_messages: list[Message] | None = None,
+        user_id: str | None = None,
         run_timeout_ms: int | None = None,
         cancel_event: asyncio.Event | None = None,
     ) -> AgentRunResult:
@@ -101,6 +102,11 @@ class RunCoordinator:
             self._state_ctrl.append_projected_messages(
                 session_state, initial_session_messages
             )
+        # Write user task as first message in session so subsequent iterations
+        # see [user] → [assistant+tool] → [tool_result] in correct order.
+        self._state_ctrl.append_user_message(
+            session_state, Message(role="user", content=task)
+        )
 
         timeout_ms = run_timeout_ms or DEFAULT_RUN_TIMEOUT_MS
         run_start = time.monotonic()
@@ -154,7 +160,7 @@ class RunCoordinator:
             deps.context_engineer.set_skill_context(None)
 
             # Begin memory session (v2.6.3 §41: paired with end_run_session in finally)
-            deps.memory_manager.begin_run_session(run_id, agent.agent_id, None)
+            deps.memory_manager.begin_run_session(run_id, agent.agent_id, user_id)
             session_started = True
 
             # Skill detection — router detects, RunStateController holds state
@@ -173,6 +179,12 @@ class RunCoordinator:
                 agent, active_skill, agent_state
             )
             effective_config = policy_bundle.effective_run_config
+
+            # Pass policies to their authorized consumers (v2.6.1 §30)
+            # MemoryPolicy → MemoryManager (sole interpreter)
+            deps.memory_manager.apply_memory_policy(policy_bundle.memory_policy)
+            # ContextPolicy → ContextEngineer (sole interpreter)
+            deps.context_engineer.apply_context_policy(policy_bundle.context_policy)
 
             await agent.on_before_run(task, agent_state)
 
@@ -298,6 +310,18 @@ class RunCoordinator:
                 iterations_used=agent_state.iteration_count,
                 total_tokens=agent_state.total_tokens_used,
             )
+            # Contract: failed runs also go through record_turn for CommitDecision
+            # (base_manager.py §41: failed runs decide memory via CommitDecision)
+            try:
+                deps.memory_manager.record_turn(
+                    task, final_answer, agent_state.iteration_history
+                )
+            except Exception as mem_err:
+                logger.warning(
+                    "run.failed_memory_commit_error",
+                    run_id=run_id,
+                    error=str(mem_err),
+                )
             return self._handle_run_error(agent, e, agent_state)
         finally:
             if session_started:
@@ -390,6 +414,10 @@ class RunCoordinator:
             can_spawn = agent.agent_config.allow_spawn_children
             info["can_spawn_subagents"] = str(can_spawn).lower()
 
+        parallel_enabled: bool | None = None
+        if effective_config:
+            parallel_enabled = bool(effective_config.allow_parallel_tool_calls)
+
         if deps:
             # Parallel tool call support from model adapter
             adapter = deps.model_adapter
@@ -400,7 +428,13 @@ class RunCoordinator:
                     if inspect.isawaitable(val):
                         val.close()  # prevent "coroutine never awaited" warning
                     else:
-                        info["parallel_tool_calls"] = str(bool(val)).lower()
+                        model_parallel_supported = bool(val)
+                        if parallel_enabled is None:
+                            parallel_enabled = model_parallel_supported
+                        else:
+                            parallel_enabled = (
+                                parallel_enabled and model_parallel_supported
+                            )
                 except Exception:
                     pass
 
@@ -409,6 +443,9 @@ class RunCoordinator:
                 sched = deps.sub_agent_runtime._scheduler
                 info["max_concurrent_subagents"] = str(sched._max_concurrent)
                 info["max_subagents_per_run"] = str(sched._max_per_run)
+
+        if parallel_enabled is not None:
+            info["parallel_tool_calls"] = str(parallel_enabled).lower()
 
         # Live run state — LLM sees current progress
         if agent_state:

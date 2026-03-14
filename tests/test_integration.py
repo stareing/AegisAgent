@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import pytest
 from typing import AsyncIterator
+from unittest.mock import AsyncMock
 
 from agent_framework.adapters.model.base_adapter import BaseModelAdapter, ModelChunk
 from agent_framework.agent.base_agent import BaseAgent
@@ -451,8 +452,10 @@ class TestContextEngineer:
         from agent_framework.models.agent import AgentConfig, AgentState
         from agent_framework.models.session import SessionState
 
-        agent_state = AgentState(run_id="r1", task="test")
+        agent_state = AgentState(run_id="r1", task="What is 1+1?")
         session = SessionState(session_id="s1", run_id="r1")
+        # User task is written to SessionState at run start (by RunCoordinator)
+        session.append_message(Message(role="user", content="What is 1+1?"))
         session.append_message(Message(role="assistant", content="Previous response"))
 
         config = AgentConfig(system_prompt="You are helpful.")
@@ -466,11 +469,12 @@ class TestContextEngineer:
             },
         )
 
-        # Should have: system, session history, current input
-        assert len(messages) >= 2
+        # Should have: system, user (from session), assistant (from session)
+        assert len(messages) >= 3
         assert messages[0].role == "system"
-        assert messages[-1].role == "user"
-        assert messages[-1].content == "What is 1+1?"
+        # User message is first non-system message (from session history)
+        assert messages[1].role == "user"
+        assert messages[1].content == "What is 1+1?"
 
     @pytest.mark.asyncio
     async def test_context_stats(self):
@@ -852,6 +856,23 @@ class TestRegressionFixes:
         framework.config.a2a.known_agents = [{"url": "https://a2a.example", "alias": "x"}]
         await framework.setup_a2a()
         assert framework._deps.delegation_executor._a2a_adapter is framework._a2a_adapter
+
+    @pytest.mark.asyncio
+    async def test_framework_run_forwards_user_id(self):
+        from agent_framework.entry import AgentFramework
+        from agent_framework.models.agent import AgentRunResult
+
+        framework = AgentFramework()
+        framework.setup(auto_approve_tools=True)
+        framework._coordinator.run = AsyncMock(
+            return_value=AgentRunResult(success=True, final_answer="ok")
+        )
+
+        result = await framework.run("hello", user_id="u_1")
+        assert result.success is True
+        framework._coordinator.run.assert_awaited_once()
+        kwargs = framework._coordinator.run.await_args.kwargs
+        assert kwargs["user_id"] == "u_1"
 
     def test_mcp_sync_tools_to_catalog_supports_server_filter(self):
         from agent_framework.protocols.mcp.mcp_client_manager import MCPClientManager

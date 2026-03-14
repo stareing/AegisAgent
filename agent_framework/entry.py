@@ -102,6 +102,10 @@ class AgentFramework:
             max_memories_in_context=self.config.memory.max_memories_in_context,
             auto_extract=self.config.memory.auto_extract_memory,
         )
+        from agent_framework.models.agent import MemoryQuota
+        memory_manager.set_quota(MemoryQuota(
+            max_items_per_user=self.config.memory.max_memory_items_per_user,
+        ))
 
         # Model adapter
         model_adapter = self._create_model_adapter()
@@ -144,13 +148,7 @@ class AgentFramework:
             max_context_tokens=self.config.context.max_context_tokens,
             reserve_for_output=self.config.context.reserve_for_output,
         )
-        from agent_framework.context.compressor import CompressionStrategy
-        strategy_str = self.config.context.default_compression_strategy
-        try:
-            strategy = CompressionStrategy(strategy_str)
-        except ValueError:
-            strategy = CompressionStrategy.SLIDING_WINDOW
-        compressor = ContextCompressor(strategy=strategy)
+        compressor = ContextCompressor()
         context_engineer = ContextEngineer(
             source_provider=source_provider,
             builder=builder,
@@ -229,7 +227,13 @@ class AgentFramework:
                 model_name=self.config.model.default_model_name,
                 temperature=self.config.model.temperature,
                 allow_spawn_children=True,
+                max_concurrent_tool_calls=self.config.tools.max_concurrent_tool_calls,
+                allow_parallel_tool_calls=self.config.tools.allow_parallel_tool_calls,
             )
+
+        # Bind config-sourced policies to agent so run-level policy
+        # reflects FrameworkConfig rather than BaseAgent defaults.
+        self._bind_config_policies(self._agent)
 
         self._coordinator = RunCoordinator()
         self._setup_done = True
@@ -239,6 +243,30 @@ class AgentFramework:
             model=self.config.model.default_model_name,
             tools_count=len(self._registry.list_tools()),
         )
+
+    def _bind_config_policies(self, agent: Any) -> None:
+        """Override agent's default policy methods with config-sourced values.
+
+        Without this, BaseAgent.get_memory_policy() returns MemoryPolicy()
+        defaults (all True, max_in_context=10), which would overwrite
+        the MemoryConfig values injected at setup time on every run.
+        """
+        from agent_framework.models.agent import ContextPolicy, MemoryPolicy
+        mem_cfg = self.config.memory
+        ctx_cfg = self.config.context
+
+        config_memory_policy = MemoryPolicy(
+            memory_enabled=mem_cfg.enable_saved_memory,
+            auto_extract=mem_cfg.auto_extract_memory,
+            max_in_context=mem_cfg.max_memories_in_context,
+        )
+        config_context_policy = ContextPolicy(
+            allow_compression=(ctx_cfg.default_compression_strategy != "NONE"),
+        )
+
+        # Patch methods on the agent instance (not the class)
+        agent.get_memory_policy = lambda _state: config_memory_policy
+        agent.get_context_policy = lambda _state: config_context_policy
 
     def _create_model_adapter(self) -> BaseModelAdapter:
         """Create model adapter based on config.model.adapter_type.
@@ -452,6 +480,7 @@ class AgentFramework:
         self,
         task: str,
         initial_session_messages: list[Message] | None = None,
+        user_id: str | None = None,
     ) -> AgentRunResult:
         """Run the agent on a task.
 
@@ -460,6 +489,7 @@ class AgentFramework:
             initial_session_messages: Prior conversation history. Injected into
                 the session so the model sees multi-turn context. The ContextBuilder
                 automatically trims older messages when the token budget is tight.
+            user_id: Optional end-user identity for memory namespace isolation.
         """
         if not self._setup_done:
             self.setup()
@@ -468,6 +498,7 @@ class AgentFramework:
             self._deps,
             task,
             initial_session_messages=initial_session_messages,
+            user_id=user_id,
         )
 
     async def shutdown(self) -> None:

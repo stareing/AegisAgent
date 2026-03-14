@@ -13,7 +13,7 @@ from agent_framework.models.memory import (
 )
 
 if TYPE_CHECKING:
-    from agent_framework.models.agent import AgentState, IterationResult
+    from agent_framework.models.agent import AgentState, IterationResult, MemoryPolicy, MemoryQuota
     from agent_framework.protocols.core import MemoryStoreProtocol
 
 
@@ -43,6 +43,10 @@ class BaseMemoryManager(ABC):
     def __init__(self, store: MemoryStoreProtocol) -> None:
         self._store = store
         self._enabled = True
+        self._auto_extract = True
+        self._max_in_context = 10
+        self._allow_overwrite_pinned = False
+        self._quota: MemoryQuota | None = None
         self._run_id: str | None = None
         self._agent_id: str | None = None
         self._user_id: str | None = None
@@ -64,6 +68,21 @@ class BaseMemoryManager(ABC):
         self._agent_id = agent_id
         self._user_id = user_id
         self._session_active = True
+
+    def apply_memory_policy(self, policy: MemoryPolicy) -> None:
+        """Apply run-scoped memory policy. Called by RunCoordinator after begin_run_session.
+
+        This is the sole entry point for MemoryPolicy consumption.
+        RunCoordinator passes the policy; only MemoryManager interprets its fields.
+        """
+        self._enabled = policy.memory_enabled
+        self._auto_extract = policy.auto_extract
+        self._max_in_context = policy.max_in_context
+        self._allow_overwrite_pinned = policy.allow_overwrite_pinned
+
+    def set_quota(self, quota: MemoryQuota) -> None:
+        """Set memory quota limits. Enforced in remember()."""
+        self._quota = quota
 
     def begin_session(
         self, run_id: str, agent_id: str, user_id: str | None
@@ -152,6 +171,21 @@ class BaseMemoryManager(ABC):
                 source_run_id=self._run_id or "",
             )
 
+        # Quota: content length check
+        if self._quota and len(candidate.content) > self._quota.max_content_length:
+            return None
+
+        # Quota: tags count check
+        if self._quota and len(candidate.tags) > self._quota.max_tags_per_item:
+            candidate = MemoryCandidate(
+                kind=candidate.kind, title=candidate.title,
+                content=candidate.content,
+                tags=candidate.tags[: self._quota.max_tags_per_item],
+                reason=candidate.reason,
+                candidate_source=candidate.candidate_source,
+                confidence=candidate.confidence,
+            )
+
         existing = self._store.list_by_user(
             self._agent_id, self._user_id, active_only=False
         )
@@ -183,7 +217,7 @@ class BaseMemoryManager(ABC):
         )
 
         if match:
-            if match.is_pinned:
+            if match.is_pinned and not self._allow_overwrite_pinned:
                 return match.memory_id
             match.content = candidate.content
             match.tags = candidate.tags
@@ -192,6 +226,11 @@ class BaseMemoryManager(ABC):
             self._store.update(match)
             return match.memory_id
         else:
+            # Quota: max items per user check (only on INSERT, not UPDATE)
+            if self._quota:
+                count = self._store.count(self._agent_id, self._user_id)
+                if count >= self._quota.max_items_per_user:
+                    return None
             record = MemoryRecord(
                 memory_id=str(uuid.uuid4()),
                 agent_id=self._agent_id,
