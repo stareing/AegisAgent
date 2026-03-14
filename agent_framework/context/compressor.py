@@ -40,14 +40,7 @@ class ContextCompressor:
         groups: list[ToolTransactionGroup],
         target_tokens: int,
     ) -> list[ToolTransactionGroup]:
-        """Compress session groups to fit within target_tokens.
-
-        Always runs skill body folding first (regardless of strategy):
-        old invoke_skill results are collapsed to a one-liner so only
-        the most recent skill body occupies full context.
-        """
-        groups = self._fold_old_skill_bodies(groups)
-
+        """Compress session groups to fit within target_tokens."""
         current_tokens = sum(
             g.token_estimate or self._count_group(g) for g in groups
         )
@@ -120,51 +113,6 @@ class ContextCompressor:
 
         # Still too large - fall back to sliding window
         return self._sliding_window(compressed, target_tokens)
-
-    @staticmethod
-    def _fold_old_skill_bodies(
-        groups: list[ToolTransactionGroup],
-    ) -> list[ToolTransactionGroup]:
-        """Collapse old invoke_skill results, keeping only the most recent full body.
-
-        Skill bodies can be 500-3000+ tokens. When multiple skills are
-        invoked in a conversation, only the latest body needs to be
-        fully visible. Older skill bodies are replaced with a one-line
-        summary to reclaim context budget.
-        """
-        # Find all groups containing invoke_skill tool results (by index)
-        skill_group_indices: list[int] = []
-        for i, g in enumerate(groups):
-            for msg in g.messages:
-                if msg.role == "tool" and msg.name == "invoke_skill":
-                    skill_group_indices.append(i)
-                    break
-
-        if len(skill_group_indices) <= 1:
-            # 0 or 1 skill invocation — nothing to fold
-            return groups
-
-        # Fold all except the last one
-        to_fold = set(skill_group_indices[:-1])
-        result = []
-        for i, g in enumerate(groups):
-            if i not in to_fold:
-                result.append(g)
-                continue
-            # Replace invoke_skill tool message content with summary
-            new_msgs = []
-            for msg in g.messages:
-                if msg.role == "tool" and msg.name == "invoke_skill":
-                    # Extract skill_id from the assistant message's tool_call if possible
-                    summary = "[Skill instructions were loaded and followed. Collapsed to save context.]"
-                    new_msgs.append(msg.model_copy(update={"content": summary}))
-                else:
-                    new_msgs.append(msg)
-            result.append(g.model_copy(update={
-                "messages": new_msgs,
-                "token_estimate": 0,  # force recalculation
-            }))
-        return result
 
     def _count_group(self, group: ToolTransactionGroup) -> int:
         return self._token_counter(group.messages)
