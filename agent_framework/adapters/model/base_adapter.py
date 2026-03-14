@@ -49,8 +49,49 @@ class LLMTimeoutError(LLMCallError):
     pass
 
 
+class SessionMode:
+    """Tracks stateful session for KV cache optimization.
+
+    Two modes:
+    - STATELESS (default): Every request sends full messages list.
+      Works with all providers. Provider may still do prefix caching.
+    - STATEFUL: First request sends full messages. Subsequent requests
+      send only the new messages (delta). Requires provider support.
+
+    Lifecycle:
+    1. begin_session() — marks session start, clears cache
+    2. complete() with session_mode — adapter decides full vs delta
+    3. end_session() — cleanup
+
+    Adapters that support stateful mode override supports_stateful_session().
+    """
+
+    def __init__(self) -> None:
+        self.active: bool = False
+        self.session_id: str = ""
+        self.sent_message_count: int = 0
+        self.prefix_hash: str = ""
+
+    def reset(self) -> None:
+        self.active = False
+        self.session_id = ""
+        self.sent_message_count = 0
+        self.prefix_hash = ""
+
+
 class BaseModelAdapter(ABC):
-    """Abstract base for model adapters."""
+    """Abstract base for model adapters.
+
+    Session-aware completion (KV cache optimization):
+    - Adapters that support stateful sessions override
+      supports_stateful_session() → True and handle delta messages
+      in complete(). The framework calls begin_session/end_session
+      around a run.
+    - Default: stateless (full messages every call).
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        self._session = SessionMode()
 
     @abstractmethod
     async def complete(
@@ -76,3 +117,36 @@ class BaseModelAdapter(ABC):
 
     def supports_parallel_tool_calls(self) -> bool:
         return False
+
+    def supports_stateful_session(self) -> bool:
+        """Override to True if adapter can maintain server-side conversation state."""
+        return False
+
+    def begin_session(self, session_id: str = "") -> None:
+        """Start a stateful session. Called by RunCoordinator at run start."""
+        self._session.active = True
+        self._session.session_id = session_id
+        self._session.sent_message_count = 0
+
+    def end_session(self) -> None:
+        """End the stateful session. Called by RunCoordinator in finally."""
+        self._session.reset()
+
+    def get_delta_messages(self, full_messages: list[Message]) -> list[Message]:
+        """Extract only new messages since last send.
+
+        For stateful adapters: returns messages[sent_count:].
+        For stateless adapters: returns full list (no optimization).
+        """
+        if not self._session.active or not self.supports_stateful_session():
+            return full_messages
+
+        if self._session.sent_message_count == 0:
+            # First call in session — send everything
+            self._session.sent_message_count = len(full_messages)
+            return full_messages
+
+        # Subsequent calls — only new messages
+        delta = full_messages[self._session.sent_message_count:]
+        self._session.sent_message_count = len(full_messages)
+        return delta if delta else full_messages  # fallback if no delta

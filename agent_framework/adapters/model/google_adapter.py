@@ -50,6 +50,7 @@ class GoogleAdapter(BaseModelAdapter):
         temperature: float = 0.0,
         max_output_tokens: int | None = None,
     ) -> None:
+        super().__init__()
         from google import genai
 
         self.model_name = model_name

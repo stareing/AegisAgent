@@ -75,6 +75,7 @@ class SmartMockModel(BaseModelAdapter):
     """模拟 LLM 行为：识别用户意图 → 调用工具 → 整合结果。"""
 
     def __init__(self):
+        super().__init__()
         self._call_count = 0
         self._scenario: str = ""
         self._tool_results: list[str] = []

@@ -177,16 +177,31 @@ class AgentLoop:
         tools_schema: list[dict],
         effective_config: EffectiveRunConfig,
     ) -> ModelResponse:
+        # Stateful session optimization: send only delta messages
+        # when adapter maintains server-side conversation state.
+        actual_messages = messages
+        is_delta = False
+        if hasattr(model_adapter, "get_delta_messages") and hasattr(model_adapter, "_session"):
+            try:
+                delta = model_adapter.get_delta_messages(messages)
+                if isinstance(delta, list) and len(delta) < len(messages):
+                    is_delta = True
+                    actual_messages = delta
+            except Exception:
+                pass  # Graceful fallback to full messages
+
         logger.info(
             "llm.calling",
             model=effective_config.model_name,
             temperature=effective_config.temperature,
             max_output_tokens=effective_config.max_output_tokens,
-            message_count=len(messages),
+            message_count=len(actual_messages),
+            full_message_count=len(messages),
+            is_delta=is_delta,
             tools_count=len(tools_schema) if tools_schema else 0,
         )
         response = await model_adapter.complete(
-            messages=messages,
+            messages=actual_messages,
             tools=tools_schema if tools_schema else None,
             temperature=effective_config.temperature,
             max_tokens=effective_config.max_output_tokens,

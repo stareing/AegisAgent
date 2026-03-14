@@ -560,6 +560,67 @@ class TestFrozenPromptPrefix:
         stats2 = engineer.report_context_stats()
         assert stats2.prefix_reused is True
 
+    def test_session_mode_default_stateless(self):
+        """Default adapter session mode is stateless."""
+        from agent_framework.adapters.model.base_adapter import BaseModelAdapter, SessionMode
+        # Cannot instantiate ABC, test SessionMode directly
+        sm = SessionMode()
+        assert sm.active is False
+
+    def test_session_mode_delta_first_call_full(self):
+        """First call in session returns full messages."""
+        from agent_framework.adapters.model.base_adapter import SessionMode
+
+        class FakeAdapter:
+            def __init__(self):
+                self._session = SessionMode()
+            def supports_stateful_session(self): return True
+            def get_delta_messages(self, msgs):
+                if not self._session.active or not self.supports_stateful_session():
+                    return msgs
+                if self._session.sent_message_count == 0:
+                    self._session.sent_message_count = len(msgs)
+                    return msgs
+                delta = msgs[self._session.sent_message_count:]
+                self._session.sent_message_count = len(msgs)
+                return delta if delta else msgs
+
+        adapter = FakeAdapter()
+        adapter._session.active = True
+        msgs = [Message(role="system", content="sys"), Message(role="user", content="hi")]
+        result = adapter.get_delta_messages(msgs)
+        assert len(result) == 2  # first call: full
+
+    def test_session_mode_delta_second_call_incremental(self):
+        """Second call returns only new messages."""
+        from agent_framework.adapters.model.base_adapter import SessionMode
+
+        class FakeAdapter:
+            def __init__(self):
+                self._session = SessionMode()
+            def supports_stateful_session(self): return True
+            def get_delta_messages(self, msgs):
+                if not self._session.active:
+                    return msgs
+                if self._session.sent_message_count == 0:
+                    self._session.sent_message_count = len(msgs)
+                    return msgs
+                delta = msgs[self._session.sent_message_count:]
+                self._session.sent_message_count = len(msgs)
+                return delta if delta else msgs
+
+        adapter = FakeAdapter()
+        adapter._session.active = True
+
+        msgs1 = [Message(role="system", content="sys"), Message(role="user", content="hi")]
+        adapter.get_delta_messages(msgs1)  # first call
+
+        msgs2 = msgs1 + [Message(role="assistant", content="hello"), Message(role="user", content="1+1")]
+        result = adapter.get_delta_messages(msgs2)
+        assert len(result) == 2  # only the 2 new messages
+        assert result[0].role == "assistant"
+        assert result[1].content == "1+1"
+
     def test_prefix_not_compressed(self):
         """Frozen prefix must survive compression — only suffix is trimmed."""
         engineer = ContextEngineer(

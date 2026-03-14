@@ -48,6 +48,7 @@ class AnthropicAdapter(BaseModelAdapter):
         temperature: float = 0.0,
         max_output_tokens: int = 4096,
     ) -> None:
+        super().__init__()
         import anthropic
 
         self.model_name = model_name

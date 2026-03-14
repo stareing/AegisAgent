@@ -38,6 +38,7 @@ class LiteLLMAdapter(BaseModelAdapter):
         temperature: float = 0.0,
         max_output_tokens: int | None = None,
     ) -> None:
+        super().__init__()
         self.model_name = model_name
         self.api_base = api_base
         self.timeout_s = timeout_ms / 1000.0

@@ -47,6 +47,7 @@ class OpenAIAdapter(BaseModelAdapter):
         temperature: float = 0.0,
         max_output_tokens: int | None = None,
     ) -> None:
+        super().__init__()
         import openai
 
         self.model_name = model_name

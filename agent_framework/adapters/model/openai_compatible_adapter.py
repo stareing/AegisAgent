@@ -147,6 +147,7 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
         max_output_tokens: int | None = None,
         extra_headers: dict[str, str] | None = None,
     ) -> None:
+        super().__init__()
         import openai
 
         # Resolve provider defaults

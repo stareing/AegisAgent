@@ -41,6 +41,7 @@ class MockModelAdapter(BaseModelAdapter):
     """Model adapter that returns pre-configured responses."""
 
     def __init__(self, responses: list[ModelResponse] | None = None) -> None:
+        super().__init__()
         self._responses = list(responses or [])
         self._call_count = 0
 

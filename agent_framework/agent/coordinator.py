@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import time
 import uuid
 from typing import TYPE_CHECKING
@@ -106,7 +107,9 @@ class RunCoordinator:
 
         # Bind run_id to tool executor for correct parent_run_id in spawn
         if hasattr(deps.tool_executor, "set_current_run_id"):
-            deps.tool_executor.set_current_run_id(run_id)
+            maybe = deps.tool_executor.set_current_run_id(run_id)
+            if inspect.isawaitable(maybe):
+                await maybe
 
         logger.info(
             "run.started",
@@ -121,6 +124,15 @@ class RunCoordinator:
 
         # Reset per-run caches
         self._cached_tools_schema = None
+
+        # Begin stateful adapter session for KV cache optimization
+        adapter = deps.model_adapter
+        adapter_stateful = False
+        if hasattr(adapter, "begin_session"):
+            adapter.begin_session(session_id=run_id)
+            adapter_stateful = getattr(adapter, "supports_stateful_session", lambda: False)()
+            if adapter_stateful:
+                logger.info("run.stateful_session_started", run_id=run_id)
         session_started = False
         try:
             # Defensive reset: clear any stale skill state from a prior run
@@ -186,7 +198,15 @@ class RunCoordinator:
                     break
 
                 # Prepare LLM request
-                llm_request = self._prepare_llm_request(
+                # Give executor a fresh session snapshot so spawn can build context seed.
+                if hasattr(deps.tool_executor, "set_current_session_messages"):
+                    maybe = deps.tool_executor.set_current_session_messages(
+                        session_state.get_messages()
+                    )
+                    if inspect.isawaitable(maybe):
+                        await maybe
+
+                llm_request = await self._prepare_llm_request(
                     agent, deps, agent_state,
                     session_state=session_state,
                     effective_config=effective_config,
@@ -299,6 +319,12 @@ class RunCoordinator:
                         )
                 except Exception as e:
                     logger.warning("run.subagent_cancel_failed", run_id=run_id, error=str(e))
+            # End stateful adapter session
+            if hasattr(deps.model_adapter, "end_session"):
+                try:
+                    deps.model_adapter.end_session()
+                except Exception:
+                    pass
             # Always deactivate skill — run-scoped, must not leak
             self._state_ctrl.deactivate_skill(agent_state)
             deps.context_engineer.set_skill_context(None)
@@ -354,8 +380,13 @@ class RunCoordinator:
             adapter = deps.model_adapter
             if hasattr(adapter, "supports_parallel_tool_calls"):
                 try:
-                    val = adapter.supports_parallel_tool_calls()
-                    info["parallel_tool_calls"] = str(bool(val)).lower()
+                    fn = adapter.supports_parallel_tool_calls
+                    # Some tests monkeypatch this with AsyncMock; avoid creating
+                    # un-awaited coroutine objects in sync path.
+                    if not inspect.iscoroutinefunction(fn):
+                        val = fn()
+                        if not inspect.isawaitable(val):
+                            info["parallel_tool_calls"] = str(bool(val)).lower()
                 except Exception:
                     pass
 
@@ -372,7 +403,7 @@ class RunCoordinator:
 
         return info
 
-    def _prepare_llm_request(
+    async def _prepare_llm_request(
         self,
         agent: BaseAgent,
         deps: AgentRuntimeDeps,
@@ -398,13 +429,19 @@ class RunCoordinator:
         if skill_descriptions and not any(s.get("description") for s in skill_descriptions):
             skill_descriptions = []
 
+        runtime_info = self._collect_runtime_info(
+            agent, deps, effective_config, agent_state
+        )
+        if inspect.isawaitable(runtime_info):
+            runtime_info = await runtime_info
+
         context_materials = {
             "agent_config": agent.agent_config,
             "session_state": session_snap,
             "memories": memories,
             "task": task,
             "active_skill": active_skill,
-            "runtime_info": self._collect_runtime_info(agent, deps, effective_config, agent_state),
+            "runtime_info": runtime_info,
             "skill_descriptions": skill_descriptions,
         }
 
@@ -427,17 +464,12 @@ class RunCoordinator:
                 whitelist=[t.meta.name for t in allowed_tools]
             )
 
-        # Estimate tool schema tokens (~4 chars/token)
-        import json
-        tools_token_est = len(json.dumps(self._cached_tools_schema, default=str)) // 4 if self._cached_tools_schema else 0
-
-        # Update context stats with tool schema token count
-        ctx_stats = deps.context_engineer.report_context_stats()
-        if ctx_stats:
-            # Patch tools_schema_tokens into the last stats (coordinator owns this value)
-            deps.context_engineer._last_stats = ctx_stats.model_copy(
-                update={"tools_schema_tokens": tools_token_est}
+        if hasattr(deps.context_engineer, "set_tools_schema_tokens"):
+            tools_token_est = deps.context_engineer.set_tools_schema_tokens(
+                self._cached_tools_schema or []
             )
+        else:
+            tools_token_est = 0
 
         return LLMRequest(
             messages=llm_messages,
