@@ -209,12 +209,16 @@ class AgentFramework:
         except Exception as e:
             logger.warning("subagent_runtime.init_failed", error=str(e))
 
-        # Agent — main agent CAN spawn children (sub-agents can't, enforced by factory)
-        self._agent = agent or DefaultAgent(
-            model_name=self.config.model.default_model_name,
-            temperature=self.config.model.temperature,
-            allow_spawn_children=True,
-        )
+        # Agent — use OrchestratorAgent (orchestration-aware prompt + spawn enabled)
+        # Sub-agents use DefaultAgent with allow_spawn_children=False (enforced by factory)
+        if agent:
+            self._agent = agent
+        else:
+            from agent_framework.agent.orchestrator_agent import OrchestratorAgent
+            self._agent = OrchestratorAgent(
+                model_name=self.config.model.default_model_name,
+                temperature=self.config.model.temperature,
+            )
 
         self._coordinator = RunCoordinator()
         self._setup_done = True

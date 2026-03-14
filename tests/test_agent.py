@@ -181,6 +181,48 @@ class TestDefaultAgent:
 
 
 # =====================================================================
+# OrchestratorAgent
+# =====================================================================
+
+
+class TestOrchestratorAgent:
+
+    def test_default_construction(self):
+        from agent_framework.agent.orchestrator_agent import OrchestratorAgent
+        agent = OrchestratorAgent()
+        assert agent.agent_id == "orchestrator"
+        assert agent.agent_config.allow_spawn_children is True
+        assert agent.agent_config.max_iterations == 30
+
+    def test_orchestrator_prompt_contains_delegation(self):
+        from agent_framework.agent.orchestrator_agent import OrchestratorAgent
+        agent = OrchestratorAgent()
+        prompt = agent.agent_config.system_prompt
+        assert "Orchestrator" in prompt
+        assert "spawn_agent" in prompt
+        assert "Delegate" in prompt or "delegate" in prompt
+
+    @pytest.mark.asyncio
+    async def test_spawn_approved_by_default(self):
+        from agent_framework.agent.orchestrator_agent import OrchestratorAgent
+        from agent_framework.models.subagent import SubAgentSpec
+        agent = OrchestratorAgent()
+        decision = await agent.on_spawn_requested(SubAgentSpec(task_input="test"))
+        assert decision.allowed is True
+
+    def test_custom_model_name(self):
+        from agent_framework.agent.orchestrator_agent import OrchestratorAgent
+        agent = OrchestratorAgent(model_name="gpt-4", temperature=0.3)
+        assert agent.agent_config.model_name == "gpt-4"
+        assert agent.agent_config.temperature == 0.3
+
+    def test_custom_prompt_overrides_default(self):
+        from agent_framework.agent.orchestrator_agent import OrchestratorAgent
+        agent = OrchestratorAgent(system_prompt="Custom orchestrator")
+        assert agent.agent_config.system_prompt == "Custom orchestrator"
+
+
+# =====================================================================
 # ReActAgent
 # =====================================================================
 
