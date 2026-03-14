@@ -279,6 +279,18 @@ class RunCoordinator:
                     deps.memory_manager.end_run_session(outcome)
                 except Exception as e:
                     logger.warning("run.end_session_failed", run_id=run_id, error=str(e))
+            # Cancel any active sub-agents on run exit (B2: cleanup)
+            if deps.sub_agent_runtime:
+                try:
+                    cancelled = await deps.sub_agent_runtime.cancel_all(run_id)
+                    if cancelled > 0:
+                        logger.info(
+                            "run.subagents_cancelled_on_exit",
+                            run_id=run_id,
+                            cancelled=cancelled,
+                        )
+                except Exception as e:
+                    logger.warning("run.subagent_cancel_failed", run_id=run_id, error=str(e))
             # Always deactivate skill — run-scoped, must not leak
             self._state_ctrl.deactivate_skill(agent_state)
             deps.context_engineer.set_skill_context(None)

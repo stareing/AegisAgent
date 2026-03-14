@@ -221,6 +221,27 @@ class TestOrchestratorAgent:
         agent = OrchestratorAgent(system_prompt="Custom orchestrator")
         assert agent.agent_config.system_prompt == "Custom orchestrator"
 
+    def test_prompt_allows_parallel_tool_calls(self):
+        from agent_framework.agent.orchestrator_agent import OrchestratorAgent
+        agent = OrchestratorAgent()
+        prompt = agent.agent_config.system_prompt
+        assert "parallel" in prompt.lower() or "multiple tools" in prompt.lower()
+        # Must NOT say "Call ONE tool at a time" (that's for workers)
+        assert "Call ONE tool at a time" not in prompt
+
+    def test_prompt_has_resource_awareness(self):
+        from agent_framework.agent.orchestrator_agent import OrchestratorAgent
+        agent = OrchestratorAgent()
+        prompt = agent.agent_config.system_prompt
+        assert "timeout" in prompt.lower()
+        assert "iteration" in prompt.lower()
+
+    def test_coordinator_cancels_subagents_on_exit(self):
+        """Coordinator must cancel active sub-agents in finally block."""
+        import inspect
+        source = inspect.getsource(RunCoordinator.run)
+        assert "cancel_all" in source
+
 
 # =====================================================================
 # ReActAgent
