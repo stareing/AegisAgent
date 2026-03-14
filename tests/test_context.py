@@ -468,3 +468,112 @@ class TestContextEngineer:
         seed = engineer.build_spawn_seed([], "query", token_budget=100)
         assert len(seed) >= 1
         assert seed[-1].content == "query"
+
+
+# =====================================================================
+# FrozenPromptPrefix / PromptPrefixManager
+# =====================================================================
+
+
+class TestFrozenPromptPrefix:
+
+    def test_prefix_frozen(self):
+        from agent_framework.models.context import FrozenPromptPrefix
+        prefix = FrozenPromptPrefix(
+            messages=[Message(role="system", content="hello")],
+            prefix_hash="abc",
+        )
+        with pytest.raises(Exception):
+            prefix.prefix_hash = "changed"
+
+    def test_prefix_has_system_message(self):
+        from agent_framework.context.prefix_manager import PromptPrefixManager
+        mgr = PromptPrefixManager()
+        prefix = mgr.get_or_create("You are helpful.")
+        assert len(prefix.messages) == 1
+        assert prefix.messages[0].role == "system"
+        assert "helpful" in prefix.messages[0].content
+
+    def test_prefix_cached_on_same_input(self):
+        from agent_framework.context.prefix_manager import PromptPrefixManager
+        mgr = PromptPrefixManager()
+        p1 = mgr.get_or_create("System prompt A")
+        p2 = mgr.get_or_create("System prompt A")
+        assert p1.prefix_id == p2.prefix_id
+        assert p1.prefix_hash == p2.prefix_hash
+
+    def test_prefix_rotated_on_different_input(self):
+        from agent_framework.context.prefix_manager import PromptPrefixManager
+        mgr = PromptPrefixManager()
+        p1 = mgr.get_or_create("System prompt A")
+        p2 = mgr.get_or_create("System prompt B")
+        assert p1.prefix_hash != p2.prefix_hash
+        assert p2.prefix_epoch == 2
+
+    def test_prefix_includes_skill_addon(self):
+        from agent_framework.context.prefix_manager import PromptPrefixManager
+        mgr = PromptPrefixManager()
+        prefix = mgr.get_or_create("Base prompt", "Skill instructions")
+        assert prefix.includes_skill_addon is True
+        assert "Skill instructions" in prefix.messages[0].content
+
+    def test_prefix_without_skill_addon(self):
+        from agent_framework.context.prefix_manager import PromptPrefixManager
+        mgr = PromptPrefixManager()
+        prefix = mgr.get_or_create("Base prompt")
+        assert prefix.includes_skill_addon is False
+
+    def test_skill_change_triggers_rotation(self):
+        from agent_framework.context.prefix_manager import PromptPrefixManager
+        mgr = PromptPrefixManager()
+        mgr.get_or_create("Base", "Skill A")
+        assert mgr.should_rotate("Base", "Skill B") is True
+        assert mgr.should_rotate("Base", "Skill A") is False
+
+    def test_same_input_deterministic_hash(self):
+        from agent_framework.context.prefix_manager import PromptPrefixManager
+        h1 = PromptPrefixManager._compute_hash("core", "addon")
+        h2 = PromptPrefixManager._compute_hash("core", "addon")
+        assert h1 == h2
+
+    def test_invalidate_forces_rotation(self):
+        from agent_framework.context.prefix_manager import PromptPrefixManager
+        mgr = PromptPrefixManager()
+        mgr.get_or_create("prompt")
+        mgr.invalidate()
+        assert mgr.current_prefix is None
+        assert mgr.should_rotate("prompt") is True
+
+    def test_context_stats_reports_prefix_reuse(self):
+        engineer = ContextEngineer()
+        config = AgentConfig(system_prompt="stable prompt")
+        session = SessionState()
+        state = AgentState(run_id="r1", task="test")
+        materials = {"agent_config": config, "session_state": session, "task": "test"}
+
+        # First call — builds prefix
+        engineer.prepare_context_for_llm(state, materials)
+        stats1 = engineer.report_context_stats()
+
+        # Second call — should reuse prefix
+        engineer.prepare_context_for_llm(state, materials)
+        stats2 = engineer.report_context_stats()
+        assert stats2.prefix_reused is True
+
+    def test_prefix_not_compressed(self):
+        """Frozen prefix must survive compression — only suffix is trimmed."""
+        engineer = ContextEngineer(
+            builder=ContextBuilder(max_context_tokens=200, reserve_for_output=20),
+        )
+        config = AgentConfig(system_prompt="X" * 100)
+        session = SessionState()
+        # Add many messages to force compression
+        for i in range(20):
+            session.append_message(Message(role="user", content=f"msg {i} " + "Y" * 50))
+            session.append_message(Message(role="assistant", content=f"reply {i} " + "Z" * 50))
+        state = AgentState(run_id="r1", task="test")
+        materials = {"agent_config": config, "session_state": session, "task": "q"}
+        messages = engineer.prepare_context_for_llm(state, materials)
+        # System message (prefix) must be first and contain full system prompt
+        assert messages[0].role == "system"
+        assert "X" * 100 in messages[0].content

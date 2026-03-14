@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 from agent_framework.context.builder import ContextBuilder
 from agent_framework.context.compressor import ContextCompressor
+from agent_framework.context.prefix_manager import PromptPrefixManager
 from agent_framework.context.source_provider import ContextSourceProvider
 from agent_framework.models.context import ContextStats
 from agent_framework.models.message import Message
@@ -43,6 +44,7 @@ class ContextEngineer:
         self._source = source_provider or ContextSourceProvider()
         self._builder = builder or ContextBuilder()
         self._compressor = compressor or ContextCompressor()
+        self._prefix_mgr = PromptPrefixManager()
         self._skill_prompt: str | None = None
         self._last_stats = ContextStats()
 
@@ -76,24 +78,26 @@ class ContextEngineer:
         skill_descriptions: list = context_materials.get("skill_descriptions", [])
         skill_catalog = self._source.collect_skill_catalog(skill_descriptions)
         if skill_catalog and not skill_addon:
-            # No active skill — show available skills catalog
             skill_addon = skill_catalog
         elif skill_catalog and skill_addon:
-            # Active skill + catalog — append catalog as reference
             skill_addon = f"{skill_addon}\n\n{skill_catalog}"
 
+        # --- Frozen Prefix (§14.8) ---
+        # system_core + skill_addon form the prefix (identity-stable).
+        # If inputs haven't changed, reuse the cached prefix.
+        prefix = self._prefix_mgr.get_or_create(
+            system_core, skill_addon,
+            token_counter=self._builder.calculate_tokens,
+        )
+        prefix_reused = (prefix.prefix_epoch > 1 or
+                         (self._prefix_mgr.current_prefix is not None
+                          and not self._prefix_mgr.should_rotate(system_core, skill_addon)))
+        system_tokens = prefix.token_estimate
+
+        # --- Suffix: memories + session + input ---
         memory_block = self._source.collect_saved_memory_block(memories)
         session_groups = self._source.collect_session_groups(session_state)
         current_input = self._source.collect_current_input(task)
-
-        # Apply compressor before final build when session history is large.
-        budget = getattr(self._builder, "_max_tokens", 8192) - getattr(
-            self._builder, "_reserve_for_output", 1024
-        )
-
-        # Calculate per-slot token estimates
-        system_msg = Message(role="system", content=system_core)
-        system_tokens = self._builder.calculate_tokens([system_msg])
 
         memory_tokens = 0
         if memory_block:
@@ -106,24 +110,36 @@ class ContextEngineer:
             session_tokens += self._builder.calculate_tokens(g.messages)
 
         input_tokens = self._builder.calculate_tokens([current_input])
+
+        # Budget = total - output_reserve
+        budget = getattr(self._builder, "_max_tokens", 8192) - getattr(
+            self._builder, "_reserve_for_output", 1024
+        )
+        # Prefix is fixed cost — compression only on suffix
         fixed_tokens = system_tokens + memory_tokens + input_tokens
         target_session_tokens = max(0, budget - fixed_tokens)
         session_groups = self._compressor.compress_groups(
             session_groups, target_tokens=target_session_tokens
         )
 
-        # Build context
-        messages = self._builder.build_context(
-            system_core=system_core,
-            skill_addon=skill_addon,
-            memory_block=memory_block,
-            session_groups=session_groups,
-            current_input=current_input,
-        )
+        # Build final context: prefix.messages + suffix
+        messages = list(prefix.messages)  # frozen prefix first
+
+        # Append memory block to system message if present
+        if memory_block:
+            # Extend the system message content with memory block
+            sys_content = messages[0].content or ""
+            messages[0] = Message(role="system", content=f"{sys_content}\n\n{memory_block}")
+
+        # Append session history
+        for group in session_groups:
+            messages.extend(group.messages)
+
+        # Append current input
+        messages.append(current_input)
 
         total_tokens = self._builder.calculate_tokens(messages)
 
-        # Count trimmed groups
         actual_session_msgs = [m for m in messages if m.role not in ("system",) and m != current_input]
         original_session_msgs_count = sum(len(g.messages) for g in session_groups)
         groups_trimmed = max(0, original_session_msgs_count - len(actual_session_msgs))
@@ -135,6 +151,7 @@ class ContextEngineer:
             input_tokens=input_tokens,
             total_tokens=total_tokens,
             groups_trimmed=groups_trimmed,
+            prefix_reused=prefix_reused,
         )
 
         return messages
