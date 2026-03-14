@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import traceback
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from agent_framework.infra.logger import get_logger
 from agent_framework.models.agent import (
@@ -77,6 +77,7 @@ class AgentLoop:
         effective_config: EffectiveRunConfig,
     ) -> IterationResult:
         idx = agent_state.iteration_count
+        llm_input_preview = self._summarize_llm_input(llm_request.messages)
 
         await agent.on_iteration_started(idx, agent_state)
         logger.info(
@@ -122,6 +123,7 @@ class AgentLoop:
             )
             return IterationResult(
                 iteration_index=idx,
+                llm_input_preview=llm_input_preview,
                 model_response=model_response,
                 stop_signal=stop_signal,
             )
@@ -169,6 +171,7 @@ class AgentLoop:
 
         return IterationResult(
             iteration_index=idx,
+            llm_input_preview=llm_input_preview,
             model_response=model_response,
             tool_results=tool_results,
             tool_execution_meta=tool_metas,
@@ -291,13 +294,18 @@ class AgentLoop:
                 prev = agent_state.iteration_history[-1] if agent_state.iteration_history else None
                 prev_answer = None
                 if prev:
-                    if prev.model_response and prev.model_response.content:
-                        prev_answer = prev.model_response.content
-                    elif prev.tool_results:
-                        # Tool call iteration: answer is in the tool result output
-                        successful = [tr for tr in prev.tool_results if tr.success and tr.output]
-                        if successful:
-                            prev_answer = str(successful[0].output)
+                    prev_content = prev.model_response.content if prev.model_response else None
+                    prev_tool_count = len(prev.tool_results)
+                    prev_success = [tr for tr in prev.tool_results if tr.success and tr.output]
+                    logger.info(
+                        "stop_check.extracting_prev_answer "
+                        "has_prev=%s content=%s tool_results=%d successful=%d",
+                        True, repr(prev_content)[:50], prev_tool_count, len(prev_success),
+                    )
+                    if prev_content:
+                        prev_answer = prev_content
+                    elif prev_success:
+                        prev_answer = str(prev_success[0].output)
 
                 if prev_answer:
                     model_response.content = prev_answer
@@ -369,6 +377,43 @@ class AgentLoop:
                 dropped_tools=[tc.function_name for tc in dropped],
                 dropped_count=len(dropped),
             )
+
+    @staticmethod
+    def _summarize_llm_input(messages: list[Any]) -> str:
+        """Build a concise, deterministic preview of model input messages."""
+        if not messages:
+            return "(empty)"
+
+        tail = messages[-6:]
+        lines: list[str] = []
+        for m in tail:
+            role = str(getattr(m, "role", "unknown"))
+            content = str(getattr(m, "content", "") or "")
+            tool_calls = getattr(m, "tool_calls", None)
+            tool_call_id = getattr(m, "tool_call_id", None)
+            name = getattr(m, "name", None)
+
+            if content and len(content) > 180:
+                content = content[:180] + "... [truncated]"
+
+            extra = []
+            if name:
+                extra.append(f"name={name}")
+            if tool_call_id:
+                extra.append(f"tool_call_id={tool_call_id}")
+            if tool_calls:
+                try:
+                    tc_names = [tc.function_name for tc in tool_calls]
+                except Exception:
+                    tc_names = ["<unknown>"]
+                extra.append(f"tool_calls={','.join(tc_names)}")
+
+            suffix = f" ({'; '.join(extra)})" if extra else ""
+            lines.append(f"[{role}]{suffix} {content}".rstrip())
+
+        if len(messages) > len(tail):
+            lines.insert(0, f"... {len(messages) - len(tail)} earlier messages omitted ...")
+        return "\n".join(lines)
 
     @staticmethod
     def _tool_call_signature(tool_calls: list[ToolCallRequest]) -> str:
