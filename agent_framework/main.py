@@ -45,6 +45,7 @@ def _yellow(t: str) -> str: return _c("33", t)
 def _cyan(t: str) -> str:   return _c("36", t)
 def _red(t: str) -> str:    return _c("31", t)
 def _magenta(t: str) -> str: return _c("35", t)
+def _blue(t: str) -> str:    return _c("34", t)
 
 
 def _rl_wrap(ansi: str) -> str:
@@ -932,6 +933,10 @@ def _print_result(result: Any) -> None:
         print(f"\n  {_bold('执行轨迹:')}")
         for it in result.iteration_history:
             print(f"  {_dim(f'[Iteration {it.iteration_index + 1}]')}")
+            if getattr(it, "llm_input_preview", None):
+                print(f"    {_blue('模型输入:')}")
+                for line in it.llm_input_preview.splitlines():
+                    print(f"      {line}")
             resp = it.model_response
             if resp and resp.content:
                 preview = resp.content if len(resp.content) <= 500 else resp.content[:500] + "\n... [truncated]"

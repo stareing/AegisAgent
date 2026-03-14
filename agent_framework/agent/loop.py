@@ -298,9 +298,11 @@ class AgentLoop:
                     prev_tool_count = len(prev.tool_results)
                     prev_success = [tr for tr in prev.tool_results if tr.success and tr.output]
                     logger.info(
-                        "stop_check.extracting_prev_answer "
-                        "has_prev=%s content=%s tool_results=%d successful=%d",
-                        True, repr(prev_content)[:50], prev_tool_count, len(prev_success),
+                        "stop_check.extracting_prev_answer",
+                        has_prev=True,
+                        content_preview=repr(prev_content)[:50],
+                        tool_results_count=prev_tool_count,
+                        successful_count=len(prev_success),
                     )
                     if prev_content:
                         prev_answer = prev_content
