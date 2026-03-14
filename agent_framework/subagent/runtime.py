@@ -219,6 +219,141 @@ class SubAgentRuntime:
         )
         return result
 
+    async def spawn_async(
+        self, spec: SubAgentSpec, parent_agent: Any
+    ) -> str:
+        """Spawn a sub-agent without waiting. Returns spawn_id immediately.
+
+        Uses scheduler.submit() (non-blocking) instead of schedule() (blocking).
+        Call collect_result(spawn_id) later to get the result.
+        """
+        if not spec.spawn_id:
+            spec.spawn_id = uuid.uuid4().hex[:12]
+
+        parent_id = getattr(parent_agent, "agent_id", "unknown") if parent_agent else "none"
+
+        logger.info(
+            "subagent.spawning_async",
+            spawn_id=spec.spawn_id,
+            parent_agent_id=parent_id,
+            task_input=spec.task_input[:150],
+        )
+
+        task_record = self._scheduler.allocate_task_id(
+            spec.parent_run_id, spec.spawn_id
+        )
+
+        handle = SubAgentHandle(
+            sub_agent_id=f"sub_{spec.spawn_id}",
+            spawn_id=spec.spawn_id,
+            parent_run_id=spec.parent_run_id,
+            status="PENDING",
+            created_at=datetime.now(timezone.utc),
+        )
+        self._active[spec.spawn_id] = handle
+
+        sub_agent, sub_deps = self._factory.create_agent_and_deps(
+            spec, parent_agent
+        )
+
+        if spec.context_seed is None:
+            spec.context_seed = self._parent_deps.context_engineer.build_spawn_seed(
+                session_messages=[], query=spec.task_input,
+                token_budget=spec.token_budget,
+            )
+
+        initial_session_messages = list(spec.context_seed or [])
+        if (
+            initial_session_messages
+            and initial_session_messages[-1].role == "user"
+            and (initial_session_messages[-1].content or "") == spec.task_input
+        ):
+            initial_session_messages = initial_session_messages[:-1]
+
+        coordinator = self._coordinator
+        if coordinator is None:
+            from agent_framework.agent.coordinator import RunCoordinator
+            coordinator = RunCoordinator()
+
+        async def _run() -> SubAgentResult:
+            child_run_id = str(uuid.uuid4())
+            task_record.child_run_id = child_run_id
+            task_record.status = SubAgentTaskStatus.RUNNING
+            try:
+                run_result = await coordinator.run(
+                    sub_agent, sub_deps, spec.task_input,
+                    initial_session_messages=initial_session_messages,
+                )
+                task_record.status = (
+                    SubAgentTaskStatus.COMPLETED if run_result.success
+                    else SubAgentTaskStatus.FAILED
+                )
+                return SubAgentResult(
+                    spawn_id=spec.spawn_id, success=run_result.success,
+                    final_answer=run_result.final_answer, error=run_result.error,
+                    usage=run_result.usage, iterations_used=run_result.iterations_used,
+                )
+            except Exception as e:
+                task_record.status = SubAgentTaskStatus.FAILED
+                return SubAgentResult(
+                    spawn_id=spec.spawn_id, success=False, error=str(e),
+                )
+            finally:
+                self._active.pop(spec.spawn_id, None)
+
+        # submit() returns immediately — task runs in background
+        self._scheduler.submit(
+            handle, _run(), deadline_ms=spec.deadline_ms,
+            task_record=task_record,
+        )
+
+        logger.info(
+            "subagent.async_submitted",
+            spawn_id=spec.spawn_id,
+            task_id=task_record.subagent_task_id,
+        )
+        return spec.spawn_id
+
+    async def collect_result(
+        self, spawn_id: str, wait: bool = True
+    ) -> SubAgentResult | None:
+        """Collect result of an async sub-agent.
+
+        Args:
+            spawn_id: The spawn_id returned by spawn_async.
+            wait: If True, block until complete. If False, return None if still running.
+
+        Returns:
+            SubAgentResult if complete, None if still running (wait=False only).
+        """
+        handle = self._active.get(spawn_id)
+
+        # Already completed and cleaned up — check scheduler results
+        if handle is None:
+            if spawn_id in self._scheduler._results:
+                return self._scheduler._results.pop(spawn_id)
+            # Check if task exists but already collected
+            return SubAgentResult(
+                spawn_id=spawn_id, success=False,
+                error=f"No active sub-agent with spawn_id={spawn_id}",
+            )
+
+        if not wait:
+            # Non-blocking check: is it done?
+            task = self._scheduler._tasks.get(spawn_id)
+            if task is not None and not task.done():
+                return None  # Still running
+            # Done — collect
+            if spawn_id in self._scheduler._results:
+                self._active.pop(spawn_id, None)
+                return self._scheduler._results.pop(spawn_id)
+            return None
+
+        # Blocking: await the scheduler result
+        result = await self._scheduler.await_result(handle)
+        self._active.pop(spawn_id, None)
+        return result
+
     def get_active_children(self, parent_run_id: str) -> list[SubAgentHandle]:
         """Return active children. This is the SOLE truth source (v2.6.3 §39)."""
         return [

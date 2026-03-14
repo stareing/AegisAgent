@@ -1,7 +1,11 @@
-"""Built-in tool: spawn_agent
+"""Built-in tools: spawn_agent + check_spawn_result
 
 Allows agents to spawn sub-agents for task delegation.
-Registered as subagent::spawn_agent in the tool catalog.
+Registered as subagent::spawn_agent and subagent::check_spawn_result.
+
+Two modes:
+- wait=True (default): synchronous — blocks until child completes, returns DelegationSummary
+- wait=False: asynchronous — returns spawn_id immediately, use check_spawn_result later
 """
 
 from __future__ import annotations
@@ -13,7 +17,10 @@ from agent_framework.tools.decorator import tool
 
 @tool(
     name="spawn_agent",
-    description="Spawn a sub-agent to handle a specific sub-task. The sub-agent runs independently and returns a result.",
+    description=(
+        "Spawn a sub-agent to handle a specific sub-task. "
+        "Set wait=false to run asynchronously and collect the result later with check_spawn_result."
+    ),
     category="subagent",
     require_confirm=False,
     source="subagent",
@@ -27,6 +34,7 @@ async def spawn_agent(
     token_budget: int = 4096,
     max_iterations: int = 10,
     deadline_ms: int = 60000,
+    wait: bool = True,
 ) -> dict:
     """Spawn a sub-agent to handle a specific sub-task.
 
@@ -39,12 +47,40 @@ async def spawn_agent(
         token_budget: Maximum token budget for child context seed.
         max_iterations: Child run max iterations.
         deadline_ms: Child execution deadline in milliseconds.
+        wait: If True (default), block until sub-agent completes. If False, return spawn_id immediately.
 
     Returns:
-        DelegationSummary dict (not full trace, per section 14.6).
+        wait=True: DelegationSummary dict.
+        wait=False: {"spawn_id": "...", "status": "PENDING"} handle.
     """
-    # Schema placeholder — actual execution routed through ToolExecutor -> DelegationExecutor
     raise RuntimeError(
         "spawn_agent should not be called directly. "
+        "It must be routed through the ToolExecutor."
+    )
+
+
+@tool(
+    name="check_spawn_result",
+    description="Check or collect the result of an async sub-agent. Use after spawn_agent(wait=false).",
+    category="subagent",
+    require_confirm=False,
+    source="subagent",
+)
+async def check_spawn_result(
+    spawn_id: str,
+    wait: bool = True,
+) -> dict:
+    """Check or wait for an async sub-agent result.
+
+    Args:
+        spawn_id: The spawn_id returned by spawn_agent(wait=false).
+        wait: If True (default), block until the sub-agent completes. If False, return current status.
+
+    Returns:
+        If complete: DelegationSummary dict with status, summary, artifacts.
+        If still running (wait=False): {"spawn_id": "...", "status": "RUNNING"}.
+    """
+    raise RuntimeError(
+        "check_spawn_result should not be called directly. "
         "It must be routed through the ToolExecutor."
     )

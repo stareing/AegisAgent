@@ -104,6 +104,59 @@ class DelegationExecutor:
         )
         return await self._sub_agent_runtime.spawn(spec, parent_agent)
 
+    async def delegate_to_subagent_async(
+        self, spec: SubAgentSpec, parent_agent: Any
+    ) -> str:
+        """Start a sub-agent asynchronously. Returns spawn_id without waiting.
+
+        Same permission checks as delegate_to_subagent, but calls
+        SubAgentRuntime.spawn_async() which submits without blocking.
+        Use collect_subagent_result() to get the result later.
+        """
+        parent_id = getattr(parent_agent, "agent_id", "unknown") if parent_agent else "none"
+
+        if self._sub_agent_runtime is None:
+            raise RuntimeError("SubAgentRuntime not configured")
+
+        # Same permission checks as synchronous path
+        if parent_agent is not None and hasattr(parent_agent, "on_spawn_requested"):
+            spawn_decision = await parent_agent.on_spawn_requested(spec)
+            if not spawn_decision.allowed:
+                raise RuntimeError(
+                    f"PERMISSION_DENIED: {spawn_decision.reason or 'spawn rejected by parent agent hook'}"
+                )
+
+        if parent_agent is not None:
+            config = getattr(parent_agent, "agent_config", None)
+            if config is not None and not getattr(config, "allow_spawn_children", True):
+                raise RuntimeError("PERMISSION_DENIED: This agent is not allowed to spawn children")
+
+        logger.info(
+            "delegation.subagent.async_approved",
+            parent_agent_id=parent_id,
+            task_input=spec.task_input[:80],
+        )
+        return await self._sub_agent_runtime.spawn_async(spec, parent_agent)
+
+    async def collect_subagent_result(
+        self, spawn_id: str, wait: bool = True
+    ) -> SubAgentResult | None:
+        """Collect result of an async sub-agent.
+
+        Args:
+            spawn_id: The spawn_id returned by delegate_to_subagent_async.
+            wait: If True, block until complete. If False, return None if still running.
+
+        Returns:
+            SubAgentResult if complete, None if still running (wait=False).
+        """
+        if self._sub_agent_runtime is None:
+            return SubAgentResult(
+                spawn_id=spawn_id, success=False,
+                error="SubAgentRuntime not configured",
+            )
+        return await self._sub_agent_runtime.collect_result(spawn_id, wait=wait)
+
     def set_a2a_adapter(self, adapter: Any) -> None:
         """Wire the A2A client adapter for delegation."""
         self._a2a_adapter = adapter

@@ -361,3 +361,183 @@ class TestSubAgentFactory:
         assert len(snapshot) == 1
         assert snapshot[0].memory_id == "pm1"
         deps.memory_manager.list_memories.assert_called_once_with("parent", None)
+
+
+# =====================================================================
+# Async spawn + collect
+# =====================================================================
+
+
+class TestAsyncSpawn:
+    """Tests for asynchronous sub-agent spawn and result collection."""
+
+    def _make_scheduler(self, max_concurrent=3, max_per_run=5):
+        return SubAgentScheduler(max_concurrent=max_concurrent, max_per_run=max_per_run)
+
+    @pytest.mark.asyncio
+    async def test_submit_returns_immediately(self):
+        """submit() must return handle without blocking for result."""
+        sched = self._make_scheduler()
+        handle = SubAgentHandle(
+            spawn_id="s1", parent_run_id="r1", status="PENDING",
+        )
+
+        async def _slow_task():
+            await asyncio.sleep(10)  # would block if awaited
+            return SubAgentResult(spawn_id="s1", success=True, final_answer="done")
+
+        returned_handle = sched.submit(handle, _slow_task(), deadline_ms=60000)
+        # Must return immediately without waiting for _slow_task
+        assert returned_handle.spawn_id == "s1"
+        assert "s1" in sched._tasks
+        # Clean up
+        await sched.cancel("s1")
+
+    @pytest.mark.asyncio
+    async def test_submit_then_await_result(self):
+        """submit() + await_result() must return the sub-agent result."""
+        sched = self._make_scheduler()
+        handle = SubAgentHandle(
+            spawn_id="s2", parent_run_id="r1", status="PENDING",
+        )
+
+        async def _fast_task():
+            return SubAgentResult(spawn_id="s2", success=True, final_answer="42")
+
+        sched.submit(handle, _fast_task(), deadline_ms=5000)
+        result = await sched.await_result(handle)
+        assert result.success is True
+        assert result.final_answer == "42"
+
+    @pytest.mark.asyncio
+    async def test_runtime_spawn_async_and_collect(self):
+        """spawn_async returns spawn_id, collect_result returns result."""
+        from agent_framework.models.message import TokenUsage
+        from agent_framework.models.agent import AgentRunResult, StopSignal, StopReason
+        from agent_framework.subagent.runtime import SubAgentRuntime
+
+        mock_deps = MagicMock()
+        mock_deps.context_engineer.build_spawn_seed.return_value = []
+        mock_deps.tool_registry.list_tools.return_value = []
+        mock_deps.tool_registry.export_schemas.return_value = []
+
+        runtime = SubAgentRuntime(parent_deps=mock_deps, max_concurrent=3, max_per_run=5)
+
+        # Use real AgentRunResult to avoid serialization issues
+        mock_run_result = AgentRunResult(
+            run_id="child_run",
+            success=True,
+            final_answer="async result",
+            stop_signal=StopSignal(reason=StopReason.LLM_STOP),
+            usage=TokenUsage(total_tokens=100),
+            iterations_used=1,
+        )
+
+        mock_coordinator = AsyncMock()
+        mock_coordinator.run = AsyncMock(return_value=mock_run_result)
+        runtime._coordinator = mock_coordinator
+
+        mock_agent = MagicMock()
+        mock_agent.agent_id = "sub_test"
+        mock_sub_deps = MagicMock()
+        mock_sub_deps.tool_registry.list_tools.return_value = []
+        runtime._factory.create_agent_and_deps = MagicMock(
+            return_value=(mock_agent, mock_sub_deps)
+        )
+
+        spec = SubAgentSpec(
+            parent_run_id="r1",
+            task_input="do something async",
+            deadline_ms=5000,
+        )
+
+        # spawn_async returns spawn_id without blocking
+        spawn_id = await runtime.spawn_async(spec, parent_agent=None)
+        assert isinstance(spawn_id, str)
+        assert len(spawn_id) > 0
+
+        # collect_result with wait=True returns the result
+        result = await runtime.collect_result(spawn_id, wait=True)
+        assert result is not None
+        assert result.success is True
+        assert result.final_answer == "async result"
+
+    @pytest.mark.asyncio
+    async def test_collect_result_nonblocking_while_running(self):
+        """collect_result(wait=False) returns None while sub-agent is still running."""
+        from agent_framework.models.message import TokenUsage
+        from agent_framework.models.agent import AgentRunResult, StopSignal, StopReason
+        from agent_framework.subagent.runtime import SubAgentRuntime
+
+        mock_deps = MagicMock()
+        mock_deps.context_engineer.build_spawn_seed.return_value = []
+        mock_deps.tool_registry.list_tools.return_value = []
+        mock_deps.tool_registry.export_schemas.return_value = []
+
+        runtime = SubAgentRuntime(parent_deps=mock_deps, max_concurrent=3, max_per_run=5)
+
+        async def _slow_run(*args, **kwargs):
+            await asyncio.sleep(5)
+            return AgentRunResult(
+                run_id="child", success=True, final_answer="slow",
+                stop_signal=StopSignal(reason=StopReason.LLM_STOP),
+                usage=TokenUsage(total_tokens=50), iterations_used=1,
+            )
+
+        mock_coordinator = AsyncMock()
+        mock_coordinator.run = _slow_run
+        runtime._coordinator = mock_coordinator
+
+        mock_agent = MagicMock()
+        mock_agent.agent_id = "sub_slow"
+        mock_sub_deps = MagicMock()
+        mock_sub_deps.tool_registry.list_tools.return_value = []
+        runtime._factory.create_agent_and_deps = MagicMock(
+            return_value=(mock_agent, mock_sub_deps)
+        )
+
+        spec = SubAgentSpec(
+            parent_run_id="r1", task_input="slow task", deadline_ms=10000,
+        )
+
+        spawn_id = await runtime.spawn_async(spec, parent_agent=None)
+
+        # Non-blocking check: should be None (still running)
+        poll = await runtime.collect_result(spawn_id, wait=False)
+        assert poll is None
+
+        # Clean up
+        await runtime._scheduler.cancel(spawn_id)
+
+    @pytest.mark.asyncio
+    async def test_delegation_executor_async_flow(self):
+        """DelegationExecutor async spawn + collect produces DelegationSummary."""
+        from agent_framework.tools.delegation import DelegationExecutor
+
+        mock_runtime = AsyncMock()
+        mock_runtime.spawn_async = AsyncMock(return_value="sp_123")
+        mock_runtime.collect_result = AsyncMock(
+            return_value=SubAgentResult(
+                spawn_id="sp_123", success=True, final_answer="delegated result",
+            )
+        )
+
+        executor = DelegationExecutor(sub_agent_runtime=mock_runtime)
+
+        spec = SubAgentSpec(
+            parent_run_id="r1", task_input="async delegation",
+        )
+
+        # Async spawn
+        spawn_id = await executor.delegate_to_subagent_async(spec, parent_agent=None)
+        assert spawn_id == "sp_123"
+
+        # Collect
+        result = await executor.collect_subagent_result("sp_123", wait=True)
+        assert result is not None
+        assert result.success is True
+
+        # Summarize
+        summary = DelegationExecutor.summarize_result(result)
+        assert "COMPLETED" in summary.status
+        assert "delegated result" in summary.summary

@@ -232,16 +232,19 @@ class ToolExecutor:
         if source == "subagent":
             if self._delegation is None:
                 raise RuntimeError("DelegationExecutor not configured")
+
+            # Route check_spawn_result separately
+            if tool_name == "check_spawn_result":
+                return await self._handle_check_spawn_result(validated_arguments)
+
             from agent_framework.models.subagent import MemoryScope, SpawnMode, SubAgentSpec
             from agent_framework.context.builder import ContextBuilder
 
             # Map all spawn_agent params (doc 14.6)
             mode_str = validated_arguments.get("mode", "ephemeral").upper()
             scope_str = validated_arguments.get("memory_scope", "isolated").upper()
+            wait = validated_arguments.get("wait", True)
             parent_agent = self._parent_agent_getter() if self._parent_agent_getter else None
-            # Use actual run_id for quota tracking (not agent_id).
-            # Guard: if _current_run_id was never set (bypass of RunCoordinator),
-            # fall back to agent_id to avoid empty-string quota key.
             parent_run_id = self._current_run_id
             if not parent_run_id and parent_agent and hasattr(parent_agent, "agent_id"):
                 parent_run_id = parent_agent.agent_id
@@ -257,7 +260,6 @@ class ToolExecutor:
                 max_iterations=int(validated_arguments.get("max_iterations", 10)),
                 deadline_ms=int(validated_arguments.get("deadline_ms", 60000)),
             )
-            # Build child context seed from current parent session unless explicitly provided.
             if spec.context_seed is None:
                 seed_builder = ContextBuilder()
                 spec.context_seed = seed_builder.build_spawn_seed(
@@ -272,10 +274,23 @@ class ToolExecutor:
                 task_input=spec.task_input[:150],
                 mode=mode_str,
                 memory_scope=scope_str,
+                wait=wait,
                 parent_agent_id=parent_id,
-                allow_spawn=getattr(getattr(parent_agent, "agent_config", None), "allow_spawn_children", "N/A"),
             )
 
+            if not wait:
+                # Async mode: submit and return spawn_id immediately
+                spawn_id = await self._delegation.delegate_to_subagent_async(
+                    spec, parent_agent
+                )
+                logger.info("tool.routing.subagent.async_submitted", spawn_id=spawn_id)
+                return {
+                    "spawn_id": spawn_id,
+                    "status": "PENDING",
+                    "message": "Sub-agent started asynchronously. Use check_spawn_result to collect the result.",
+                }
+
+            # Sync mode: block until complete (existing behavior)
             result = await self._delegation.delegate_to_subagent(spec, parent_agent)
 
             logger.info(
@@ -291,6 +306,21 @@ class ToolExecutor:
             return summary.model_dump()
 
         raise RuntimeError(f"Unknown tool source: {source}")
+
+    async def _handle_check_spawn_result(self, arguments: dict) -> dict:
+        """Handle check_spawn_result tool call."""
+        spawn_id = arguments.get("spawn_id", "")
+        wait = arguments.get("wait", True)
+
+        result = await self._delegation.collect_subagent_result(spawn_id, wait=wait)
+
+        if result is None:
+            # Still running (non-blocking check)
+            return {"spawn_id": spawn_id, "status": "RUNNING"}
+
+        from agent_framework.tools.delegation import DelegationExecutor
+        summary = DelegationExecutor.summarize_result(result)
+        return summary.model_dump()
 
     def _handle_tool_error(
         self, tool_name: str, error: Exception, entry: ToolEntry | None = None, start: float = 0.0

@@ -32,6 +32,7 @@ Bypass prohibition (v2.5.2 §24):
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from agent_framework.adapters.model.base_adapter import BaseModelAdapter
@@ -481,6 +482,7 @@ class AgentFramework:
         task: str,
         initial_session_messages: list[Message] | None = None,
         user_id: str | None = None,
+        cancel_event: asyncio.Event | None = None,
     ) -> AgentRunResult:
         """Run the agent on a task.
 
@@ -490,6 +492,8 @@ class AgentFramework:
                 the session so the model sees multi-turn context. The ContextBuilder
                 automatically trims older messages when the token budget is tight.
             user_id: Optional end-user identity for memory namespace isolation.
+            cancel_event: External cancellation signal. When set, the coordinator
+                stops at the next iteration boundary with USER_CANCEL.
         """
         if not self._setup_done:
             self.setup()
@@ -499,6 +503,7 @@ class AgentFramework:
             task,
             initial_session_messages=initial_session_messages,
             user_id=user_id,
+            cancel_event=cancel_event,
         )
 
     async def shutdown(self) -> None:

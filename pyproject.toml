@@ -9,6 +9,7 @@ dependencies = [
     "structlog>=23.0",
     "blinker>=1.6",
     "litellm>=1.0",
+    "textual>=0.59",
 ]
 
 [project.optional-dependencies]
