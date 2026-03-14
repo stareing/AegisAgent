@@ -62,14 +62,40 @@ pytest tests/
 
 ### Session Modes (Token Optimization)
 
-| Mode | Mechanism | Token per round |
-|------|-----------|----------------|
-| **STATELESS** (default) | Full messages every call | ~2700 → ~2900 → ~3100 |
-| **STATEFUL** | First full, then delta only | ~2700 → ~100 → ~150 |
+Controlled via config:
+```json
+{"model": {"session_mode": "stateless"}}
+{"model": {"session_mode": "stateful"}}
+```
 
-- STATELESS: compression active (sliding window, tool result summary)
-- STATEFUL: compression skipped (provider holds full context, delta indexing preserved)
-- Tool schemas cached per-run (not recomputed per iteration)
+#### Mode A: STATELESS (default, all providers)
+
+Every round sends full messages (system + history + input):
+
+```
+Round 1: [system + user]                     → ~2700 tokens
+Round 2: [system + user + asst + user]       → ~2900 tokens
+Round 3: [system + full history + user]      → ~3100 tokens
+         ↑ linear growth, compression trims old messages when over budget
+```
+
+#### Mode B: STATEFUL (first full, then delta only)
+
+First round sends everything; subsequent rounds send only new messages:
+
+```
+Round 1: [system + user]                     → ~2700 tokens
+Round 2: [assistant + user]                  →  ~100 tokens  (96% saved)
+Round 3: [assistant + user]                  →   ~50 tokens
+         ↑ near-constant, no compression needed
+```
+
+| | STATELESS | STATEFUL |
+|--|-----------|----------|
+| Token trend | Linear growth | Near-constant |
+| Compression | Active (sliding window) | Skipped |
+| Compatibility | All providers | Requires server-side context |
+| Best for | General, short conversations | Long multi-turn, token-sensitive |
 
 ### Skills (SKILL.md)
 - File-based skills with YAML frontmatter: `skills/<name>/SKILL.md`
