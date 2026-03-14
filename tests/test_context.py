@@ -621,6 +621,38 @@ class TestFrozenPromptPrefix:
         assert result[0].role == "assistant"
         assert result[1].content == "1+1"
 
+    def test_stateful_session_skips_compression(self):
+        """In stateful mode, compression must be skipped to preserve delta indexing."""
+        engineer = ContextEngineer(
+            builder=ContextBuilder(max_context_tokens=200, reserve_for_output=20),
+        )
+        config = AgentConfig(system_prompt="sys")
+        session = SessionState()
+        # Add enough messages to trigger compression in stateless mode
+        for i in range(20):
+            session.append_message(Message(role="user", content=f"msg {i} " + "Y" * 50))
+            session.append_message(Message(role="assistant", content=f"reply {i} " + "Z" * 50))
+        state = AgentState(run_id="r1", task="test")
+
+        # STATELESS: compression should trim messages
+        materials_stateless = {
+            "agent_config": config, "session_state": session,
+            "task": "q", "stateful_session": False,
+        }
+        msgs_stateless = engineer.prepare_context_for_llm(state, materials_stateless)
+        stats_stateless = engineer.report_context_stats()
+
+        # STATEFUL: compression should be skipped, all session messages kept
+        materials_stateful = {
+            "agent_config": config, "session_state": session,
+            "task": "q", "stateful_session": True,
+        }
+        msgs_stateful = engineer.prepare_context_for_llm(state, materials_stateful)
+
+        # Stateful should have MORE messages (no trimming)
+        assert len(msgs_stateful) > len(msgs_stateless)
+        assert stats_stateless.groups_trimmed > 0 or len(msgs_stateless) < len(msgs_stateful)
+
     def test_prefix_not_compressed(self):
         """Frozen prefix must survive compression — only suffix is trimmed."""
         engineer = ContextEngineer(

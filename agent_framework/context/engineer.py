@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 from agent_framework.context.builder import ContextBuilder
@@ -108,6 +109,7 @@ class ContextEngineer:
         session_tokens = 0
         for g in session_groups:
             session_tokens += self._builder.calculate_tokens(g.messages)
+        original_session_msgs_count = sum(len(g.messages) for g in session_groups)
 
         input_tokens = self._builder.calculate_tokens([current_input])
 
@@ -115,12 +117,17 @@ class ContextEngineer:
         budget = getattr(self._builder, "_max_tokens", 8192) - getattr(
             self._builder, "_reserve_for_output", 1024
         )
-        # Prefix is fixed cost — compression only on suffix
-        fixed_tokens = system_tokens + memory_tokens + input_tokens
-        target_session_tokens = max(0, budget - fixed_tokens)
-        session_groups = self._compressor.compress_groups(
-            session_groups, target_tokens=target_session_tokens
-        )
+
+        # Compression: only in STATELESS mode.
+        # In STATEFUL mode, provider keeps full context — compression would
+        # break delta indexing (sent_count offset mismatch after compression).
+        is_stateful = context_materials.get("stateful_session", False)
+        if not is_stateful:
+            fixed_tokens = system_tokens + memory_tokens + input_tokens
+            target_session_tokens = max(0, budget - fixed_tokens)
+            session_groups = self._compressor.compress_groups(
+                session_groups, target_tokens=target_session_tokens
+            )
 
         # Build final context: prefix.messages + suffix
         messages = list(prefix.messages)  # frozen prefix first
@@ -141,7 +148,6 @@ class ContextEngineer:
         total_tokens = self._builder.calculate_tokens(messages)
 
         actual_session_msgs = [m for m in messages if m.role not in ("system",) and m != current_input]
-        original_session_msgs_count = sum(len(g.messages) for g in session_groups)
         groups_trimmed = max(0, original_session_msgs_count - len(actual_session_msgs))
 
         self._last_stats = ContextStats(
@@ -170,3 +176,11 @@ class ContextEngineer:
 
     def report_context_stats(self) -> ContextStats:
         return self._last_stats
+
+    def set_tools_schema_tokens(self, tools_schema: list[dict]) -> int:
+        """Attach tool-schema token estimate to latest context stats."""
+        token_est = len(json.dumps(tools_schema or [], default=str)) // 4
+        self._last_stats = self._last_stats.model_copy(
+            update={"tools_schema_tokens": token_est}
+        )
+        return token_est

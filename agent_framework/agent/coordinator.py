@@ -435,6 +435,14 @@ class RunCoordinator:
         if inspect.isawaitable(runtime_info):
             runtime_info = await runtime_info
 
+        # Check if adapter is in stateful session mode
+        adapter_stateful = (
+            hasattr(deps.model_adapter, "supports_stateful_session")
+            and hasattr(deps.model_adapter, "_session")
+            and deps.model_adapter._session.active
+            and deps.model_adapter.supports_stateful_session()
+        )
+
         context_materials = {
             "agent_config": agent.agent_config,
             "session_state": session_snap,
@@ -443,6 +451,7 @@ class RunCoordinator:
             "active_skill": active_skill,
             "runtime_info": runtime_info,
             "skill_descriptions": skill_descriptions,
+            "stateful_session": adapter_stateful,
         }
 
         # Build LLM context
