@@ -218,6 +218,7 @@ class AgentFramework:
             self._agent = OrchestratorAgent(
                 model_name=self.config.model.default_model_name,
                 temperature=self.config.model.temperature,
+                allow_spawn_children=True,
             )
 
         self._coordinator = RunCoordinator()

@@ -32,6 +32,7 @@ class OrchestratorAgent(BaseAgent):
         model_name: str = "gpt-3.5-turbo",
         max_iterations: int = 30,
         temperature: float = 0.7,
+        allow_spawn_children: bool = True,
     ) -> None:
         config = AgentConfig(
             agent_id=agent_id,
@@ -39,7 +40,7 @@ class OrchestratorAgent(BaseAgent):
             model_name=model_name,
             max_iterations=max_iterations,
             temperature=temperature,
-            allow_spawn_children=True,
+            allow_spawn_children=allow_spawn_children,
         )
         super().__init__(config)
 
