@@ -110,68 +110,89 @@ python -m agent_framework.main --config config/anthropic.json
 
 #### 方案 A：STATELESS（默认，兼容所有 provider）
 
-每轮向模型发送完整 messages 列表，包含系统提示 + 全部历史 + 当前输入：
+每轮向模型发送完整 messages 列表：
 
 ```
-Round 1 请求体:
-  [system: 完整系统提示]              ← ~2000 tokens
-  [user: "你好"]                      ← ~5 tokens
-  总计: ~2700 tokens (含工具 schema)
-
-Round 2 请求体:
-  [system: 完整系统提示]              ← 重复发送
-  [user: "你好"]                      ← 重复发送
-  [assistant: "你好呀！"]             ← 历史
-  [user: "1+1等于"]                   ← 当前输入
-  总计: ~2900 tokens
-
-Round 3 请求体:
-  [system: 完整系统提示]              ← 重复发送
-  [user: "你好"]                      ← 重复发送
-  [assistant: "你好呀！"]             ← 重复发送
-  [user: "1+1等于"]                   ← 重复发送
-  [assistant: "等于2"]               ← 历史
-  [user: "再见"]                      ← 当前输入
-  总计: ~3100 tokens
+用户第 1 轮输入: "你好"
+用户第 2 轮输入: "1+1等于"
+用户第 3 轮输入: "再见"
 ```
 
-- 每轮 token 随历史线性增长
-- 超出预算时启用上下文压缩（滑动窗口裁剪旧消息 / 工具结果截断）
-- Provider 可能在服务端做前缀缓存（如 Anthropic prompt caching），但客户端无法控制
+```python
+# ── Round 1 发送的 messages ──────────────────────
+messages = [
+    {"role": "system",    "content": "<system-identity>You are an Orchestrator agent...</system-identity>\n\n<agent-capabilities>...</agent-capabilities>"},
+    {"role": "user",      "content": "你好"},
+]
+# tools = [{read_file}, {write_file}, {run_command}, ...]
+# 总计: ~2700 tokens
 
-#### 方案 B：STATEFUL（首轮全量 + 后续增量，需 provider 支持）
+# ── Round 2 发送的 messages ──────────────────────
+messages = [
+    {"role": "system",    "content": "..."},          # ← 重复
+    {"role": "user",      "content": "你好"},          # ← 重复
+    {"role": "assistant", "content": "你好呀！"},      # ← 上轮回复
+    {"role": "user",      "content": "1+1等于"},       # ← 当前输入
+]
+# 总计: ~2900 tokens
 
-首轮发送完整上下文，后续仅发送新增消息：
-
+# ── Round 3 发送的 messages ──────────────────────
+messages = [
+    {"role": "system",    "content": "..."},          # ← 重复
+    {"role": "user",      "content": "你好"},          # ← 重复
+    {"role": "assistant", "content": "你好呀！"},      # ← 重复
+    {"role": "user",      "content": "1+1等于"},       # ← 重复
+    {"role": "assistant", "content": "等于2"},         # ← 上轮回复
+    {"role": "user",      "content": "再见"},          # ← 当前输入
+]
+# 总计: ~3100 tokens — 每轮线性增长
 ```
-Round 1 请求体:
-  [system: 完整系统提示]              ← 仅此轮发送
-  [user: "你好"]
-  总计: ~2700 tokens
 
-Round 2 请求体:                       ← 无 system，无历史
-  [assistant: "你好呀！"]             ← 上轮模型回复
-  [user: "1+1等于"]                   ← 当前输入
-  总计: ~100 tokens                   ← 节省 96%
+- 超出预算时启用上下文压缩（滑动窗口裁剪最早的 messages）
+- 冻结前缀可提升 provider 端 KV cache 命中率
 
-Round 3 请求体:
-  [assistant: "等于2"]               ← 上轮模型回复
-  [user: "再见"]                      ← 当前输入
-  总计: ~50 tokens
+#### 方案 B：STATEFUL（首轮全量 + 后续增量）
+
+首轮发送完整上下文，后续仅发送新增 messages：
+
+```python
+# ── Round 1 发送的 messages ──────────────────────
+messages = [
+    {"role": "system",    "content": "<system-identity>...</system-identity>\n\n<agent-capabilities>...</agent-capabilities>"},
+    {"role": "user",      "content": "你好"},
+]
+# 总计: ~2700 tokens（与 STATELESS 相同）
+
+# ── Round 2 发送的 messages ──────────────────────
+messages = [
+    {"role": "assistant", "content": "你好呀！"},      # ← 上轮回复（增量）
+    {"role": "user",      "content": "1+1等于"},       # ← 当前输入（增量）
+]
+# 总计: ~100 tokens ← 无 system，无历史重复
+
+# ── Round 3 发送的 messages ──────────────────────
+messages = [
+    {"role": "assistant", "content": "等于2"},         # ← 上轮回复（增量）
+    {"role": "user",      "content": "再见"},          # ← 当前输入（增量）
+]
+# 总计: ~50 tokens
 ```
 
-- 后续轮次 token 消耗接近常数（仅新消息）
-- 跳过上下文压缩（provider 侧保持完整上下文，压缩会破坏增量索引）
-- 系统提示 / 技能 / 模型状态变化时自动重建会话
+- provider 侧保持完整会话上下文，框架只发增量
+- 不启用上下文压缩（压缩会导致 messages 索引偏移）
+- 系统提示 / 技能变化时自动重建会话（重新发送全量）
 
 #### 模式对比
 
 | | STATELESS | STATEFUL |
 |--|-----------|----------|
-| **token 趋势** | 线性增长 | 近似常数 |
-| **压缩** | 启用（sliding_window / tool_summary） | 跳过 |
-| **兼容性** | 所有 provider | 需要 provider 维持服务端上下文 |
-| **适用** | 通用场景、短对话 | 多轮长对话、token 敏感 |
+| **Round 1** | ~2700 tokens | ~2700 tokens |
+| **Round 2** | ~2900 tokens | **~100 tokens** |
+| **Round 5** | ~3700 tokens | **~80 tokens** |
+| **Round 10** | ~5200 tokens | **~80 tokens** |
+| **趋势** | 线性增长 | 近似常数 |
+| **压缩** | 启用 | 跳过 |
+| **兼容性** | 所有 provider | 需 provider 维持服务端上下文 |
 | **配置** | `"session_mode": "stateless"` | `"session_mode": "stateful"` |
 
 ### 技能系统（SKILL.md）

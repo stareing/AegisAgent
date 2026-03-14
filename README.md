@@ -70,32 +70,62 @@ Controlled via config:
 
 #### Mode A: STATELESS (default, all providers)
 
-Every round sends full messages (system + history + input):
+```python
+# Round 1
+messages = [
+    {"role": "system",    "content": "<system-identity>...</system-identity>"},
+    {"role": "user",      "content": "Hello"},
+]  # ~2700 tokens
 
-```
-Round 1: [system + user]                     → ~2700 tokens
-Round 2: [system + user + asst + user]       → ~2900 tokens
-Round 3: [system + full history + user]      → ~3100 tokens
-         ↑ linear growth, compression trims old messages when over budget
+# Round 2
+messages = [
+    {"role": "system",    "content": "..."},         # ← repeated
+    {"role": "user",      "content": "Hello"},        # ← repeated
+    {"role": "assistant", "content": "Hi there!"},    # ← history
+    {"role": "user",      "content": "1+1=?"},        # ← current
+]  # ~2900 tokens
+
+# Round 3
+messages = [
+    {"role": "system",    "content": "..."},         # ← repeated
+    {"role": "user",      "content": "Hello"},        # ← repeated
+    {"role": "assistant", "content": "Hi there!"},    # ← repeated
+    {"role": "user",      "content": "1+1=?"},        # ← repeated
+    {"role": "assistant", "content": "2"},            # ← history
+    {"role": "user",      "content": "Bye"},          # ← current
+]  # ~3100 tokens — linear growth
 ```
 
 #### Mode B: STATEFUL (first full, then delta only)
 
-First round sends everything; subsequent rounds send only new messages:
+```python
+# Round 1 — same as STATELESS
+messages = [
+    {"role": "system",    "content": "<system-identity>...</system-identity>"},
+    {"role": "user",      "content": "Hello"},
+]  # ~2700 tokens
 
-```
-Round 1: [system + user]                     → ~2700 tokens
-Round 2: [assistant + user]                  →  ~100 tokens  (96% saved)
-Round 3: [assistant + user]                  →   ~50 tokens
-         ↑ near-constant, no compression needed
+# Round 2 — delta only (no system, no history)
+messages = [
+    {"role": "assistant", "content": "Hi there!"},    # ← delta
+    {"role": "user",      "content": "1+1=?"},        # ← delta
+]  # ~100 tokens (96% saved)
+
+# Round 3
+messages = [
+    {"role": "assistant", "content": "2"},            # ← delta
+    {"role": "user",      "content": "Bye"},          # ← delta
+]  # ~50 tokens
 ```
 
 | | STATELESS | STATEFUL |
 |--|-----------|----------|
-| Token trend | Linear growth | Near-constant |
+| Round 1 | ~2700 tokens | ~2700 tokens |
+| Round 2 | ~2900 tokens | **~100 tokens** |
+| Round 10 | ~5200 tokens | **~80 tokens** |
+| Trend | Linear growth | Near-constant |
 | Compression | Active (sliding window) | Skipped |
 | Compatibility | All providers | Requires server-side context |
-| Best for | General, short conversations | Long multi-turn, token-sensitive |
 
 ### Skills (SKILL.md)
 - File-based skills with YAML frontmatter: `skills/<name>/SKILL.md`
