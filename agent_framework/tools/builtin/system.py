@@ -7,6 +7,8 @@ which is blocked by default for sub-agents per section 20.1.
 
 from __future__ import annotations
 
+import os
+import shlex
 import subprocess
 
 from agent_framework.tools.decorator import tool
@@ -34,10 +36,26 @@ def run_command(
     Returns:
         Dict with stdout, stderr, and return_code.
     """
+    strict_mode = os.environ.get("AGENT_SYSTEM_STRICT_MODE", "").lower() in {
+        "1", "true", "yes", "on"
+    }
+    if strict_mode and any(ch in command for ch in ("|", ";", "&&", "||", ">", "<", "$", "`")):
+        return {
+            "stdout": "",
+            "stderr": "Command blocked by strict mode: shell metacharacters are not allowed",
+            "return_code": -2,
+        }
+
     try:
+        if strict_mode:
+            exec_args: str | list[str] = shlex.split(command)
+            use_shell = False
+        else:
+            exec_args = command
+            use_shell = True
         result = subprocess.run(
-            command,
-            shell=True,
+            exec_args,
+            shell=use_shell,
             capture_output=True,
             text=True,
             timeout=timeout_seconds,

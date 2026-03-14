@@ -6,9 +6,41 @@ All require confirmation by default (require_confirm=True) for safety.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from agent_framework.tools.decorator import tool
+
+
+def _sandbox_roots() -> list[Path]:
+    """Optional FS sandbox roots from env (path-separated absolute/relative paths)."""
+    raw = os.environ.get("AGENT_FS_SANDBOX_ROOTS", "").strip()
+    if not raw:
+        return []
+    roots: list[Path] = []
+    for part in raw.split(os.pathsep):
+        if not part.strip():
+            continue
+        roots.append(Path(part).expanduser().resolve())
+    return roots
+
+
+def _ensure_within_sandbox(path: Path) -> Path:
+    """Enforce path is within configured sandbox roots when sandbox is enabled."""
+    resolved = path.expanduser().resolve()
+    roots = _sandbox_roots()
+    if not roots:
+        return resolved
+    for root in roots:
+        try:
+            resolved.relative_to(root)
+            return resolved
+        except ValueError:
+            continue
+    raise PermissionError(
+        f"Path '{resolved}' is outside sandbox roots: "
+        + ", ".join(str(r) for r in roots)
+    )
 
 
 @tool(
@@ -27,7 +59,7 @@ def read_file(path: str, encoding: str = "utf-8") -> str:
     Returns:
         The file contents as a string.
     """
-    file_path = Path(path)
+    file_path = _ensure_within_sandbox(Path(path))
     if not file_path.exists():
         raise FileNotFoundError(f"File not found: {path}")
     if not file_path.is_file():
@@ -52,7 +84,7 @@ def write_file(path: str, content: str, encoding: str = "utf-8") -> str:
     Returns:
         Confirmation message with bytes written.
     """
-    file_path = Path(path)
+    file_path = _ensure_within_sandbox(Path(path))
     file_path.parent.mkdir(parents=True, exist_ok=True)
     file_path.write_text(content, encoding=encoding)
     return f"Written {len(content)} characters to {path}"
@@ -74,7 +106,7 @@ def list_directory(path: str = ".", pattern: str = "*") -> list[str]:
     Returns:
         List of file/directory names.
     """
-    dir_path = Path(path)
+    dir_path = _ensure_within_sandbox(Path(path))
     if not dir_path.exists():
         raise FileNotFoundError(f"Directory not found: {path}")
     if not dir_path.is_dir():
@@ -97,4 +129,7 @@ def file_exists(path: str) -> bool:
     Returns:
         True if the path exists.
     """
-    return Path(path).exists()
+    try:
+        return _ensure_within_sandbox(Path(path)).exists()
+    except PermissionError:
+        return False

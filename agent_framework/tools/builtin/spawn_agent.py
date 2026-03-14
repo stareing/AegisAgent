@@ -24,6 +24,9 @@ async def spawn_agent(
     skill_id: str | None = None,
     tool_categories: list[str] | None = None,
     memory_scope: str = "ISOLATED",
+    token_budget: int = 4096,
+    max_iterations: int = 10,
+    deadline_ms: int = 60000,
 ) -> dict:
     """Spawn a sub-agent to handle a specific sub-task.
 
@@ -33,6 +36,9 @@ async def spawn_agent(
         skill_id: Optional skill to activate in the sub-agent.
         tool_categories: Optional list of tool categories the sub-agent can use.
         memory_scope: Memory scope - ISOLATED, INHERIT_READ, or SHARED_WRITE.
+        token_budget: Maximum token budget for child context seed.
+        max_iterations: Child run max iterations.
+        deadline_ms: Child execution deadline in milliseconds.
 
     Returns:
         DelegationSummary dict (not full trace, per section 14.6).

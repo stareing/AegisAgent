@@ -1879,3 +1879,27 @@ v2.4 的重点不是增加更多功能，而是把主干边界继续收口到可
 * 子 Agent 的父子记忆调用路径与快照语义被正式写死
 
 以这份 v2.4 为基线，可以直接进入代码骨架实现阶段，并且在不破坏主干边界的前提下继续扩展。
+---
+
+## 二十四、特定 Agent 实现 (Default / ReAct / Orchestrator)
+
+在 `agent_framework/agent/` 目录下，框架提供了三种内置的具体 Agent 实现，它们都继承自 `BaseAgent`。这不仅展示了如何扩展 `BaseAgent`，也为不同的业务场景提供了开箱即用的选择。
+
+### 24.1 `DefaultAgent`
+最基础、最通用的单实体 Agent。
+*   **职责**：基于一般的 "系统指令" 进行思考和工具调用，没有特定范式限制。
+*   **Prompt 模板**：使用 `DEFAULT_SYSTEM_PROMPT`，强调“如无必要不调用工具”和“每次调用一个工具”。
+*   **能力配置**：默认关闭派生能力 (`allow_spawn_children=False`)，专注单线程任务执行。
+
+### 24.2 `ReActAgent`
+实现了经典的 ReAct (Reasoning + Acting) 范式的 Agent。
+*   **职责**：严格遵循 `Thought -> Action -> Observation -> Final Answer` 循环，适合需要严密逻辑推理的任务。
+*   **Prompt 模板**：使用 `REACT_SYSTEM_PROMPT`，强制模型输出特定的思维链格式（在某些实现中可能使用 XML 标签 `<thought>` 等）。
+*   **Hook 拦截 (`should_stop`)**：重写了停止判断逻辑，当检测到模型输出了明确的 "Final Answer" 标记时，强制中断迭代循环，无论是否还有剩余的工具调用。
+
+### 24.3 `OrchestratorAgent`
+专用于多智能体协作的主控节点 Agent。
+*   **职责**：不主要负责具体干活，而是负责将复杂任务拆解，然后委派给特定的子 Agent。收集结果后进行最终汇总。
+*   **Prompt 模板**：使用 `ORCHESTRATOR_SYSTEM_PROMPT`，详细指导模型何时该委派、如何并行委派（`spawn_agent`）、如何顺序委派以及内存隔离级别（`memory_scope`）。
+*   **能力配置**：默认开启派生能力 (`allow_spawn_children=True`)。
+*   **Hook 重写 (`on_spawn_requested`)**：默认允许 (`allowed=True`) 所有的 `spawn_agent` 请求，因为它的核心工作就是派生。

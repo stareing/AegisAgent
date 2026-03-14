@@ -22,7 +22,7 @@
 * **测试友好**：设计必须便于 mock、替换和单元测试。
 * **边界清晰**：跨层调用必须通过正式接口，禁止越层访问。
 * **一处定义**：同一规则、常量、协议只保留一个权威定义。
-* **记忆进度**：热跟新CLAUDE.md
+* **记忆进度**：热更新CLAUDE.md技能修复摘要
 * **代码审核**：将由codex排查代码是否和需求一致
 
 ## Project Overview
@@ -114,20 +114,11 @@ Adapters → adapters/model/ | Infra → infra/
 - **Checkpoint/Resume立场**: 当前不支持通用resume, 中断后创建新run, SessionState/日志/事件/流输出不可作恢复源
 - **事件投递语义**: 尽力而为(允许重复/丢失), EventEnvelope带event_id, 订阅方必须幂等, 事件顺序不作为业务真相源
 - **重试版本链**: IterationAttempt(attempt_id+parent_attempt_id链), TransactionGroupAttempt同理, retry不覆盖原记录, 审计保留全链
-- **Orchestrator编排**: OrchestratorAgent(编排感知prompt+spawn默认允许), 硬退出守卫(should_stop: spawn后3轮无新spawn强制停止), parent_run_id绑定实际run_id(非agent_id)
-- **动态能力注入**: <agent-capabilities>XML块注入can_spawn/parallel_tool_calls/max_iterations/current_iteration/spawned_subagents, 运行时实值非硬编码
-- **Skill系统(SKILL.md)**: 文件发现(skills/+~/.agent/skills/), YAML frontmatter, ${SKILL_DIR}变量, !`shell`预处理, $ARGUMENTS替换, invoke_skill工具, 渐进式披露(描述在context/body按需加载)
-- **提示词XML结构**: <system-identity>/<runtime-environment>/<agent-capabilities>/<available-skills>/<active-skill>/<saved-memories>分区, LLM可明确区分各区域
-- **冻结前缀(§14.8)**: FrozenPromptPrefix(prefix_hash+epoch), PromptPrefixManager缓存+轮换, 压缩器不碰前缀, 仅suffix可裁剪
-- **会话模式双轨**: STATELESS(默认,全量发送,兼容所有provider) / STATEFUL(首轮全量+后续delta,省token,需provider支持), 适配器通过supports_stateful_session()声明
-- **压缩-会话互斥**: STATEFUL模式跳过上下文压缩(避免delta索引偏移), STATELESS模式正常压缩(sliding_window/tool_result_summary)
-- **工具schema缓存**: 每run缓存一次export_schemas(), 非每iteration重算
-- **工具拦截反馈**: CapabilityPolicy/hook拦截的工具返回ToolResult(success=False)给LLM, 非静默跳过
 
 ## Commands
 ```bash
 pip install -e ".[dev]"           # Install
-pytest tests/                     # Tests (678 passed)
+pytest tests/                     # Tests (602 passed)
 python -m agent_framework.main    # Interactive (Mock, no API key)
 python -m agent_framework.main --config config/deepseek.json  # Real model
 python run_demo.py                # Demo

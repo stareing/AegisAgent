@@ -24,6 +24,7 @@ from agent_framework.protocols.core import (
 )
 
 if TYPE_CHECKING:
+    from agent_framework.models.message import Message
     from agent_framework.protocols.core import SubAgentRuntimeProtocol
 
 logger = get_logger(__name__)
@@ -56,10 +57,16 @@ class ToolExecutor:
         self._max_concurrent = max_concurrent
         # Set by RunCoordinator at run start — used for parent_run_id in spawn
         self._current_run_id: str = ""
+        # Set by RunCoordinator each iteration — used for child context seed.
+        self._current_session_messages: list[Message] = []
 
     def set_current_run_id(self, run_id: str) -> None:
         """Called by RunCoordinator to bind the current run_id for quota tracking."""
         self._current_run_id = run_id
+
+    def set_current_session_messages(self, messages: list[Message]) -> None:
+        """Called by RunCoordinator before each iteration for spawn seed building."""
+        self._current_session_messages = list(messages or [])
 
     async def execute(
         self, tool_call_request: ToolCallRequest
@@ -226,6 +233,7 @@ class ToolExecutor:
             if self._delegation is None:
                 raise RuntimeError("DelegationExecutor not configured")
             from agent_framework.models.subagent import MemoryScope, SpawnMode, SubAgentSpec
+            from agent_framework.context.builder import ContextBuilder
 
             # Map all spawn_agent params (doc 14.6)
             mode_str = validated_arguments.get("mode", "ephemeral").upper()
@@ -245,7 +253,18 @@ class ToolExecutor:
                 skill_id=validated_arguments.get("skill_id"),
                 tool_category_whitelist=validated_arguments.get("tool_categories"),
                 memory_scope=MemoryScope(scope_str) if scope_str in MemoryScope.__members__ else MemoryScope.ISOLATED,
+                token_budget=int(validated_arguments.get("token_budget", 4096)),
+                max_iterations=int(validated_arguments.get("max_iterations", 10)),
+                deadline_ms=int(validated_arguments.get("deadline_ms", 60000)),
             )
+            # Build child context seed from current parent session unless explicitly provided.
+            if spec.context_seed is None:
+                seed_builder = ContextBuilder()
+                spec.context_seed = seed_builder.build_spawn_seed(
+                    session_messages=self._current_session_messages,
+                    query=spec.task_input,
+                    token_budget=spec.token_budget,
+                )
             parent_id = getattr(parent_agent, "agent_id", "unknown") if parent_agent else "none"
 
             logger.info(
