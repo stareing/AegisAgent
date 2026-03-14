@@ -104,6 +104,8 @@ class AgentLoop:
         except Exception as e:
             return self._handle_iteration_error(agent, e, agent_state, idx)
 
+        self._enforce_tool_call_parallel_policy(model_response, effective_config, idx)
+
         # Token accounting is done by RunStateController.apply_iteration_result()
         # after this method returns. AgentLoop must NOT mutate token counters.
 
@@ -285,11 +287,20 @@ class AgentLoop:
                     iteration_index=agent_state.iteration_count,
                     repeat_count=repeat_count,
                 )
-                # Try to extract the previous answer so user gets a result, not an error
-                prev = agent_state.iteration_history[-1]
-                if prev.model_response and prev.model_response.content:
-                    # Inject the previous answer as this response's content
-                    model_response.content = prev.model_response.content
+                # Extract previous answer: check content first, then tool results
+                prev = agent_state.iteration_history[-1] if agent_state.iteration_history else None
+                prev_answer = None
+                if prev:
+                    if prev.model_response and prev.model_response.content:
+                        prev_answer = prev.model_response.content
+                    elif prev.tool_results:
+                        # Tool call iteration: answer is in the tool result output
+                        successful = [tr for tr in prev.tool_results if tr.success and tr.output]
+                        if successful:
+                            prev_answer = str(successful[0].output)
+
+                if prev_answer:
+                    model_response.content = prev_answer
                     model_response.tool_calls = []
                     return StopSignal(
                         reason=StopReason.LLM_STOP,
@@ -336,6 +347,28 @@ class AgentLoop:
             )
 
         return repeat_count
+
+    def _enforce_tool_call_parallel_policy(
+        self,
+        model_response: ModelResponse,
+        effective_config: EffectiveRunConfig,
+        iteration_index: int,
+    ) -> None:
+        """Apply runtime parallel-call policy as a hard execution guard."""
+        if (
+            not effective_config.allow_parallel_tool_calls
+            and model_response.tool_calls
+            and len(model_response.tool_calls) > 1
+        ):
+            dropped = model_response.tool_calls[1:]
+            model_response.tool_calls = model_response.tool_calls[:1]
+            logger.warning(
+                "tool.parallel_calls_trimmed",
+                iteration_index=iteration_index,
+                kept_tool=model_response.tool_calls[0].function_name,
+                dropped_tools=[tc.function_name for tc in dropped],
+                dropped_count=len(dropped),
+            )
 
     @staticmethod
     def _tool_call_signature(tool_calls: list[ToolCallRequest]) -> str:
