@@ -472,7 +472,7 @@ class TestSkillContextInjection:
         ]
         result = provider.collect_skill_catalog(descs)
         assert result is not None
-        assert "invoke_skill" in result
+        assert "available-skills" in result
         assert "commit" in result
         assert "review" in result
         assert "[file]" in result

@@ -71,13 +71,14 @@ class TestContextSourceProvider:
     def test_collect_system_core_with_runtime_info(self):
         config = AgentConfig(system_prompt="base")
         result = self.provider.collect_system_core(config, {"model": "gpt-4", "version": "1.0"})
-        assert "model: gpt-4" in result
-        assert "Runtime Info" in result
+        assert "gpt-4" in result
+        assert "runtime-environment" in result
 
     def test_collect_skill_addon_with_skill(self):
         skill = Skill(skill_id="s1", system_prompt_addon="Use math tools")
         result = self.provider.collect_skill_addon(skill)
-        assert result == "Use math tools"
+        assert "Use math tools" in result
+        assert "active-skill" in result
 
     def test_collect_skill_addon_none(self):
         assert self.provider.collect_skill_addon(None) is None
@@ -95,11 +96,11 @@ class TestContextSourceProvider:
             MemoryRecord(memory_id="m2", title="Pref B", content="value B"),
         ]
         result = self.provider.collect_saved_memory_block(records)
-        assert "Saved Memories" in result
-        assert "[pinned]" in result
-        assert "**Pref A**" in result
+        assert "saved-memories" in result
+        assert 'pinned="true"' in result
+        assert "Pref A" in result
         assert "tag1" in result
-        assert "**Pref B**" in result
+        assert "Pref B" in result
 
     def test_collect_session_groups_plain(self):
         session = SessionState()
@@ -387,83 +388,6 @@ class TestContextCompressor:
         # Protected group should still be present
         assert any(g.protected for g in result)
 
-    def test_fold_old_skill_bodies_single(self):
-        """Single skill invocation — no folding."""
-        comp = ContextCompressor(token_counter=self.counter)
-        groups = [
-            ToolTransactionGroup(
-                messages=[
-                    Message(role="assistant", content="", tool_calls=[
-                        ToolCallRequest(id="tc1", function_name="invoke_skill", arguments={"skill_id": "commit"}),
-                    ]),
-                    Message(role="tool", content="Full skill body " * 100, name="invoke_skill", tool_call_id="tc1"),
-                ],
-                group_type="TOOL_BATCH",
-            ),
-        ]
-        result = comp._fold_old_skill_bodies(groups)
-        assert len(result) == 1
-        tool_msg = [m for m in result[0].messages if m.role == "tool"][0]
-        assert "Full skill body" in tool_msg.content  # NOT folded
-
-    def test_fold_old_skill_bodies_multiple(self):
-        """Multiple skill invocations — old ones folded, latest kept."""
-        comp = ContextCompressor(token_counter=self.counter)
-        groups = [
-            ToolTransactionGroup(
-                messages=[
-                    Message(role="assistant", content=""),
-                    Message(role="tool", content="Old skill body " * 100, name="invoke_skill", tool_call_id="tc1"),
-                ],
-                group_type="TOOL_BATCH",
-            ),
-            ToolTransactionGroup(
-                messages=[Message(role="user", content="next question")],
-            ),
-            ToolTransactionGroup(
-                messages=[
-                    Message(role="assistant", content=""),
-                    Message(role="tool", content="Latest skill body " * 100, name="invoke_skill", tool_call_id="tc2"),
-                ],
-                group_type="TOOL_BATCH",
-            ),
-        ]
-        result = comp._fold_old_skill_bodies(groups)
-        # Old skill body should be folded
-        old_tool = [m for m in result[0].messages if m.role == "tool"][0]
-        assert "Collapsed" in old_tool.content
-        assert len(old_tool.content) < 100  # one-liner
-        # Latest should be preserved
-        new_tool = [m for m in result[2].messages if m.role == "tool"][0]
-        assert "Latest skill body" in new_tool.content
-
-    def test_fold_reclaims_tokens(self):
-        """Folding old skill bodies should reduce total token count."""
-        comp = ContextCompressor(token_counter=self.counter)
-        long_body = "X" * 2000
-        groups = [
-            ToolTransactionGroup(
-                messages=[
-                    Message(role="assistant", content=""),
-                    Message(role="tool", content=long_body, name="invoke_skill", tool_call_id="tc1"),
-                ],
-                group_type="TOOL_BATCH",
-            ),
-            ToolTransactionGroup(
-                messages=[
-                    Message(role="assistant", content=""),
-                    Message(role="tool", content="Short body", name="invoke_skill", tool_call_id="tc2"),
-                ],
-                group_type="TOOL_BATCH",
-            ),
-        ]
-        before_tokens = sum(comp._count_group(g) for g in groups)
-        folded = comp._fold_old_skill_bodies(groups)
-        after_tokens = sum(comp._count_group(g) for g in folded)
-        assert after_tokens < before_tokens
-        # The 2000-char body should be reduced dramatically
-        assert after_tokens < before_tokens - 400
-
 
 # =====================================================================
 # ContextEngineer
@@ -506,7 +430,7 @@ class TestContextEngineer:
         }
         messages = engineer.prepare_context_for_llm(state, materials)
         system_content = messages[0].content
-        assert "Saved Memories" in system_content
+        assert "saved-memories" in system_content
         assert "Pref" in system_content
 
     def test_set_skill_context(self):

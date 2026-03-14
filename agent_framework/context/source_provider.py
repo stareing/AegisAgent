@@ -35,17 +35,30 @@ class ContextSourceProvider:
     def collect_system_core(
         self, agent_config: AgentConfig, runtime_info: dict | None = None
     ) -> str:
-        """Build the core system prompt."""
-        parts = [agent_config.system_prompt]
+        """Build the core system prompt with XML structure.
+
+        Output format:
+        <system-identity>
+          Agent's base system prompt
+        </system-identity>
+        <runtime-environment>
+          OS, working directory, etc.
+        </runtime-environment>
+        """
+        parts = [f"<system-identity>\n{agent_config.system_prompt}\n</system-identity>"]
         if runtime_info:
-            info_lines = [f"- {k}: {v}" for k, v in runtime_info.items()]
-            parts.append("\n## Runtime Info\n" + "\n".join(info_lines))
+            info_lines = [f"  <{k}>{v}</{k}>" for k, v in runtime_info.items()]
+            parts.append("<runtime-environment>\n" + "\n".join(info_lines) + "\n</runtime-environment>")
         return "\n\n".join(parts)
 
     def collect_skill_addon(self, active_skill: Skill | None) -> str | None:
-        """Get skill-specific system prompt addon."""
+        """Get skill-specific system prompt addon, wrapped in XML."""
         if active_skill and active_skill.system_prompt_addon:
-            return active_skill.system_prompt_addon
+            return (
+                f"<active-skill id=\"{active_skill.skill_id}\" name=\"{active_skill.name}\">\n"
+                f"{active_skill.system_prompt_addon}\n"
+                f"</active-skill>"
+            )
         return None
 
     def collect_saved_memory_block(
@@ -67,12 +80,15 @@ class ContextSourceProvider:
             key=lambda r: (not r.is_pinned, r.kind.value, r.title.lower()),
         )
 
-        lines = ["## Saved Memories", ""]
+        lines = ["<saved-memories>"]
         for r in sorted_records:
-            prefix = "[pinned] " if r.is_pinned else ""
-            lines.append(f"- {prefix}**{r.title}**: {r.content}")
-            if r.tags:
-                lines.append(f"  (tags: {', '.join(sorted(r.tags))})")
+            pinned_attr = ' pinned="true"' if r.is_pinned else ""
+            tags_attr = f' tags="{",".join(sorted(r.tags))}"' if r.tags else ""
+            lines.append(f'  <memory kind="{r.kind.value}"{pinned_attr}{tags_attr}>')
+            lines.append(f"    <title>{r.title}</title>")
+            lines.append(f"    <content>{r.content}</content>")
+            lines.append("  </memory>")
+        lines.append("</saved-memories>")
         return "\n".join(lines)
 
     def collect_session_groups(
@@ -187,13 +203,14 @@ class ContextSourceProvider:
             return None
 
         lines = [
-            "## Available Skills",
-            "You can invoke a skill using the `invoke_skill` tool with the skill_id.",
-            "",
+            '<available-skills hint="Invoke via invoke_skill tool with skill_id">',
         ]
         for desc in skill_descriptions:
-            hint = f" {desc['argument_hint']}" if desc.get("argument_hint") else ""
-            lines.append(f"- **{desc['name']}** (id: `{desc['skill_id']}`){hint}: {desc['description']}")
+            hint_attr = f' argument-hint="{desc["argument_hint"]}"' if desc.get("argument_hint") else ""
+            lines.append(f'  <skill id="{desc["skill_id"]}" name="{desc["name"]}"{hint_attr}>')
+            lines.append(f"    {desc['description']}")
+            lines.append("  </skill>")
+        lines.append("</available-skills>")
         return "\n".join(lines)
 
     def collect_current_input(self, task_or_prompt: str) -> Message:
