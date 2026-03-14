@@ -68,14 +68,44 @@
   },
 
   "mcp": {
-    "_comment": "MCP server connections",
+    "_comment": "MCP server connections — stdio/sse/http transports",
     "config_file": null,
-    "servers": []
+    "servers": [
+      {
+        "_comment": "stdio transport: launch a local process",
+        "server_id": "filesystem",
+        "transport": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp/workspace"]
+      },
+      {
+        "_comment": "SSE transport: connect to a running server",
+        "server_id": "web-search",
+        "transport": "sse",
+        "url": "http://localhost:8080/sse"
+      },
+      {
+        "_comment": "HTTP transport: REST-style endpoint",
+        "server_id": "database",
+        "transport": "http",
+        "url": "http://localhost:9090/mcp"
+      }
+    ]
   },
 
   "a2a": {
-    "_comment": "A2A remote agent registry",
-    "known_agents": []
+    "_comment": "A2A remote agent registry — agents discovered at startup",
+    "known_agents": [
+      {
+        "_comment": "Each entry needs url (required) + alias (optional)",
+        "url": "http://localhost:9000",
+        "alias": "code-reviewer"
+      },
+      {
+        "url": "http://10.0.1.50:9001",
+        "alias": "data-analyst"
+      }
+    ]
   },
 
   "logging": {
