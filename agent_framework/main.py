@@ -277,20 +277,35 @@ class ReplState:
         self.turn_count: int = 0
 
     def append_turn(self, user_input: str, result: Any) -> None:
-        """Record a complete turn (user + assistant + tool calls/results)."""
+        """Record a complete turn including tool calls and results.
+
+        Extracts the full message chain from iteration_history so the
+        next LLM call sees: user → assistant(tool_calls) → tool(results)
+        → assistant(answer). Without this, the model loses tool context.
+        """
+        from agent_framework.agent.message_projector import MessageProjector
+
         self.history.append(Message(role="user", content=user_input))
 
-        # Extract tool interactions from iteration history if available
-        if hasattr(result, "iterations_used") and result.iterations_used > 0:
-            # For multi-iteration runs, include intermediate tool messages
-            # These come from the model response tool_calls and tool results
-            # recorded in the coordinator's session state. Since we don't
-            # have direct access, we reconstruct from the final answer.
-            pass
+        # Project all iterations into messages (assistant + tool results)
+        if hasattr(result, "iteration_history") and result.iteration_history:
+            for iteration in result.iteration_history:
+                projected = MessageProjector.project_iteration(iteration)
+                for msg in projected:
+                    # Strip framework-internal metadata before storing in REPL history
+                    self.history.append(Message(
+                        role=msg.role,
+                        content=msg.content,
+                        tool_calls=msg.tool_calls,
+                        tool_call_id=msg.tool_call_id,
+                        name=msg.name,
+                    ))
+        else:
+            # Fallback: no iteration history, just store final answer
+            self.history.append(
+                Message(role="assistant", content=result.final_answer or "")
+            )
 
-        self.history.append(
-            Message(role="assistant", content=result.final_answer or "")
-        )
         self.turn_count += 1
 
     def trim_to_token_budget(self, budget: int = MAX_HISTORY_TOKENS) -> None:
