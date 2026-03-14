@@ -231,8 +231,12 @@ class ToolExecutor:
             mode_str = validated_arguments.get("mode", "ephemeral").upper()
             scope_str = validated_arguments.get("memory_scope", "isolated").upper()
             parent_agent = self._parent_agent_getter() if self._parent_agent_getter else None
-            # Use actual run_id for quota tracking (not agent_id)
+            # Use actual run_id for quota tracking (not agent_id).
+            # Guard: if _current_run_id was never set (bypass of RunCoordinator),
+            # fall back to agent_id to avoid empty-string quota key.
             parent_run_id = self._current_run_id
+            if not parent_run_id and parent_agent and hasattr(parent_agent, "agent_id"):
+                parent_run_id = parent_agent.agent_id
 
             spec = SubAgentSpec(
                 parent_run_id=parent_run_id,

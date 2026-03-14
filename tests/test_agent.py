@@ -290,12 +290,14 @@ class TestOrchestratorAgent:
         assert state.spawn_count == 0
 
     def test_parent_run_id_uses_run_id_not_agent_id(self):
-        """ToolExecutor must use run_id (not agent_id) for parent_run_id."""
+        """ToolExecutor must use _current_run_id as primary parent_run_id."""
         import inspect
         from agent_framework.tools.executor import ToolExecutor
         source = inspect.getsource(ToolExecutor._route_execution)
-        assert "self._current_run_id" in source
-        assert "parent_run_id = parent_agent.agent_id" not in source
+        # Primary assignment uses _current_run_id
+        assert "parent_run_id = self._current_run_id" in source
+        # set_current_run_id must exist
+        assert hasattr(ToolExecutor, "set_current_run_id")
 
 
 # =====================================================================
