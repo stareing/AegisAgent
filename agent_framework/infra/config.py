@@ -16,6 +16,7 @@ class ModelConfig(BaseModel):
     api_base: str | None = None
     timeout_ms: int = 30000
     max_retries: int = 3
+    session_mode: str = "stateless"  # "stateless" | "stateful"
 
 
 class ContextConfig(BaseModel):

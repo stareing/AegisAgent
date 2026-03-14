@@ -92,6 +92,7 @@ class BaseModelAdapter(ABC):
 
     def __init__(self, **kwargs: Any) -> None:
         self._session = SessionMode()
+        self._session_mode_config: str = "stateless"  # set by entry.py from config
 
     @abstractmethod
     async def complete(
@@ -119,8 +120,12 @@ class BaseModelAdapter(ABC):
         return False
 
     def supports_stateful_session(self) -> bool:
-        """Override to True if adapter can maintain server-side conversation state."""
-        return False
+        """Returns True if stateful mode is enabled via config.
+
+        Controlled by config.model.session_mode = "stateful".
+        Adapters can override to force-disable for incompatible providers.
+        """
+        return self._session_mode_config == "stateful"
 
     def begin_session(self, session_id: str = "") -> None:
         """Start a stateful session. Called by RunCoordinator at run start."""

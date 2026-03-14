@@ -106,6 +106,10 @@ class AgentFramework:
         # Model adapter
         model_adapter = self._create_model_adapter()
 
+        # Apply session mode from config
+        if hasattr(model_adapter, "_session_mode_config"):
+            model_adapter._session_mode_config = self.config.model.session_mode
+
         # Register built-in tools (filesystem, system, spawn_agent)
         from agent_framework.tools.builtin import register_all_builtins
         register_all_builtins(self._catalog)
