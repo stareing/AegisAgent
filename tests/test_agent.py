@@ -198,9 +198,9 @@ class TestOrchestratorAgent:
         from agent_framework.agent.orchestrator_agent import OrchestratorAgent
         agent = OrchestratorAgent()
         prompt = agent.agent_config.system_prompt
-        assert "Orchestrator" in prompt
         assert "spawn_agent" in prompt
-        assert "Delegate" in prompt or "delegate" in prompt
+        assert "delegate" in prompt.lower()
+        assert "Decision Policy" in prompt
 
     @pytest.mark.asyncio
     async def test_spawn_approved_by_default(self):
