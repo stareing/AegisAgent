@@ -101,85 +101,92 @@ python -m agent_framework.main --config config/anthropic.json
 
 ### 上下文管理与 Token 优化
 
-默认每轮发送完整 messages 列表（标准 Chat Completions 协议要求）：
+框架支持两种会话模式，区别在于**每轮发送给 API 的 `messages` 数组内容不同**。
+
+**场景**：用户说”帮我读取 /tmp/test.txt”，模型调用 `read_file`，然后用户说”把内容改成 Hi”。
+
+#### `stateless`（默认）— 每轮全量
 
 ```python
-# ── Round 1 ──────────────────────────────────────
+# ── Round 1: API 收到 ─────────────────────────────────
 messages = [
-    {"role": "system",    "content": "<system-identity>...</system-identity>\n<agent-capabilities>...</agent-capabilities>"},
-    {"role": "user",      "content": "帮我读取 /tmp/test.txt"},
+    {“role”: “system”,    “content”: “<system-identity>...</system-identity>”},
+    {“role”: “user”,      “content”: “帮我读取 /tmp/test.txt”},
 ]
-# tools = [{read_file}, {write_file}, {run_command}, ...]
-# 总计: ~2700 tokens
+# → 模型调用 read_file → 返回 “Hello World” → 回答 “文件内容是 Hello World”
 
-# ── Round 2（含工具调用历史）─────────────────────
+# ── Round 2: API 收到 ─────────────────────────────────
 messages = [
-    {"role": "system",    "content": "..."},
-    {"role": "user",      "content": "帮我读取 /tmp/test.txt"},
-    {"role": "assistant", "content": "", "tool_calls": [{"id": "tc1", "function": {"name": "read_file", "arguments": "{\"path\":\"/tmp/test.txt\"}"}}]},
-    {"role": "tool",      "content": "Hello World", "tool_call_id": "tc1", "name": "read_file"},
-    {"role": "assistant", "content": "文件内容是 Hello World"},
-    {"role": "user",      "content": "把内容改成 Hi"},
+    {“role”: “system”,    “content”: “<system-identity>...</system-identity>”},    # ← 重复
+    {“role”: “user”,      “content”: “帮我读取 /tmp/test.txt”},                    # ← 重复
+    {“role”: “assistant”, “tool_calls”: [{“id”:”tc1”, “function”:{“name”:”read_file”,...}}]},  # ← 重复
+    {“role”: “tool”,      “content”: “Hello World”, “tool_call_id”: “tc1”},        # ← 重复
+    {“role”: “assistant”, “content”: “文件内容是 Hello World”},                     # ← 重复
+    {“role”: “user”,      “content”: “把内容改成 Hi”},                             # ← 新增
 ]
-# 总计: ~3000 tokens — 包含完整工具调用链路
-
-# ── Round 3 ──────────────────────────────────────
-messages = [
-    {"role": "system",    "content": "..."},
-    # ... 前两轮全部历史（含 tool_calls + tool results）...
-    {"role": "user",      "content": "确认一下改好了吗"},
-]
-# 总计: ~3500 tokens — 每轮线性增长
+# 6 条消息, ~3000 tokens — Round 1 的所有内容被重新发送
 ```
 
-框架自动管理 token 增长：
-- **滑动窗口压缩**：超出预算时裁剪最早的 messages
-- **工具结果截断**：长 tool output 自动截断到 200 字符
-- **冻结前缀**：system prompt 生成不可变前缀，提升 provider 端 KV cache 命中率
+每轮重发：system prompt + 全部历史 + 当前输入。token 线性增长。
+超出预算时，**滑动窗口压缩**自动裁剪最早的 messages。
 
-#### 有状态会话模式（Token 节省 96%）
+#### `stateful`（可选）— 首轮全量，后续增量
 
-对于支持服务端上下文的 provider，可启用增量发送模式：
+```python
+# ── Round 1: API 收到（与 stateless 相同）──────────────
+messages = [
+    {“role”: “system”,    “content”: “<system-identity>...</system-identity>”},
+    {“role”: “user”,      “content”: “帮我读取 /tmp/test.txt”},
+]
+# sent_count: 0 → 2
+
+# ── Round 2: API 收到（仅新增部分）─────────────────────
+messages = [
+    {“role”: “assistant”, “tool_calls”: [{“id”:”tc1”, “function”:{“name”:”read_file”,...}}]},  # ← 新增
+    {“role”: “tool”,      “content”: “Hello World”, “tool_call_id”: “tc1”},                   # ← 新增
+    {“role”: “assistant”, “content”: “文件内容是 Hello World”},                                 # ← 新增
+    {“role”: “user”,      “content”: “把内容改成 Hi”},                                         # ← 新增
+]
+# 4 条消息, ~200 tokens — 无 system，无 Round 1 历史
+# sent_count: 2 → 6
+```
+
+Provider 侧保持完整会话上下文，框架只发送 `messages[sent_count:]`。
+压缩被**跳过**（裁剪会导致 sent_count 偏移错位）。
+
+#### 配置
 
 ```json
-{"model": {"session_mode": "stateful"}}
+{“model”: {“session_mode”: “stateless”}}
+{“model”: {“session_mode”: “stateful”}}
 ```
 
-```python
-# ── Round 1（首轮全量，与默认相同）─────────────────
-messages = [
-    {"role": "system",    "content": "<system-identity>...</system-identity>"},
-    {"role": "user",      "content": "帮我读取 /tmp/test.txt"},
-]
-# 总计: ~2700 tokens
+默认 `stateless`。仅当 provider 确认支持服务端会话状态时才切换 `stateful`。
 
-# ── Round 2（仅发送新增消息）──────────────────────
-messages = [
-    {"role": "assistant", "content": "", "tool_calls": [{"id": "tc1", ...}]},
-    {"role": "tool",      "content": "Hello World", "tool_call_id": "tc1"},
-    {"role": "assistant", "content": "文件内容是 Hello World"},
-    {"role": "user",      "content": "把内容改成 Hi"},
-]
-# 总计: ~200 tokens ← 无 system 重复，无历史重复
+#### 底层管理差异
 
-# ── Round 3（仅发送新增消息）──────────────────────
-messages = [
-    {"role": "assistant", "content": "", "tool_calls": [{"id": "tc2", ...}]},
-    {"role": "tool",      "content": "Written 2 characters", "tool_call_id": "tc2"},
-    {"role": "assistant", "content": "已改好"},
-    {"role": "user",      "content": "确认一下改好了吗"},
-]
-# 总计: ~150 tokens
-```
+| 层 | `stateless` | `stateful` |
+|----|------------|------------|
+| **`get_delta_messages()`** | 返回完整数组 | 返回 `messages[sent_count:]` |
+| **API 请求大小** | 线性增长（每轮包含全部历史） | 近似常数（仅新增消息） |
+| **上下文压缩** | 启用 — 滑动窗口裁剪最早消息 | 跳过 — 裁剪会破坏增量偏移 |
+| **`_session.active`** | `False` | `True` |
+| **`sent_count` 追踪** | 不更新 | 每轮递增 |
+| **provider 无状态时** | 正常工作 | 模型丢失上下文（请求中无历史） |
 
-| | 默认模式 | stateful 模式 |
-|--|---------|-------------|
+实现链路：
+1. `RunCoordinator` 在 run 开始时调用 `adapter.begin_session(run_id)`
+2. `ContextEngineer` 检查 `stateful_session` 标志 → 为 true 时跳过压缩
+3. `AgentLoop._call_llm()` 调用 `adapter.get_delta_messages(messages)` → 将结果发送给 API
+4. `adapter.end_session()` 在 `finally` 块中执行
+
+| | stateless | stateful |
+|--|-----------|----------|
 | **Round 1** | ~2700 tokens | ~2700 tokens |
 | **Round 2** | ~3000 tokens | **~200 tokens** |
 | **Round 10** | ~6000 tokens | **~150 tokens** |
-| **趋势** | 线性增长 | 近似常数 |
-| **压缩** | 启用（裁剪旧消息） | 跳过（provider 维持完整上下文） |
-| **兼容性** | 所有 provider | 需 provider 支持有状态会话 |
+
+> 以上 token 数值为示意估算。
 
 ### 技能系统（SKILL.md）
 

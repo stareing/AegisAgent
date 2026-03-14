@@ -62,62 +62,92 @@ pytest tests/
 
 ### Context Management & Token Optimization
 
-Each round sends the full messages list (standard Chat Completions protocol), including tool call chains:
+The framework supports two session modes. The difference is **what goes into the `messages` array** sent to the API each round.
+
+**Scenario**: User says "Read /tmp/test.txt", model calls `read_file`, then user says "Change it to Hi".
+
+#### `stateless` (default) — full messages every round
 
 ```python
-# Round 1
+# ── Round 1: API receives ─────────────────────────────
 messages = [
     {"role": "system",    "content": "<system-identity>...</system-identity>"},
     {"role": "user",      "content": "Read /tmp/test.txt"},
-]  # ~2700 tokens
+]
+# → model calls read_file → returns "Hello World" → answers "The file contains Hello World"
 
-# Round 2 (with tool call history)
+# ── Round 2: API receives ─────────────────────────────
 messages = [
-    {"role": "system",    "content": "..."},
-    {"role": "user",      "content": "Read /tmp/test.txt"},
-    {"role": "assistant", "content": "", "tool_calls": [{"id": "tc1", "function": {"name": "read_file", ...}}]},
-    {"role": "tool",      "content": "Hello World", "tool_call_id": "tc1", "name": "read_file"},
-    {"role": "assistant", "content": "The file contains Hello World"},
-    {"role": "user",      "content": "Change it to Hi"},
-]  # ~3000 tokens — full tool call chain preserved
+    {"role": "system",    "content": "<system-identity>...</system-identity>"},   # ← same system
+    {"role": "user",      "content": "Read /tmp/test.txt"},                       # ← repeated
+    {"role": "assistant", "tool_calls": [{"id":"tc1", "function":{"name":"read_file",...}}]},  # ← repeated
+    {"role": "tool",      "content": "Hello World", "tool_call_id": "tc1"},       # ← repeated
+    {"role": "assistant", "content": "The file contains Hello World"},             # ← repeated
+    {"role": "user",      "content": "Change it to Hi"},                          # ← new
+]
+# 6 messages, ~3000 tokens — everything from round 1 is re-sent
 ```
 
-Token growth managed automatically:
-- **Sliding window**: oldest messages trimmed when over budget
-- **Tool result truncation**: long outputs capped at 200 chars
-- **Frozen prefix**: system prompt cached as immutable prefix for provider-side KV cache
+Every round re-sends: system prompt + all history + current input.
+Token count grows linearly. When over budget, **sliding window compression** trims the oldest messages.
 
-#### Stateful Session Mode (96% token savings)
+#### `stateful` — first round full, subsequent rounds delta only
 
-For providers that maintain server-side context:
+```python
+# ── Round 1: API receives (same as stateless) ────────
+messages = [
+    {"role": "system",    "content": "<system-identity>...</system-identity>"},
+    {"role": "user",      "content": "Read /tmp/test.txt"},
+]
+# sent_count: 0 → 2
+
+# ── Round 2: API receives (delta only) ────────────────
+messages = [
+    {"role": "assistant", "tool_calls": [{"id":"tc1", "function":{"name":"read_file",...}}]},  # ← new since last
+    {"role": "tool",      "content": "Hello World", "tool_call_id": "tc1"},                   # ← new since last
+    {"role": "assistant", "content": "The file contains Hello World"},                         # ← new since last
+    {"role": "user",      "content": "Change it to Hi"},                                      # ← new since last
+]
+# 4 messages, ~200 tokens — no system, no round-1 history
+# sent_count: 2 → 6
+```
+
+Provider holds the full context server-side. Framework only sends `messages[sent_count:]`.
+Compression is **skipped** (trimming would break the sent_count offset).
+
+#### Config
 
 ```json
+{"model": {"session_mode": "stateless"}}
 {"model": {"session_mode": "stateful"}}
 ```
 
-```python
-# Round 1 — full (same as default)
-messages = [
-    {"role": "system",    "content": "<system-identity>...</system-identity>"},
-    {"role": "user",      "content": "Read /tmp/test.txt"},
-]  # ~2700 tokens
+Default is `stateless`. Only switch to `stateful` if your provider supports server-side conversation state.
 
-# Round 2 — delta only (new messages since last send)
-messages = [
-    {"role": "assistant", "content": "", "tool_calls": [{"id": "tc1", ...}]},
-    {"role": "tool",      "content": "Hello World", "tool_call_id": "tc1"},
-    {"role": "assistant", "content": "The file contains Hello World"},
-    {"role": "user",      "content": "Change it to Hi"},
-]  # ~200 tokens — no system, no history repeat
-```
+#### Under the hood
 
-| | Default | stateful |
-|--|---------|----------|
-| Round 1 | ~2700 tokens | ~2700 tokens |
-| Round 2 | ~3000 tokens | **~200 tokens** |
-| Round 10 | ~6000 tokens | **~150 tokens** |
-| Trend | Linear growth | Near-constant |
-| Compression | Active | Skipped |
+| Layer | `stateless` | `stateful` |
+|-------|-------------|------------|
+| **`get_delta_messages()`** | Returns full array | Returns `messages[sent_count:]` |
+| **API request size** | Linear growth (all history every round) | Near-constant (only new messages) |
+| **Context compression** | Enabled — sliding window trims oldest | Skipped — would break delta offset |
+| **`_session.active`** | `False` | `True` |
+| **`sent_count`** | Not tracked | Incremented each round |
+| **Failure if provider is stateless** | None (always works) | Model loses context (no history in request) |
+
+Implementation chain:
+1. `RunCoordinator` calls `adapter.begin_session(run_id)` at run start
+2. `ContextEngineer` checks `stateful_session` flag → skips compression if true
+3. `AgentLoop._call_llm()` calls `adapter.get_delta_messages(messages)` → sends result to API
+4. `adapter.end_session()` called in `finally` block
+
+| | stateless | stateful |
+|--|-----------|----------|
+| **Round 1** | ~2700 tokens | ~2700 tokens |
+| **Round 2** | ~3000 tokens | **~200 tokens** |
+| **Round 10** | ~6000 tokens | **~150 tokens** |
+
+> Token numbers are illustrative estimates.
 
 ### Skills (SKILL.md)
 - File-based skills with YAML frontmatter: `skills/<name>/SKILL.md`
