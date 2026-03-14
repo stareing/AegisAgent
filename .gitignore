@@ -1,4 +1,9 @@
-config/doubao.json
-config/doubao.local.json
-logs
-data/memories.db
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+logs/*.log
+
+data/*.db
+
+config/*.local.json
