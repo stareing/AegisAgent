@@ -506,8 +506,34 @@ class AgentFramework:
             cancel_event=cancel_event,
         )
 
+    def begin_conversation(self, conversation_id: str = "") -> None:
+        """Start a conversation-level stateful session.
+
+        When active, the adapter session persists across multiple run() calls.
+        First run sends full context (system prompt + user input).
+        Subsequent runs send only new messages (delta).
+
+        Only effective when config.model.session_mode = "stateful".
+        """
+        if not self._setup_done:
+            self.setup()
+        if self._deps and self._deps.model_adapter:
+            adapter = self._deps.model_adapter
+            if hasattr(adapter, "supports_stateful_session") and adapter.supports_stateful_session():
+                adapter.begin_session(session_id=conversation_id or "conv")
+                logger.info("conversation.session_started", conversation_id=conversation_id)
+
+    def end_conversation(self) -> None:
+        """End the conversation-level stateful session."""
+        if self._deps and self._deps.model_adapter:
+            adapter = self._deps.model_adapter
+            if hasattr(adapter, "_session") and adapter._session.active:
+                adapter.end_session()
+                logger.info("conversation.session_ended")
+
     async def shutdown(self) -> None:
         """Clean up resources."""
+        self.end_conversation()
         if self._mcp_manager:
             await self._mcp_manager.disconnect_all()
         logger.info("framework.shutdown")

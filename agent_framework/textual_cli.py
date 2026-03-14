@@ -452,6 +452,9 @@ class AegisAgentApp(App[None]):
         hdr = self.query_one("#hdr", AegisHeader)
         hdr.turn_count = 0
         hdr.total_tokens = 0
+        # Reset conversation session so next run sends full context
+        self._fw.end_conversation()
+        self._fw.begin_conversation()
         self.notify("New session started", timeout=2)
         self.query_one("#prompt", Input).focus()
 

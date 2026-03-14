@@ -134,24 +134,35 @@ class RunCoordinator:
         if hasattr(deps.context_engineer, "reset_compressor"):
             deps.context_engineer.reset_compressor()
 
-        # Begin stateful adapter session for KV cache optimization
+        # Begin stateful adapter session for KV cache optimization.
+        # If a conversation-level session is already active (begun by
+        # AgentFramework.begin_conversation), skip begin/end here so the
+        # session persists across multiple run() calls — enabling the
+        # "first-run full context, subsequent-runs delta only" pattern.
         adapter = deps.model_adapter
         adapter_stateful = False
-        if hasattr(adapter, "begin_session"):
+        conversation_session_active = (
+            hasattr(adapter, "_session") and adapter._session.active
+        )
+        if not conversation_session_active and hasattr(adapter, "begin_session"):
             maybe = adapter.begin_session(session_id=run_id)
             if inspect.isawaitable(maybe):
                 await maybe
-            sfn = getattr(adapter, "supports_stateful_session", None)
-            if sfn:
-                try:
-                    val = sfn()
-                    if inspect.isawaitable(val):
-                        val = await val
-                    adapter_stateful = bool(val)
-                except Exception:
-                    pass
-            if adapter_stateful:
-                logger.info("run.stateful_session_started", run_id=run_id)
+        sfn = getattr(adapter, "supports_stateful_session", None)
+        if sfn:
+            try:
+                val = sfn()
+                if inspect.isawaitable(val):
+                    val = await val
+                adapter_stateful = bool(val)
+            except Exception:
+                pass
+        if adapter_stateful:
+            logger.info(
+                "run.stateful_session",
+                run_id=run_id,
+                conversation_session=conversation_session_active,
+            )
         session_started = False
         try:
             # Defensive reset: clear any stale skill state from a prior run
@@ -356,8 +367,8 @@ class RunCoordinator:
                         )
                 except Exception as e:
                     logger.warning("run.subagent_cancel_failed", run_id=run_id, error=str(e))
-            # End stateful adapter session
-            if hasattr(deps.model_adapter, "end_session"):
+            # End stateful adapter session — only if we started it (not conversation-level)
+            if not conversation_session_active and hasattr(deps.model_adapter, "end_session"):
                 try:
                     maybe = deps.model_adapter.end_session()
                     if inspect.isawaitable(maybe):

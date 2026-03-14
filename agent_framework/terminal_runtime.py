@@ -21,8 +21,6 @@ from agent_framework.models.agent import Skill
 from agent_framework.models.message import Message, ModelResponse, TokenUsage, ToolCallRequest
 from agent_framework.tools.decorator import tool
 
-MAX_HISTORY_TOKENS = 4096
-
 _NO_COLOR = os.environ.get("NO_COLOR") is not None
 
 
@@ -320,6 +318,8 @@ def build_framework(
     framework.register_tool(_make_note_tool(memory_manager_ref))
     for skill in BUILTIN_SKILLS:
         framework.register_skill(skill)
+    # Start conversation-level session for cross-turn delta optimization
+    framework.begin_conversation()
     return framework, mock_model
 
 
@@ -349,17 +349,6 @@ class ReplState:
         else:
             self.history.append(Message(role="assistant", content=result.final_answer or ""))
         self.turn_count += 1
-
-    def trim_to_token_budget(self, budget: int = MAX_HISTORY_TOKENS) -> None:
-        total = self._estimate_tokens()
-        while total > budget and len(self.history) >= 2:
-            self.history.pop(0)
-            if self.history and self.history[0].role == "assistant":
-                self.history.pop(0)
-            total = self._estimate_tokens()
-
-    def should_auto_compact(self, threshold_ratio: float = 0.85) -> bool:
-        return bool(self.history) and self._estimate_tokens() >= int(MAX_HISTORY_TOKENS * threshold_ratio)
 
     def apply_context_editing(self) -> int:
         if len(self.history) < 4:
@@ -401,6 +390,11 @@ class ReplState:
         return pruned
 
     async def compact(self, model_adapter: Any) -> str:
+        """Compress history via layered LLM summarization.
+
+        User-triggered: the most recent user message (current input) is
+        excluded from compression and preserved as-is after the summary.
+        """
         if len(self.history) < 2:
             return ""
 
@@ -412,10 +406,19 @@ class ReplState:
         )
 
         previous_summary = None
-        compress_messages = self.history
-        if self.history and is_summary_message(self.history[0]):
-            previous_summary = self.history[0].content
-            compress_messages = self.history[1:]
+        compress_messages = list(self.history)
+        if compress_messages and is_summary_message(compress_messages[0]):
+            previous_summary = compress_messages[0].content
+            compress_messages = compress_messages[1:]
+
+        if not compress_messages:
+            return ""
+
+        # User-triggered: exclude the last user message from compression
+        # (it's the "current input" that shouldn't be summarized away)
+        preserved_tail: list[Message] = []
+        while compress_messages and compress_messages[-1].role == "user":
+            preserved_tail.insert(0, compress_messages.pop())
 
         if not compress_messages:
             return ""
@@ -424,13 +427,17 @@ class ReplState:
             messages_to_text(compress_messages),
             model_adapter,
             previous_summary=previous_summary,
+            messages=compress_messages,
         )
         if not summary_text:
             return "[Compaction produced empty summary]"
 
         old_count = len(self.history)
         old_tokens = self._estimate_tokens()
-        self.history = [Message(role="user", content=wrap_summary(summary_text))]
+        self.history = [
+            Message(role="user", content=wrap_summary(summary_text)),
+            *preserved_tail,
+        ]
         self.turn_count = 0
         new_tokens = self._estimate_tokens()
         return f"Compacted {old_count} messages (~{old_tokens} tokens) -> 1 summary (~{new_tokens} tokens)"
@@ -609,7 +616,7 @@ async def _cmd_history(fw: AgentFramework, mock: InteractiveMockModel | None, st
             print(f"  {_green('Agent:')} {(message.content or '')[:120]}")
             if index < len(messages) - 1:
                 print()
-    print(f"\n  {_dim(f'Token 预算: {MAX_HISTORY_TOKENS}  |  当前: ~{estimate}')}")
+    print(f"\n  {_dim(f'消息数: {state.message_count()}  |  ~{estimate} tokens')}")
 
 
 @_register_cmd("history-clear", "清空对话历史", category="会话")
@@ -1156,12 +1163,6 @@ async def execute_user_input(
     output = format_result(result)
     if result.success:
         state.append_turn(user_input, result)
-        state.trim_to_token_budget()
-        if state.should_auto_compact() and not mock_model:
-            adapter = fw._deps.model_adapter if fw._deps else None
-            if adapter:
-                compact_result = await state.compact(adapter)
-                output = f"{output}\n  {_yellow('(上下文接近上限，自动压缩中...)')}\n  {_dim(compact_result)}"
     return output
 
 

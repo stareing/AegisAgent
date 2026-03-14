@@ -215,7 +215,7 @@ class ContextCompressor:
                     return [summary_group] + recent_groups
             return groups
 
-        # Build text and call LLM via shared summarizer
+        # Build text and call LLM via shared summarizer (with layered annotations)
         from agent_framework.context.summarizer import call_llm_compress, messages_to_text
 
         uncovered_msgs = [msg for g in uncovered_groups for msg in g.messages]
@@ -223,7 +223,9 @@ class ContextCompressor:
         previous_summary = self._frozen_summary.summary_text if self._frozen_summary else None
 
         summary_text = await call_llm_compress(
-            history_text, model_adapter, previous_summary=previous_summary,
+            history_text, model_adapter,
+            previous_summary=previous_summary,
+            messages=uncovered_msgs,
         )
 
         if not summary_text:

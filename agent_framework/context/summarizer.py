@@ -3,7 +3,7 @@
 Single source of truth for:
 - History-to-text conversion
 - Summary XML tag format
-- LLM compression call
+- LLM compression call (layered)
 - Summary validation
 """
 
@@ -59,40 +59,147 @@ def is_summary_message(msg: Message) -> bool:
     return msg.content.strip().startswith(f"<{SUMMARY_TAG}")
 
 
+def classify_layer(index: int, total: int) -> str:
+    """Classify a message's compression layer by its position.
+
+    Newer messages (higher index) get lighter compression.
+    """
+    if total == 0:
+        return "recent"
+    ratio = index / total
+    if ratio >= 0.75:
+        return "recent"
+    if ratio >= 0.50:
+        return "near"
+    if ratio >= 0.25:
+        return "mid"
+    return "far"
+
+
+def _build_layered_input(
+    messages: list[Message],
+    previous_summary: str | None = None,
+) -> str:
+    """Build compression input with layer annotations per message group.
+
+    Groups consecutive messages by layer and wraps each group in
+    <compression-layer level="..."> tags so the LLM knows the
+    compression intensity to apply.
+    """
+    total = len(messages)
+    parts: list[str] = []
+
+    if previous_summary:
+        parts.append(f"[已有摘要]\n{previous_summary}\n")
+
+    parts.append("以下是需要压缩的历史对话：\n")
+
+    current_layer = ""
+    layer_lines: list[str] = []
+
+    for i, msg in enumerate(messages):
+        layer = classify_layer(i, total)
+
+        if layer != current_layer:
+            # Flush previous layer
+            if layer_lines and current_layer:
+                parts.append(f"<compression-layer level=\"{current_layer}\">")
+                parts.extend(layer_lines)
+                parts.append(f"</compression-layer>")
+                parts.append("")
+            current_layer = layer
+            layer_lines = []
+
+        # Convert message to text line
+        content = msg.content or ""
+        if msg.tool_calls:
+            args = []
+            for tc in msg.tool_calls:
+                args_str = json.dumps(tc.arguments, ensure_ascii=False, default=str)
+                args.append(f"{tc.function_name}({args_str})")
+            layer_lines.append(f"[{msg.role}] (tool_calls: {', '.join(args)})")
+        elif msg.tool_call_id:
+            layer_lines.append(f"[tool:{msg.name or '?'}] {content}")
+        else:
+            layer_lines.append(f"[{msg.role}] {content}")
+
+    # Flush last layer
+    if layer_lines and current_layer:
+        parts.append(f"<compression-layer level=\"{current_layer}\">")
+        parts.extend(layer_lines)
+        parts.append(f"</compression-layer>")
+
+    return "\n".join(parts)
+
+
+# Maximum compression ratio — summary output ≤ 15% of input tokens.
+_MAX_COMPRESSION_RATIO = 0.15
+# Absolute floor so very short histories still get a usable summary.
+_MIN_SUMMARY_TOKENS = 256
+
+
 async def call_llm_compress(
     history_text: str,
     model_adapter: Any,
     previous_summary: str | None = None,
-    max_tokens: int = 2048,
+    max_tokens: int | None = None,
+    messages: list[Message] | None = None,
 ) -> str | None:
-    """Call LLM with compression prompt to produce structured summary.
+    """Call LLM with layered compression prompt to produce structured summary.
+
+    The output token budget is capped at 15% of input token count
+    (``_MAX_COMPRESSION_RATIO``).  Callers may still pass an explicit
+    *max_tokens* to further limit output.
 
     Args:
-        history_text: Text representation of messages to compress.
+        history_text: Text representation of messages (used when messages
+                      list is not provided, for backward compatibility).
         model_adapter: Model adapter for LLM call.
         previous_summary: Existing summary to merge with (for incremental).
-        max_tokens: Max output tokens for the summary.
+        max_tokens: Optional hard cap on output tokens.  When omitted the
+                    cap is derived from input size × 15%.
+        messages: Original Message objects. When provided, enables layered
+                  compression with per-message layer classification.
 
     Returns:
         Summary text string, or None on failure.
     """
     from agent_framework.agent.prompt_templates import CONTEXT_COMPRESSION_PROMPT
 
-    input_parts: list[str] = []
-    if previous_summary:
-        input_parts.append(f"[已有摘要]\n{previous_summary}\n")
-    input_parts.append(f"以下是需要压缩的历史对话：\n\n{history_text}")
+    # Build input: layered (with annotations) or flat (backward compat)
+    if messages:
+        user_content = _build_layered_input(messages, previous_summary)
+    else:
+        input_parts: list[str] = []
+        if previous_summary:
+            input_parts.append(f"[已有摘要]\n{previous_summary}\n")
+        input_parts.append(f"以下是需要压缩的历史对话：\n\n{history_text}")
+        user_content = "\n".join(input_parts)
+
+    # Estimate input tokens to derive output budget
+    input_char_count = len(history_text) + len(previous_summary or "")
+    estimated_input_tokens = max(input_char_count // 4, 1)
+    budget = max(int(estimated_input_tokens * _MAX_COMPRESSION_RATIO), _MIN_SUMMARY_TOKENS)
+    if max_tokens is not None:
+        budget = min(budget, max_tokens)
 
     compress_messages = [
         Message(role="system", content=CONTEXT_COMPRESSION_PROMPT),
-        Message(role="user", content="\n".join(input_parts)),
+        Message(role="user", content=user_content),
     ]
+
+    logger.info(
+        "summarizer.compressing",
+        input_tokens_est=estimated_input_tokens,
+        output_budget=budget,
+        ratio=f"{_MAX_COMPRESSION_RATIO:.0%}",
+    )
 
     try:
         response = await model_adapter.complete(
             messages=compress_messages,
             temperature=0.0,
-            max_tokens=max_tokens,
+            max_tokens=budget,
         )
         text = (response.content or "").strip()
         return text if text else None
