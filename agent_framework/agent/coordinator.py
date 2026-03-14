@@ -450,12 +450,18 @@ class RunCoordinator:
             runtime_info = await runtime_info
 
         # Check if adapter is in stateful session mode
-        adapter_stateful = (
-            hasattr(deps.model_adapter, "supports_stateful_session")
-            and hasattr(deps.model_adapter, "_session")
-            and deps.model_adapter._session.active
-            and deps.model_adapter.supports_stateful_session()
-        )
+        adapter_stateful = False
+        if (hasattr(deps.model_adapter, "_session")
+                and getattr(deps.model_adapter._session, "active", False)):
+            sfn = getattr(deps.model_adapter, "supports_stateful_session", None)
+            if sfn:
+                try:
+                    val = sfn()
+                    if inspect.isawaitable(val):
+                        val = await val
+                    adapter_stateful = bool(val)
+                except Exception:
+                    pass
 
         context_materials = {
             "agent_config": agent.agent_config,
