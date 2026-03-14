@@ -183,7 +183,11 @@ class AgentLoop:
         is_delta = False
         if hasattr(model_adapter, "get_delta_messages") and hasattr(model_adapter, "_session"):
             try:
+                import inspect as _inspect
                 delta = model_adapter.get_delta_messages(messages)
+                if _inspect.isawaitable(delta):
+                    delta.close()  # AsyncMock guard — discard coroutine
+                    delta = messages
                 if isinstance(delta, list) and len(delta) < len(messages):
                     is_delta = True
                     actual_messages = delta
