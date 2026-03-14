@@ -32,10 +32,17 @@ logger = logging.getLogger(__name__)
 
 
 class CompressionStrategy(str, Enum):
+    """Compression strategy selection.
+
+    LLM_SUMMARIZE (default): Best quality. Calls LLM to produce structured
+      summary. Falls back to TOOL_RESULT_SUMMARY if no adapter available.
+    TOOL_RESULT_SUMMARY: Truncates long tool outputs, then sliding window.
+    SLIDING_WINDOW: Fastest, lowest quality. Drops oldest groups.
+    """
+
+    LLM_SUMMARIZE = "LLM_SUMMARIZE"
     TOOL_RESULT_SUMMARY = "TOOL_RESULT_SUMMARY"
     SLIDING_WINDOW = "SLIDING_WINDOW"
-    LLM_SUMMARIZE = "LLM_SUMMARIZE"
-    LLMLINGUA_COMPRESS = "LLMLINGUA_COMPRESS"
 
 
 class SummaryBlock(BaseModel):
@@ -73,7 +80,7 @@ class ContextCompressor:
 
     def __init__(
         self,
-        strategy: CompressionStrategy = CompressionStrategy.SLIDING_WINDOW,
+        strategy: CompressionStrategy = CompressionStrategy.LLM_SUMMARIZE,
         token_counter: Callable[[list[Message]], int] | None = None,
     ) -> None:
         self._strategy = strategy
@@ -88,23 +95,28 @@ class ContextCompressor:
         target_tokens: int,
         model_adapter: Any = None,
     ) -> list[ToolTransactionGroup]:
-        """Synchronous compression (SLIDING_WINDOW / TOOL_RESULT_SUMMARY)."""
+        """Synchronous compression with cascade fallback.
+
+        LLM_SUMMARIZE requires async — sync path falls back to lower strategies.
+        Cascade: TOOL_RESULT_SUMMARY → SLIDING_WINDOW.
+        """
         current_tokens = sum(
             g.token_estimate or self._count_group(g) for g in groups
         )
         if current_tokens <= target_tokens:
             return self._prepend_frozen_summary(groups, target_tokens)
 
+        # Sync path: LLM_SUMMARIZE not available, cascade to lower strategies
         if self._strategy == CompressionStrategy.SLIDING_WINDOW:
             return self._sliding_window(groups, target_tokens)
-        if self._strategy == CompressionStrategy.TOOL_RESULT_SUMMARY:
-            return self._tool_result_summary(groups, target_tokens)
-        if self._strategy in (CompressionStrategy.LLM_SUMMARIZE, CompressionStrategy.LLMLINGUA_COMPRESS):
-            if model_adapter is None:
-                logger.info("compression.llm_strategy_sync_fallback")
-                return self._sliding_window(groups, target_tokens)
-            return self._sliding_window(groups, target_tokens)
 
+        # Try TOOL_RESULT_SUMMARY first (for LLM_SUMMARIZE and TOOL_RESULT_SUMMARY)
+        result = self._tool_result_summary(groups, target_tokens)
+        result_tokens = sum(g.token_estimate or self._count_group(g) for g in result)
+        if result_tokens <= target_tokens:
+            return result
+
+        # Final fallback: sliding window
         return self._sliding_window(groups, target_tokens)
 
     async def compress_groups_async(
@@ -113,16 +125,28 @@ class ContextCompressor:
         target_tokens: int,
         model_adapter: Any = None,
     ) -> list[ToolTransactionGroup]:
-        """Async compression — required for LLM_SUMMARIZE."""
+        """Async compression with cascade fallback.
+
+        Cascade order:
+        1. LLM_SUMMARIZE (if strategy is LLM_SUMMARIZE and adapter available)
+        2. TOOL_RESULT_SUMMARY (truncate long tool outputs)
+        3. SLIDING_WINDOW (drop oldest groups)
+        """
         current_tokens = sum(
             g.token_estimate or self._count_group(g) for g in groups
         )
         if current_tokens <= target_tokens:
             return self._prepend_frozen_summary(groups, target_tokens)
 
+        # Step 1: try LLM_SUMMARIZE if configured and adapter available
         if self._strategy == CompressionStrategy.LLM_SUMMARIZE and model_adapter:
-            return await self._llm_summarize(groups, target_tokens, model_adapter)
+            result = await self._llm_summarize(groups, target_tokens, model_adapter)
+            result_tokens = sum(g.token_estimate or self._count_group(g) for g in result)
+            if result_tokens <= target_tokens:
+                return result
+            # LLM summary too large — fall through to lower strategies
 
+        # Step 2: sync cascade (TOOL_RESULT_SUMMARY → SLIDING_WINDOW)
         return self.compress_groups(groups, target_tokens, model_adapter)
 
     # ------------------------------------------------------------------

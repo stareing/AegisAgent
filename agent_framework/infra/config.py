@@ -31,7 +31,7 @@ class ContextConfig(BaseModel):
     max_context_tokens: int = 8192
     reserve_for_output: int = 1024
     compress_threshold_ratio: float = 0.85
-    default_compression_strategy: str = "SLIDING_WINDOW"
+    default_compression_strategy: str = "LLM_SUMMARIZE"
     spawn_seed_ratio: float = 0.3
 
 
