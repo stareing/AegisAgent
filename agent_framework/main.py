@@ -20,9 +20,10 @@ from typing import AsyncIterator, Any
 
 # Enable readline for proper line editing (CJK backspace, history, etc.)
 try:
-    import readline  # noqa: F401
+    import readline
+    _HAS_READLINE = True
 except ImportError:
-    pass  # Windows fallback — pyreadline3 optional
+    _HAS_READLINE = False  # Windows fallback — pyreadline3 optional
 
 # ---------------------------------------------------------------------------
 # ANSI helpers
@@ -820,11 +821,105 @@ def _print_banner(use_mock: bool, config_path: str | None, fw: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Slash command completion + interactive menu
+# ---------------------------------------------------------------------------
+
+
+_repl_framework_ref: Any = None  # Set at REPL start for completer access
+
+
+def _setup_readline_completer() -> None:
+    """Configure readline for slash command tab completion.
+
+    Completes:
+    - Built-in commands: /help, /tools, /skills, ...
+    - Skill shortcuts: /skill <skill_id> via skill router
+    """
+    if not _HAS_READLINE:
+        return
+
+    def _completer(text: str, state: int) -> str | None:
+        if not text.startswith("/"):
+            return None
+        prefix = text[1:].lower()
+
+        matches: list[str] = []
+        # Built-in commands
+        matches.extend(f"/{n}" for n in sorted(_COMMANDS) if n.startswith(prefix))
+
+        # Skill IDs (for /skill <id> shortcut)
+        if _repl_framework_ref:
+            try:
+                for s in _repl_framework_ref.list_skills():
+                    full = f"/skill {s.skill_id}"
+                    if full[1:].startswith(prefix) or s.skill_id.startswith(prefix):
+                        if full not in matches:
+                            matches.append(full)
+            except Exception:
+                pass
+
+        if state < len(matches):
+            return matches[state]
+        return None
+
+    readline.set_completer(_completer)
+    readline.set_completer_delims("")
+    readline.parse_and_bind("tab: complete")
+
+
+def _show_slash_menu(filter_text: str = "") -> None:
+    """Display a filtered slash command + skill menu.
+
+    Triggered by:
+    - Bare `/` — show everything
+    - `/prefix` with no exact match — show filtered results
+    """
+    prefix = filter_text.lower()
+    categories: dict[str, list[tuple[str, str]]] = {}
+    for name, (_, desc, _, cat) in sorted(_COMMANDS.items()):
+        if prefix and not name.startswith(prefix):
+            continue
+        categories.setdefault(cat, []).append((name, desc))
+
+    # Include file-based skills as invokable commands
+    if _repl_framework_ref:
+        try:
+            for s in _repl_framework_ref.list_skills():
+                display_name = f"skill {s.skill_id}"
+                if prefix and not display_name.startswith(prefix) and not s.skill_id.startswith(prefix):
+                    continue
+                desc = s.description[:60] + "..." if len(s.description) > 60 else s.description
+                if not desc:
+                    desc = s.name or s.skill_id
+                categories.setdefault("技能", []).append((display_name, desc))
+        except Exception:
+            pass
+
+    if not categories:
+        print(f"  {_dim('无匹配命令')}")
+        return
+
+    print()
+    all_names = [name for cmds in categories.values() for name, _ in cmds]
+    max_name_len = max((len(n) for n in all_names), default=10)
+    col_width = max_name_len + 10
+
+    for cat, cmds in categories.items():
+        print(f"  {_dim('─' * 60)}")
+        for name, desc in cmds:
+            print(f"  {_cyan('/' + name):{col_width}s} {desc}")
+    print()
+
+
+# ---------------------------------------------------------------------------
 # REPL
 # ---------------------------------------------------------------------------
 
 async def _repl(fw: Any, mock_model: InteractiveMockModel | None) -> None:
+    global _repl_framework_ref
+    _repl_framework_ref = fw
     state = ReplState()
+    _setup_readline_completer()
 
     while True:
         try:
@@ -834,6 +929,11 @@ async def _repl(fw: Any, mock_model: InteractiveMockModel | None) -> None:
             break
 
         if not user_input:
+            continue
+
+        # Bare "/" — show full command menu
+        if user_input == "/":
+            _show_slash_menu()
             continue
 
         # Slash command dispatch
@@ -852,12 +952,13 @@ async def _repl(fw: Any, mock_model: InteractiveMockModel | None) -> None:
                 await handler(fw, mock_model, state, cmd_args)
                 continue
             else:
-                suggestions = [n for n in _COMMANDS if n.startswith(cmd_name)]
-                if suggestions:
+                # Show filtered menu for prefix matches
+                matches = [n for n in _COMMANDS if n.startswith(cmd_name)]
+                if matches:
                     print(f"  {_red(f'未知命令: /{cmd_name}')}")
-                    print(f"  {_dim('你是否想要:')} {', '.join(_cyan('/' + s) for s in suggestions)}")
+                    _show_slash_menu(cmd_name)
                 else:
-                    print(f"  {_red(f'未知命令: /{cmd_name}')}  {_dim('输入 /help 查看所有命令')}")
+                    print(f"  {_red(f'未知命令: /{cmd_name}')}  {_dim('输入 / 查看所有命令')}")
                 continue
 
         # Agent conversation
