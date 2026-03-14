@@ -1,19 +1,30 @@
 """OrchestratorAgent — main agent with multi-agent coordination capability.
 
-Extends DefaultAgent with orchestration-aware system prompt and spawn
-permission. Used as the default main agent when the framework is
-configured to allow sub-agent spawning.
+Extends BaseAgent with orchestration-aware system prompt, spawn permission,
+and hard exit guards that complement prompt-based soft constraints.
 
-The orchestration intelligence lives in the system prompt, not in code.
-The agent uses the existing spawn_agent tool to delegate tasks, and the
-existing SubAgentScheduler/Runtime handles execution.
+Two layers of control:
+- Soft (prompt): teaches the LLM when/how to delegate and synthesize
+- Hard (code): should_stop enforces iteration/spawn budget limits
 """
 
 from __future__ import annotations
 
 from agent_framework.agent.base_agent import BaseAgent
 from agent_framework.agent.prompt_templates import ORCHESTRATOR_SYSTEM_PROMPT
-from agent_framework.models.agent import AgentConfig, SpawnDecision
+from agent_framework.models.agent import (
+    AgentConfig,
+    AgentState,
+    IterationResult,
+    SpawnDecision,
+    StopDecision,
+    StopReason,
+    StopSignal,
+)
+
+
+# After all spawns complete, allow at most N iterations for synthesis
+_MAX_POST_SPAWN_ITERATIONS = 3
 
 
 class OrchestratorAgent(BaseAgent):
@@ -23,6 +34,7 @@ class OrchestratorAgent(BaseAgent):
     - Uses ORCHESTRATOR_SYSTEM_PROMPT (delegation-aware instructions)
     - allow_spawn_children=True by default
     - Relaxed spawn policy (approves by default, logs for audit)
+    - Hard exit guard: forces stop if LLM keeps iterating after all spawns complete
     """
 
     def __init__(
@@ -56,3 +68,49 @@ class OrchestratorAgent(BaseAgent):
             reason="Orchestrator approves delegation",
             source="OrchestratorAgent",
         )
+
+    def should_stop(
+        self, iteration_result: IterationResult, agent_state: AgentState
+    ) -> StopDecision:
+        """Orchestrator stop logic — adds hard exit guard on top of base checks.
+
+        Hard constraints (code-enforced, not prompt-dependent):
+        1. Base class checks (max_iterations, stop_signal) — always apply
+        2. Post-spawn synthesis budget: if spawns happened but LLM keeps
+           iterating without spawning more, force stop after N iterations
+           to prevent runaway loops
+        """
+        # Base class checks first
+        parent_decision = super().should_stop(iteration_result, agent_state)
+        if parent_decision.should_stop:
+            return parent_decision
+
+        # Hard guard: if spawns occurred, enforce synthesis budget
+        if agent_state.spawn_count > 0:
+            # Find the last iteration that contained a spawn_agent result
+            last_spawn_iter = -1
+            for i, it in enumerate(agent_state.iteration_history):
+                for tr in it.tool_results:
+                    if tr.tool_name == "spawn_agent":
+                        last_spawn_iter = i
+            # Count iterations since last spawn
+            current_iter = len(agent_state.iteration_history) - 1
+            iters_since_last_spawn = current_iter - last_spawn_iter
+
+            if iters_since_last_spawn >= _MAX_POST_SPAWN_ITERATIONS:
+                return StopDecision(
+                    should_stop=True,
+                    reason=(
+                        f"Orchestrator exceeded synthesis budget: "
+                        f"{iters_since_last_spawn} iterations after last spawn "
+                        f"(limit: {_MAX_POST_SPAWN_ITERATIONS}). "
+                        f"Total spawns: {agent_state.spawn_count}."
+                    ),
+                    source="OrchestratorAgent.hard_guard",
+                    stop_signal=StopSignal(
+                        reason=StopReason.MAX_ITERATIONS,
+                        message="Post-spawn synthesis budget exceeded",
+                    ),
+                )
+
+        return StopDecision(should_stop=False, source="OrchestratorAgent")

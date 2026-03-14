@@ -124,12 +124,17 @@ class RunStateController:
     ) -> None:
         """Apply a completed iteration to AgentState.
 
-        Combines: token counting + iteration history append + status update.
+        Combines: token counting + iteration history append + spawn counting.
         This is the single entry point for post-iteration state mutation.
         """
         # Token accounting
         if iteration_result.model_response:
             agent_state.total_tokens_used += iteration_result.model_response.usage.total_tokens
+
+        # Spawn counting — track how many sub-agents were spawned this run
+        for tr in iteration_result.tool_results:
+            if tr.tool_name == "spawn_agent" and tr.success:
+                agent_state.spawn_count += 1
 
         # Append to audit trail (APPEND-ONLY)
         agent_state.iteration_count += 1

@@ -242,6 +242,61 @@ class TestOrchestratorAgent:
         source = inspect.getsource(RunCoordinator.run)
         assert "cancel_all" in source
 
+    def test_orchestrator_hard_exit_guard(self):
+        """Orchestrator must force stop after N post-spawn iterations."""
+        from agent_framework.agent.orchestrator_agent import OrchestratorAgent
+        agent = OrchestratorAgent()
+        state = AgentState(run_id="r1", spawn_count=2, iteration_count=10)
+        # Simulate: last spawn was at iteration 5, now at iteration 10
+        for i in range(10):
+            tr_list = []
+            if i == 5:
+                tr_list = [ToolResult(tool_call_id="tc", tool_name="spawn_agent", success=True, output="done")]
+            state.iteration_history.append(IterationResult(
+                iteration_index=i, tool_results=tr_list,
+            ))
+        result = IterationResult(iteration_index=10)
+        decision = agent.should_stop(result, state)
+        assert decision.should_stop is True
+        assert "synthesis budget" in decision.reason.lower() or "spawn" in decision.reason.lower()
+
+    def test_spawn_count_updated_on_successful_spawn(self):
+        """apply_iteration_result must increment spawn_count on spawn_agent success."""
+        from agent_framework.agent.run_state import RunStateController
+        ctrl = RunStateController()
+        state = AgentState(run_id="r1")
+        result = IterationResult(
+            iteration_index=0,
+            tool_results=[
+                ToolResult(tool_call_id="tc1", tool_name="spawn_agent", success=True, output="done"),
+                ToolResult(tool_call_id="tc2", tool_name="read_file", success=True, output="data"),
+            ],
+        )
+        ctrl.apply_iteration_result(state, result)
+        assert state.spawn_count == 1
+
+    def test_spawn_count_not_updated_on_failure(self):
+        """apply_iteration_result must not count failed spawns."""
+        from agent_framework.agent.run_state import RunStateController
+        ctrl = RunStateController()
+        state = AgentState(run_id="r1")
+        result = IterationResult(
+            iteration_index=0,
+            tool_results=[
+                ToolResult(tool_call_id="tc1", tool_name="spawn_agent", success=False, output="quota exceeded"),
+            ],
+        )
+        ctrl.apply_iteration_result(state, result)
+        assert state.spawn_count == 0
+
+    def test_parent_run_id_uses_run_id_not_agent_id(self):
+        """ToolExecutor must use run_id (not agent_id) for parent_run_id."""
+        import inspect
+        from agent_framework.tools.executor import ToolExecutor
+        source = inspect.getsource(ToolExecutor._route_execution)
+        assert "self._current_run_id" in source
+        assert "parent_run_id = parent_agent.agent_id" not in source
+
 
 # =====================================================================
 # ReActAgent

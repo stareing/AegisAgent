@@ -52,6 +52,7 @@ class ContextSourceProvider:
             cap_keys = {
                 "can_spawn_subagents", "parallel_tool_calls",
                 "max_iterations", "max_concurrent_subagents", "max_subagents_per_run",
+                "current_iteration", "spawned_subagents",
             }
 
             env_lines = [

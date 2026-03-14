@@ -54,6 +54,12 @@ class ToolExecutor:
         self._mcp = mcp_client_manager
         self._parent_agent_getter = parent_agent_getter
         self._max_concurrent = max_concurrent
+        # Set by RunCoordinator at run start — used for parent_run_id in spawn
+        self._current_run_id: str = ""
+
+    def set_current_run_id(self, run_id: str) -> None:
+        """Called by RunCoordinator to bind the current run_id for quota tracking."""
+        self._current_run_id = run_id
 
     async def execute(
         self, tool_call_request: ToolCallRequest
@@ -225,10 +231,8 @@ class ToolExecutor:
             mode_str = validated_arguments.get("mode", "ephemeral").upper()
             scope_str = validated_arguments.get("memory_scope", "isolated").upper()
             parent_agent = self._parent_agent_getter() if self._parent_agent_getter else None
-            # Propagate parent_run_id for quota tracking
-            parent_run_id = ""
-            if parent_agent and hasattr(parent_agent, "agent_id"):
-                parent_run_id = parent_agent.agent_id
+            # Use actual run_id for quota tracking (not agent_id)
+            parent_run_id = self._current_run_id
 
             spec = SubAgentSpec(
                 parent_run_id=parent_run_id,

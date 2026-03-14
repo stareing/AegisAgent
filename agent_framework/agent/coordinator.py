@@ -102,6 +102,10 @@ class RunCoordinator:
         timeout_ms = run_timeout_ms or DEFAULT_RUN_TIMEOUT_MS
         run_start = time.monotonic()
 
+        # Bind run_id to tool executor for correct parent_run_id in spawn
+        if hasattr(deps.tool_executor, "set_current_run_id"):
+            deps.tool_executor.set_current_run_id(run_id)
+
         logger.info(
             "run.started",
             run_id=run_id,
@@ -316,6 +320,7 @@ class RunCoordinator:
         agent: BaseAgent | None = None,
         deps: AgentRuntimeDeps | None = None,
         effective_config: EffectiveRunConfig | None = None,
+        agent_state: AgentState | None = None,
     ) -> dict[str, str]:
         """Collect runtime environment and agent capabilities for context injection.
 
@@ -356,6 +361,11 @@ class RunCoordinator:
                 info["max_concurrent_subagents"] = str(sched._max_concurrent)
                 info["max_subagents_per_run"] = str(sched._max_per_run)
 
+        # Live run state — LLM sees current progress
+        if agent_state:
+            info["current_iteration"] = str(agent_state.iteration_count)
+            info["spawned_subagents"] = str(agent_state.spawn_count)
+
         return info
 
     def _prepare_llm_request(
@@ -387,7 +397,7 @@ class RunCoordinator:
             "memories": memories,
             "task": task,
             "active_skill": active_skill,
-            "runtime_info": self._collect_runtime_info(agent, deps, effective_config),
+            "runtime_info": self._collect_runtime_info(agent, deps, effective_config, agent_state),
             "skill_descriptions": skill_descriptions,
         }
 
