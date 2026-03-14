@@ -381,42 +381,33 @@ class ReplState:
     async def compact(self, model_adapter: Any) -> str:
         """LLM-based compaction: compress entire history into a summary.
 
+        Uses shared summarizer (same logic as ContextCompressor._llm_summarize).
         Replaces all history with a single <summary> message.
-        Returns the summary text for display.
         """
         if not self.history or len(self.history) < 2:
             return ""
 
-        # Build text representation of history
-        lines: list[str] = []
-        for msg in self.history:
-            role = msg.role
-            content = msg.content or ""
-            if msg.tool_calls:
-                tool_names = ", ".join(tc.function_name for tc in msg.tool_calls)
-                lines.append(f"[{role}] (tool_calls: {tool_names})")
-            elif msg.tool_call_id:
-                lines.append(f"[tool:{msg.name or '?'}] {content}")
-            else:
-                lines.append(f"[{role}] {content}")
-        history_text = "\n".join(lines)
+        from agent_framework.context.summarizer import (
+            call_llm_compress,
+            messages_to_text,
+            wrap_summary,
+            is_summary_message,
+        )
 
-        from agent_framework.agent.prompt_templates import CONTEXT_COMPRESSION_PROMPT
+        # Extract existing summary if history starts with one (incremental)
+        previous_summary = None
+        compress_messages = self.history
+        if self.history and is_summary_message(self.history[0]):
+            previous_summary = self.history[0].content
+            compress_messages = self.history[1:]
 
-        compress_messages = [
-            Message(role="system", content=CONTEXT_COMPRESSION_PROMPT),
-            Message(role="user", content=f"以下是需要压缩的历史对话：\n\n{history_text}"),
-        ]
+        if not compress_messages:
+            return ""
 
-        try:
-            response = await model_adapter.complete(
-                messages=compress_messages,
-                temperature=0.0,
-                max_tokens=2048,
-            )
-            summary_text = (response.content or "").strip()
-        except Exception as e:
-            return f"[Compaction failed: {e}]"
+        history_text = messages_to_text(compress_messages)
+        summary_text = await call_llm_compress(
+            history_text, model_adapter, previous_summary=previous_summary,
+        )
 
         if not summary_text:
             return "[Compaction produced empty summary]"
@@ -425,7 +416,7 @@ class ReplState:
         old_count = len(self.history)
         old_tokens = self._estimate_tokens()
         self.history = [
-            Message(role="user", content=f"<summary>\n{summary_text}\n</summary>"),
+            Message(role="user", content=wrap_summary(summary_text)),
         ]
         self.turn_count = 0
 

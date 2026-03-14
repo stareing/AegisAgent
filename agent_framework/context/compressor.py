@@ -160,7 +160,8 @@ class ContextCompressor:
 
     def _build_summary_group(self, block: SummaryBlock) -> ToolTransactionGroup:
         """Convert SummaryBlock to a ToolTransactionGroup."""
-        content = f"<context-summary version=\"{block.summary_version}\">\n{block.summary_text}\n</context-summary>"
+        from agent_framework.context.summarizer import wrap_summary
+        content = wrap_summary(block.summary_text, version=block.summary_version)
         msg = Message(role="user", content=content)
         return ToolTransactionGroup(
             group_id=f"summary_{block.summary_id}",
@@ -289,54 +290,18 @@ class ContextCompressor:
                 return self._sliding_window(groups, target_tokens)
             return self._sliding_window(groups, target_tokens)
 
-        # Build full text to compress (frozen summary + uncovered)
-        lines: list[str] = []
+        # Build text and call LLM via shared summarizer
+        from agent_framework.context.summarizer import call_llm_compress, messages_to_text
 
-        # Include existing summary as context for the new compression
-        if self._frozen_summary:
-            lines.append(f"[previous summary]\n{self._frozen_summary.summary_text}")
-            lines.append("")
+        uncovered_msgs = [msg for g in uncovered_groups for msg in g.messages]
+        history_text = messages_to_text(uncovered_msgs)
+        previous_summary = self._frozen_summary.summary_text if self._frozen_summary else None
 
-        # Add uncovered groups — full content, no truncation
-        for g in uncovered_groups:
-            for msg in g.messages:
-                role = msg.role
-                content = msg.content or ""
-                if msg.tool_calls:
-                    import json
-                    tool_names = ", ".join(tc.function_name for tc in msg.tool_calls)
-                    args_preview = ", ".join(
-                        f"{tc.function_name}({json.dumps(tc.arguments, ensure_ascii=False, default=str)})"
-                        for tc in msg.tool_calls
-                    )
-                    lines.append(f"[{role}] (tool_calls: {args_preview})")
-                elif msg.tool_call_id:
-                    lines.append(f"[tool:{msg.name or '?'}] {content}")
-                else:
-                    lines.append(f"[{role}] {content}")
+        summary_text = await call_llm_compress(
+            history_text, model_adapter, previous_summary=previous_summary,
+        )
 
-        history_text = "\n".join(lines)
-
-        # Call LLM
-        from agent_framework.agent.prompt_templates import CONTEXT_COMPRESSION_PROMPT
-
-        compress_messages = [
-            Message(role="system", content=CONTEXT_COMPRESSION_PROMPT),
-            Message(role="user", content=f"以下是需要压缩的历史对话：\n\n{history_text}"),
-        ]
-
-        try:
-            response = await model_adapter.complete(
-                messages=compress_messages,
-                temperature=0.0,
-                max_tokens=2048,
-            )
-            summary_text = response.content or ""
-        except Exception as e:
-            logger.error("compression.llm_failed", error=str(e))
-            return self._sliding_window(groups, target_tokens)
-
-        if not summary_text.strip():
+        if not summary_text:
             return self._sliding_window(groups, target_tokens)
 
         # Create new frozen summary block
