@@ -264,9 +264,13 @@ class ContextCompressor:
         # Check if frozen summary already covers all old groups
         # Validate both count AND content hash to prevent stale reuse
         current_source_hash = self._compute_cache_key(old_groups)
-        if (self._frozen_summary
-                and self._frozen_summary_group_count >= len(old_groups)
-                and self._frozen_summary.source_hash == current_source_hash):
+        frozen_hash_valid = (
+            self._frozen_summary is not None
+            and self._frozen_summary.source_hash == current_source_hash
+        )
+
+        if (frozen_hash_valid
+                and self._frozen_summary_group_count >= len(old_groups)):
             # Frozen summary covers everything with matching content — reuse
             summary_group = self._build_summary_group(self._frozen_summary)
             if summary_group.token_estimate <= summary_budget:
@@ -274,6 +278,15 @@ class ContextCompressor:
                             covered=self._frozen_summary_group_count,
                             hash=current_source_hash[:8])
                 return [summary_group] + recent_groups
+
+        # If frozen summary exists but hash doesn't match, invalidate it
+        # to prevent stale summary being used as base for uncovered calculation
+        if self._frozen_summary and not frozen_hash_valid:
+            logger.info("compression.frozen_invalidated",
+                        old_hash=self._frozen_summary.source_hash[:8],
+                        new_hash=current_source_hash[:8])
+            self._frozen_summary = None
+            self._frozen_summary_group_count = 0
 
         # Determine uncovered groups (new since last compression)
         uncovered_start = self._frozen_summary_group_count if self._frozen_summary else 0
@@ -286,7 +299,6 @@ class ContextCompressor:
                 total = summary_group.token_estimate + recent_tokens
                 if total <= target_tokens:
                     return [summary_group] + recent_groups
-                # Summary + recent exceeds budget — fall back
                 return self._sliding_window(groups, target_tokens)
             return self._sliding_window(groups, target_tokens)
 

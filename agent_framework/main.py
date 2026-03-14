@@ -323,8 +323,8 @@ class ReplState:
                 self.history.pop(0)
             total = self._estimate_tokens()
 
-    def should_auto_compact(self, threshold_ratio: float = 0.95) -> bool:
-        """Check if REPL history has reached auto-compaction threshold."""
+    def should_auto_compact(self, threshold_ratio: float = 0.85) -> bool:
+        """Check if REPL history has reached auto-compaction threshold (85%)."""
         if not self.history:
             return False
         return self._estimate_tokens() >= int(MAX_HISTORY_TOKENS * threshold_ratio)
