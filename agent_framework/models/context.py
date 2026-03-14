@@ -16,6 +16,7 @@ class ContextStats(BaseModel):
     memory_tokens: int = 0
     session_tokens: int = 0
     input_tokens: int = 0
+    tools_schema_tokens: int = 0
     total_tokens: int = 0
     groups_trimmed: int = 0
     prefix_reused: bool = False
@@ -52,3 +53,4 @@ class LLMRequest(BaseModel):
 
     messages: list[Message] = Field(default_factory=list)
     tools_schema: list[dict] = Field(default_factory=list)
+    tools_schema_tokens: int = 0

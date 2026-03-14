@@ -80,6 +80,8 @@ class RunCoordinator:
         self._state_ctrl = RunStateController()
         self._policy_resolver = RunPolicyResolver()
         self._commit_sequencer = CommitSequencer()
+        # Cached per-run: tool schemas don't change within a run
+        self._cached_tools_schema: list[dict] | None = None
 
     async def run(
         self,
@@ -117,6 +119,8 @@ class RunCoordinator:
             task=task[:200],
         )
 
+        # Reset per-run caches
+        self._cached_tools_schema = None
         session_started = False
         try:
             # Defensive reset: clear any stale skill state from a prior run
@@ -388,8 +392,11 @@ class RunCoordinator:
         # not the mutable SessionState.
         session_snap = self._state_ctrl.session_snapshot(session_state)
 
-        # Skill descriptions for LLM to discover available skills
+        # Skill descriptions: only inject when file-based skills exist
+        # (avoids constant token overhead when only keyword-triggered skills are used)
         skill_descriptions = deps.skill_router.get_skill_descriptions()
+        if skill_descriptions and not any(s.get("description") for s in skill_descriptions):
+            skill_descriptions = []
 
         context_materials = {
             "agent_config": agent.agent_config,
@@ -408,19 +415,35 @@ class RunCoordinator:
             agent_state, context_materials
         )
 
-        # Export tool schemas with capability ceiling applied first.
-        # This is VISIBILITY filtering. The security boundary is
-        # ToolExecutor.is_tool_allowed() at execution time.
-        capability_policy = agent.get_capability_policy()
-        allowed_tools = apply_capability_policy(
-            deps.tool_registry.list_tools(),
-            capability_policy,
-        )
-        tools_schema = deps.tool_registry.export_schemas(
-            whitelist=[t.meta.name for t in allowed_tools]
-        )
+        # Tool schemas: cached per-run (tools don't change within a run).
+        # VISIBILITY filtering only — security is ToolExecutor.is_tool_allowed().
+        if self._cached_tools_schema is None:
+            capability_policy = agent.get_capability_policy()
+            allowed_tools = apply_capability_policy(
+                deps.tool_registry.list_tools(),
+                capability_policy,
+            )
+            self._cached_tools_schema = deps.tool_registry.export_schemas(
+                whitelist=[t.meta.name for t in allowed_tools]
+            )
 
-        return LLMRequest(messages=llm_messages, tools_schema=tools_schema)
+        # Estimate tool schema tokens (~4 chars/token)
+        import json
+        tools_token_est = len(json.dumps(self._cached_tools_schema, default=str)) // 4 if self._cached_tools_schema else 0
+
+        # Update context stats with tool schema token count
+        ctx_stats = deps.context_engineer.report_context_stats()
+        if ctx_stats:
+            # Patch tools_schema_tokens into the last stats (coordinator owns this value)
+            deps.context_engineer._last_stats = ctx_stats.model_copy(
+                update={"tools_schema_tokens": tools_token_est}
+            )
+
+        return LLMRequest(
+            messages=llm_messages,
+            tools_schema=self._cached_tools_schema,
+            tools_schema_tokens=tools_token_est,
+        )
 
     def _finalize_run(
         self,

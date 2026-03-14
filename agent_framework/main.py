@@ -464,8 +464,10 @@ async def _cmd_stats(fw, mock, state, args):
         print(f"    记忆 tokens:     {stats.memory_tokens}")
         print(f"    会话历史 tokens: {stats.session_tokens}")
         print(f"    当前输入 tokens: {stats.input_tokens}")
+        print(f"    工具 schema tokens: {stats.tools_schema_tokens}")
         print(f"    总计 tokens:     {_cyan(str(stats.total_tokens))}")
         print(f"    裁剪组数:        {stats.groups_trimmed}")
+        print(f"    前缀复用:        {'是' if stats.prefix_reused else '否'}")
     except Exception:
         print(f"    {_dim('(尚无统计数据，先发送一条消息)')}")
 
