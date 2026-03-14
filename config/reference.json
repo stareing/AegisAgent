@@ -1,5 +1,8 @@
 {
+  "_comment": "Complete configuration reference — all fields with defaults shown. Copy and modify as needed.",
+
   "model": {
+    "_comment": "LLM model and adapter settings",
     "adapter_type": "openai",
     "default_model_name": "gpt-4o",
     "temperature": 0.7,
@@ -10,14 +13,18 @@
     "max_retries": 3,
     "session_mode": "stateless"
   },
+
   "context": {
+    "_comment": "Context window and compression settings",
     "max_context_tokens": 128000,
     "reserve_for_output": 4096,
     "compress_threshold_ratio": 0.85,
     "default_compression_strategy": "LLM_SUMMARIZE",
     "spawn_seed_ratio": 0.3
   },
+
   "memory": {
+    "_comment": "Saved memory persistence and limits",
     "db_path": "data/memories.db",
     "enable_saved_memory": true,
     "auto_extract_memory": true,
@@ -26,12 +33,16 @@
     "allow_user_memory_namespace": true,
     "allow_memory_management_api": true
   },
+
   "tools": {
+    "_comment": "Tool execution concurrency and confirmation",
     "confirmation_handler_type": "auto",
     "max_concurrent_tool_calls": 5,
     "allow_parallel_tool_calls": true
   },
+
   "subagent": {
+    "_comment": "Sub-agent spawning limits",
     "max_sub_agents_per_run": 5,
     "max_concurrent_sub_agents": 3,
     "per_sub_agent_max_tokens": 4096,
@@ -39,18 +50,36 @@
     "default_max_iterations": 10,
     "allow_recursive_spawn": false
   },
+
   "skills": {
-    "definitions": [],
+    "_comment": "Skill definitions and discovery directories",
+    "definitions": [
+      {
+        "skill_id": "example-skill",
+        "name": "Example",
+        "description": "An example keyword-triggered skill",
+        "trigger_keywords": ["example", "demo"],
+        "system_prompt_addon": "You are in example mode.",
+        "model_override": null,
+        "temperature_override": null
+      }
+    ],
     "directories": []
   },
+
   "mcp": {
+    "_comment": "MCP server connections",
     "config_file": null,
     "servers": []
   },
+
   "a2a": {
+    "_comment": "A2A remote agent registry",
     "known_agents": []
   },
+
   "logging": {
+    "_comment": "Structured logging configuration",
     "log_dir": "logs",
     "json_output": true,
     "level": "INFO"

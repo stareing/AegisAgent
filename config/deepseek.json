@@ -7,7 +7,8 @@
     "api_key": "${DEEPSEEK_API_KEY}",
     "api_base": "https://api.deepseek.com",
     "timeout_ms": 60000,
-    "max_retries": 3
+    "max_retries": 3,
+    "session_mode": "stateless"
   },
   "context": {
     "max_context_tokens": 65536,

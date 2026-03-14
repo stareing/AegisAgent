@@ -7,11 +7,23 @@
     "api_key": "${DOUBAO_API_KEY}",
     "api_base": "https://ark.cn-beijing.volces.com/api/v3",
     "timeout_ms": 60000,
-    "max_retries": 3
+    "max_retries": 3,
+    "session_mode": "stateless"
   },
   "context": {
     "max_context_tokens": 32768,
-    "reserve_for_output": 4096
+    "reserve_for_output": 4096,
+    "compress_threshold_ratio": 0.85,
+    "default_compression_strategy": "LLM_SUMMARIZE"
+  },
+  "tools": {
+    "max_concurrent_tool_calls": 5
+  },
+  "subagent": {
+    "max_sub_agents_per_run": 5,
+    "max_concurrent_sub_agents": 3,
+    "default_deadline_ms": 60000,
+    "default_max_iterations": 10
   },
   "logging": {
     "level": "INFO"
