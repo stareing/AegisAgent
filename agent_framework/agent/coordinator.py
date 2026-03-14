@@ -136,8 +136,14 @@ class RunCoordinator:
             if inspect.isawaitable(maybe):
                 await maybe
             sfn = getattr(adapter, "supports_stateful_session", None)
-            if sfn and not inspect.iscoroutinefunction(sfn):
-                adapter_stateful = bool(sfn())
+            if sfn:
+                try:
+                    val = sfn()
+                    if inspect.isawaitable(val):
+                        val = await val
+                    adapter_stateful = bool(val)
+                except Exception:
+                    pass
             if adapter_stateful:
                 logger.info("run.stateful_session_started", run_id=run_id)
         session_started = False
@@ -389,13 +395,12 @@ class RunCoordinator:
             adapter = deps.model_adapter
             if hasattr(adapter, "supports_parallel_tool_calls"):
                 try:
-                    fn = adapter.supports_parallel_tool_calls
-                    # Some tests monkeypatch this with AsyncMock; avoid creating
-                    # un-awaited coroutine objects in sync path.
-                    if not inspect.iscoroutinefunction(fn):
-                        val = fn()
-                        if not inspect.isawaitable(val):
-                            info["parallel_tool_calls"] = str(bool(val)).lower()
+                    val = adapter.supports_parallel_tool_calls()
+                    # AsyncMock returns awaitable — discard in sync context
+                    if inspect.isawaitable(val):
+                        val.close()  # prevent "coroutine never awaited" warning
+                    else:
+                        info["parallel_tool_calls"] = str(bool(val)).lower()
                 except Exception:
                     pass
 
