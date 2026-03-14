@@ -1,14 +1,14 @@
 """AegisAgent — Textual TUI workspace.
 
 Layout (no sidebar — clean copy-paste):
-  Header: AegisAgent | model | tools | turns | tokens | clock
+  Header: AegisAgent | model | tools | skills | config | turns | tokens
   ┌─ Chat (full width) ────────────────────────────────────────┐
   │  Logo → Welcome → conversation (all selectable/copyable)   │
   └────────────────────────────────────────────────────────────┘
   Working... (status line)
   ┌─ Input ──────────────────────────────────────────── [Send] ┐
   └────────────────────────────────────────────────────────────┘
-  Footer: Ctrl+C Quit | Ctrl+P Cmds | Ctrl+L Clear | Ctrl+N New
+  Footer: F10 Quit | Ctrl+P Cmds | Ctrl+L Clear | Ctrl+N New
 """
 
 # NOTE: This module requires the following packages to be installed:
@@ -18,11 +18,10 @@ Layout (no sidebar — clean copy-paste):
 from __future__ import annotations
 
 import asyncio
-import sys
+import re
 import time
 from typing import Any
 
-from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
@@ -34,8 +33,8 @@ from textual.widgets import (
     Label,
     ListItem,
     ListView,
-    RichLog,
     Static,
+    TextArea,
 )
 from textual.worker import Worker, WorkerState
 
@@ -60,12 +59,11 @@ _BORDER = "#2e4455"
 _DIM = "#6a7a8a"
 _FG = "#ddd8d0"
 
-_B = "\033[1m"
-_D = "\033[2m"
-_R = "\033[0m"
-_AC = "\033[36m"
-_AG = "\033[32m"
-_AY = "\033[33m"
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text)
 
 
 # ══════════════════════════════════════════════════════════
@@ -77,10 +75,12 @@ class AegisHeader(Static):
 
     model_name: reactive[str] = reactive("?")
     tool_count: reactive[int] = reactive(0)
+    skill_count: reactive[int] = reactive(0)
+    config_path: reactive[str] = reactive("")
     turn_count: reactive[int] = reactive(0)
     total_tokens: reactive[int] = reactive(0)
     is_busy: reactive[bool] = reactive(False)
-    mouse_mode: reactive[str] = reactive("copy")
+    focus_mode: reactive[str] = reactive("input")
 
     DEFAULT_CSS = f"""
     AegisHeader {{
@@ -94,17 +94,19 @@ class AegisHeader(Static):
 
     def render(self) -> str:
         status = "[yellow]working[/]" if self.is_busy else "[green]ready[/]"
-        mouse = (
-            f"[bold green]scroll[/]"
-            if self.mouse_mode == "scroll"
-            else f"[bold cyan]copy[/]"
+        focus = (
+            f"[bold cyan]input[/]"
+            if self.focus_mode == "input"
+            else f"[bold green]chat[/]"
         )
         return (
             f"[bold {_GOLD}]AegisAgent[/]"
             f"  [dim]|[/]  {status}"
-            f"  [dim]|[/]  [dim]mouse:[/] {mouse}"
+            f"  [dim]|[/]  [dim]focus:[/] {focus}"
             f"  [dim]|[/]  [dim]model:[/] {self.model_name}"
             f"  [dim]|[/]  [dim]tools:[/] {self.tool_count}"
+            f"  [dim]|[/]  [dim]skills:[/] {self.skill_count}"
+            f"  [dim]|[/]  [dim]config:[/] {self.config_path or '-'}"
             f"  [dim]|[/]  [dim]turns:[/] {self.turn_count}"
             f"  [dim]|[/]  [dim]tokens:[/] {self.total_tokens:,}"
         )
@@ -246,15 +248,12 @@ class AegisAgentApp(App[None]):
     TITLE = "AegisAgent"
 
     BINDINGS = [
-        Binding("ctrl+c", "quit", "Quit", priority=True, show=False),
-        Binding("ctrl+q", "quit", show=False, priority=True),
+        Binding("f10", "quit", show=False, priority=True),
         Binding("ctrl+p", "open_palette", priority=True, show=False),
         Binding("ctrl+l", "clear_chat", priority=True, show=False),
         Binding("ctrl+n", "new_session", priority=True, show=False),
-        Binding("f2", "toggle_mouse", priority=True, show=False),
-        Binding("alt+m", "toggle_mouse", priority=True, show=False),
-        Binding("escape", "focus_prompt", show=False),
-        # Chat scrolling — works even when Input has focus
+        Binding("f6", "focus_chat", priority=True, show=False),
+        Binding("escape", "focus_prompt", show=False, priority=True),
         Binding("pageup", "scroll_chat_up_page", show=False, priority=True),
         Binding("pagedown", "scroll_chat_down_page", show=False, priority=True),
         Binding("ctrl+up", "scroll_chat_up", show=False, priority=True),
@@ -312,14 +311,22 @@ class AegisAgentApp(App[None]):
         self._busy = False
         self._suppress_slash = False
         self._cancel_event: asyncio.Event | None = None
-        self._mouse_captured = False  # default to native terminal selection/copy
+        self._chat_buffer = ""
 
     def compose(self) -> ComposeResult:
         yield AegisHeader(id="hdr")
-        yield RichLog(id="chat", wrap=True, markup=False, highlight=False, auto_scroll=True)
+        yield TextArea(
+            "",
+            id="chat",
+            read_only=True,
+            show_line_numbers=False,
+            show_cursor=False,
+            soft_wrap=True,
+            compact=True,
+        )
         yield Static("", id="busy-line")
         with Horizontal(id="input-bar"):
-            yield Input(placeholder="Ask anything...  /=cmds  ^P=palette  ^L=clear  ^N=new  Esc=stop  F2=mouse  ^C=quit", id="prompt")
+            yield Input(placeholder="Ask anything...  /=cmds  ^P=palette  ^L=clear  ^N=new  F6=chat  Esc=input  F10=quit", id="prompt")
             yield Button("Send", id="btn-send", variant="default")
 
     # ── Mount ──────────────────────────────────────────
@@ -330,20 +337,14 @@ class AegisAgentApp(App[None]):
         hdr = self.query_one("#hdr", AegisHeader)
         hdr.model_name = "Mock" if self._mock else self._fw.config.model.default_model_name
         hdr.tool_count = len(self._fw._registry.list_tools()) if self._fw._registry else 0
-        self._apply_mouse_mode(captured=False, notify=False)
-
-        chat = self.query_one("#chat", RichLog)
-        mode = hdr.model_name
-        tools = hdr.tool_count
-        skills = len(self._fw.list_skills())
-        cfg = f"  |  config: {self._config_path}" if self._config_path else ""
+        hdr.skill_count = len(self._fw.list_skills())
+        hdr.config_path = self._config_path or "-"
+        hdr.focus_mode = "input"
 
         for line in AEGIS_LOGO_LINES:
-            chat.write(Text(line, style="bold cyan"))
-        chat.write(Text(f"model: {mode}  |  tools: {tools}  |  skills: {skills}{cfg}", style="dim"))
-        chat.write(Text(""))
-        chat.write(Text.from_ansi(f"{_B}{_AY}Welcome!{_R} Type a question or {_B}/help{_R} for commands."))
-        chat.write(Text(""))
+            self._append_chat(line)
+        self._append_chat("Welcome! Type a question or /help for commands.")
+        self._append_chat("")
 
     # ── Input ──────────────────────────────────────────
 
@@ -371,13 +372,12 @@ class AegisAgentApp(App[None]):
         prompt.value = ""
         if not text or self._busy:
             return
-        chat = self.query_one("#chat", RichLog)
-        chat.write(Text.from_ansi(f"\n{_B}{_AG}You >{_R} {text}"))
+        self._append_chat("")
+        self._append_chat(f"You > {text}")
         self._set_busy(True)
         self.run_worker(self._dispatch(text), exclusive=True, group="agent")
 
     async def _dispatch(self, text: str) -> None:
-        chat = self.query_one("#chat", RichLog)
         t0 = time.monotonic()
         cancel_event = asyncio.Event()
         self._cancel_event = cancel_event
@@ -387,9 +387,9 @@ class AegisAgentApp(App[None]):
                     self._fw, self._mock, self._state, text, ui_mode="textual",
                 )
                 if result.clear_output:
-                    chat.clear()
+                    self._clear_chat_view()
                 if result.output:
-                    chat.write(Text.from_ansi(result.output))
+                    self._append_chat(_strip_ansi(result.output))
                 if result.should_exit:
                     self.exit()
                 return
@@ -399,14 +399,14 @@ class AegisAgentApp(App[None]):
                 cancel_event=cancel_event,
             )
             elapsed = time.monotonic() - t0
-            chat.write(Text.from_ansi(output))
-            chat.write(Text.from_ansi(f"{_D}({elapsed:.1f}s){_R}"))
+            self._append_chat(_strip_ansi(output))
+            self._append_chat(f"({elapsed:.1f}s)")
 
             hdr = self.query_one("#hdr", AegisHeader)
             hdr.turn_count = self._state.turn_count
             hdr.total_tokens += sum(len(m.content or "") // 4 for m in self._state.history)
         except Exception as exc:
-            chat.write(Text(f"Error: {exc}", style="bold red"))
+            self._append_chat(f"Error: {exc}")
         finally:
             self._cancel_event = None
             self._set_busy(False)
@@ -435,75 +435,51 @@ class AegisAgentApp(App[None]):
             self._suppress_slash = True
             prompt.value = ""
             prompt.focus()
-            chat = self.query_one("#chat", RichLog)
-            chat.write(Text.from_ansi(f"\n{_B}{_AG}> {command}{_R}"))
+            self._append_chat("")
+            self._append_chat(f"> {command}")
             self._set_busy(True)
             self.run_worker(self._dispatch(command), exclusive=True, group="agent")
         else:
             prompt.focus()
 
     def action_clear_chat(self) -> None:
-        self.query_one("#chat", RichLog).clear()
+        self._clear_chat_view()
         self.notify("Chat cleared", timeout=2)
 
     def action_new_session(self) -> None:
         self._state = ReplState()
-        self.query_one("#chat", RichLog).clear()
+        self._clear_chat_view()
         hdr = self.query_one("#hdr", AegisHeader)
         hdr.turn_count = 0
         hdr.total_tokens = 0
         self.notify("New session started", timeout=2)
         self.query_one("#prompt", Input).focus()
 
-    def action_toggle_mouse(self) -> None:
-        """Toggle mouse between scroll mode (Textual captures) and copy mode (terminal native)."""
-        self._apply_mouse_mode(captured=not self._mouse_captured, notify=True)
-
-    def _apply_mouse_mode(self, captured: bool, notify: bool) -> None:
-        """Switch between terminal-native copy mode and Textual mouse mode."""
-        # xterm mouse tracking escape sequences
-        enable = "\x1b[?1000h\x1b[?1003h\x1b[?1006h"
-        disable = "\x1b[?1000l\x1b[?1003l\x1b[?1006l"
-
-        hdr = self.query_one("#hdr", AegisHeader)
-        if captured:
-            sys.stdout.write(enable)
-            sys.stdout.flush()
-            self.capture_mouse(self.query_one("#chat", RichLog))
-            self._mouse_captured = True
-            hdr.mouse_mode = "scroll"
-            if notify:
-                self.notify("Mouse: scroll mode (wheel routed to chat)", timeout=2)
-            return
-
-        self.capture_mouse(None)
-        sys.stdout.write(disable)
-        sys.stdout.flush()
-        self._mouse_captured = False
-        hdr.mouse_mode = "copy"
-        if notify:
-            self.notify("Mouse: copy mode (native selection enabled)", timeout=2)
+    def action_focus_chat(self) -> None:
+        self.query_one("#chat", TextArea).focus()
+        self.query_one("#hdr", AegisHeader).focus_mode = "chat"
+        self.notify("Chat focused: select/copy with Ctrl+C, scroll with mouse or PageUp/PageDown", timeout=2)
 
     def action_scroll_chat_up_page(self) -> None:
-        self.query_one("#chat", RichLog).scroll_page_up(animate=False)
+        self.query_one("#chat", TextArea).scroll_page_up(animate=False)
 
     def action_scroll_chat_down_page(self) -> None:
-        self.query_one("#chat", RichLog).scroll_page_down(animate=False)
+        self.query_one("#chat", TextArea).scroll_page_down(animate=False)
 
     def action_scroll_chat_up(self) -> None:
-        self.query_one("#chat", RichLog).scroll_up(animate=False)
+        self.query_one("#chat", TextArea).scroll_up(animate=False)
 
     def action_scroll_chat_down(self) -> None:
-        self.query_one("#chat", RichLog).scroll_down(animate=False)
+        self.query_one("#chat", TextArea).scroll_down(animate=False)
 
     def action_focus_prompt(self) -> None:
         if self._busy and self._cancel_event:
             self._cancel_event.set()
             self.workers.cancel_group(self, "agent")
-            chat = self.query_one("#chat", RichLog)
-            chat.write(Text("[Cancelled by user]", style="bold yellow"))
+            self._append_chat("[Cancelled by user]")
             self._set_busy(False)
         self.query_one("#prompt", Input).focus()
+        self.query_one("#hdr", AegisHeader).focus_mode = "input"
 
     async def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         if event.worker.group != "agent":
@@ -511,11 +487,22 @@ class AegisAgentApp(App[None]):
         if event.state in (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED):
             self._set_busy(False)
             self.query_one("#prompt", Input).focus()
+            self.query_one("#hdr", AegisHeader).focus_mode = "input"
 
     async def on_unmount(self) -> None:
         await self._fw.shutdown()
 
+    def _append_chat(self, text: str) -> None:
+        chat = self.query_one("#chat", TextArea)
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+        self._chat_buffer = f"{self._chat_buffer}\n{normalized}" if self._chat_buffer else normalized
+        chat.load_text(self._chat_buffer)
+        chat.scroll_end(animate=False)
+
+    def _clear_chat_view(self) -> None:
+        self._chat_buffer = ""
+        self.query_one("#chat", TextArea).load_text("")
+
 
 def run_textual_cli(framework: Any, mock_model: Any, config_path: str | None) -> None:
-    # Keep Textual mouse support available internally, but start in native copy mode.
     AegisAgentApp(framework, mock_model, config_path).run(mouse=True)
