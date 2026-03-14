@@ -323,6 +323,118 @@ class ReplState:
                 self.history.pop(0)
             total = self._estimate_tokens()
 
+    def should_auto_compact(self, threshold_ratio: float = 0.95) -> bool:
+        """Check if REPL history has reached auto-compaction threshold."""
+        if not self.history:
+            return False
+        return self._estimate_tokens() >= int(MAX_HISTORY_TOKENS * threshold_ratio)
+
+    def apply_context_editing(self) -> int:
+        """Remove stale tool call/result pairs where the same tool was called again later.
+
+        Keeps only the most recent invocation of each (tool_name, arguments) pair.
+        Returns the number of messages pruned.
+        """
+        if len(self.history) < 4:
+            return 0
+
+        # Collect signatures of tool calls from newest to oldest
+        import json
+        seen_sigs: set[str] = set()
+        keep_indices: set[int] = set()
+        stale_tool_call_ids: set[str] = set()
+
+        # Pass 1: scan assistant messages with tool_calls (newest first)
+        for i in range(len(self.history) - 1, -1, -1):
+            msg = self.history[i]
+            if msg.role == "assistant" and msg.tool_calls:
+                all_stale = True
+                for tc in msg.tool_calls:
+                    sig = f"{tc.function_name}|{json.dumps(tc.arguments, sort_keys=True, default=str)}"
+                    if sig in seen_sigs:
+                        stale_tool_call_ids.add(tc.id)
+                    else:
+                        seen_sigs.add(sig)
+                        all_stale = False
+                if not all_stale:
+                    keep_indices.add(i)
+            else:
+                keep_indices.add(i)
+
+        # Pass 2: remove tool result messages whose tool_call_id is stale
+        pruned = 0
+        new_history: list[Message] = []
+        for i, msg in enumerate(self.history):
+            if msg.role == "tool" and msg.tool_call_id in stale_tool_call_ids:
+                pruned += 1
+                continue
+            if i not in keep_indices and msg.role == "assistant" and msg.tool_calls:
+                # Check if ALL tool_calls in this message are stale
+                if all(tc.id in stale_tool_call_ids for tc in msg.tool_calls):
+                    pruned += 1
+                    continue
+            new_history.append(msg)
+
+        self.history = new_history
+        return pruned
+
+    async def compact(self, model_adapter: Any) -> str:
+        """LLM-based compaction: compress entire history into a summary.
+
+        Replaces all history with a single <summary> message.
+        Returns the summary text for display.
+        """
+        if not self.history or len(self.history) < 2:
+            return ""
+
+        # Build text representation of history
+        lines: list[str] = []
+        for msg in self.history:
+            role = msg.role
+            content = msg.content or ""
+            if msg.tool_calls:
+                tool_names = ", ".join(tc.function_name for tc in msg.tool_calls)
+                lines.append(f"[{role}] (tool_calls: {tool_names})")
+            elif msg.tool_call_id:
+                lines.append(f"[tool:{msg.name or '?'}] {content}")
+            else:
+                lines.append(f"[{role}] {content}")
+        history_text = "\n".join(lines)
+
+        from agent_framework.agent.prompt_templates import CONTEXT_COMPRESSION_PROMPT
+
+        compress_messages = [
+            Message(role="system", content=CONTEXT_COMPRESSION_PROMPT),
+            Message(role="user", content=f"以下是需要压缩的历史对话：\n\n{history_text}"),
+        ]
+
+        try:
+            response = await model_adapter.complete(
+                messages=compress_messages,
+                temperature=0.0,
+                max_tokens=2048,
+            )
+            summary_text = (response.content or "").strip()
+        except Exception as e:
+            return f"[Compaction failed: {e}]"
+
+        if not summary_text:
+            return "[Compaction produced empty summary]"
+
+        # Replace entire history with summary
+        old_count = len(self.history)
+        old_tokens = self._estimate_tokens()
+        self.history = [
+            Message(role="user", content=f"<summary>\n{summary_text}\n</summary>"),
+        ]
+        self.turn_count = 0
+
+        new_tokens = self._estimate_tokens()
+        return (
+            f"Compacted {old_count} messages (~{old_tokens} tokens) "
+            f"→ 1 summary (~{new_tokens} tokens)"
+        )
+
     def _estimate_tokens(self) -> int:
         total = 0
         for m in self.history:
@@ -515,6 +627,63 @@ async def _cmd_history(fw, mock, state, args):
 async def _cmd_history_clear(fw, mock, state, args):
     state.clear()
     print(f"  {_green('对话历史已清空')}")
+
+
+@_register_cmd("compact", "压缩对话历史为结构化摘要", usage="/compact [custom instruction]", category="会话")
+async def _cmd_compact(fw, mock, state, args):
+    """LLM-based compaction: compress entire REPL history into a summary.
+
+    Replaces all history messages with a single <summary> block.
+    The summary preserves: goals, constraints, facts, decisions, progress,
+    pending items, and critical identifiers.
+    """
+    if not state.history:
+        print(f"  {_dim('对话历史为空，无需压缩')}")
+        return
+    if len(state.history) < 4:
+        print(f"  {_dim('对话历史太短，无需压缩')}")
+        return
+
+    adapter = fw._deps.model_adapter if fw._deps else None
+    if mock:
+        # Mock mode: do a simple text-based compact
+        old_count = len(state.history)
+        content_parts = []
+        for m in state.history:
+            if m.content:
+                content_parts.append(f"[{m.role}] {m.content[:100]}")
+        summary = "\n".join(content_parts[-6:])  # keep last 6 items
+        state.history = [
+            Message(role="user", content=f"<summary>\n{summary}\n</summary>"),
+        ]
+        state.turn_count = 0
+        print(f"  {_green(f'已压缩 {old_count} 条消息 → 摘要 (Mock 模式)')}")
+        return
+
+    if not adapter:
+        print(f"  {_red('模型适配器未初始化')}")
+        return
+
+    print(f"  {_dim('正在压缩对话历史...')}")
+    result = await state.compact(adapter)
+    if result.startswith("["):
+        print(f"  {_red(result)}")
+    else:
+        print(f"  {_green(result)}")
+
+
+@_register_cmd("context-edit", "清理重复的工具调用记录", category="会话")
+async def _cmd_context_edit(fw, mock, state, args):
+    """Remove stale tool call/result pairs from history.
+
+    When the same tool was called multiple times with identical arguments,
+    keeps only the most recent invocation.
+    """
+    pruned = state.apply_context_editing()
+    if pruned > 0:
+        print(f"  {_green(f'已清理 {pruned} 条重复工具调用记录')}")
+    else:
+        print(f"  {_dim('无重复工具调用记录')}")
 
 
 # ── 工具 ──────────────────────────────────────────────────────────────────
@@ -989,7 +1158,18 @@ async def _repl(fw: Any, mock_model: InteractiveMockModel | None) -> None:
             _print_result(result)
             if result.success:
                 state.append_turn(user_input, result)
+                # Context editing: prune stale duplicate tool calls
+                pruned = state.apply_context_editing()
+                if pruned > 0:
+                    print(f"  {_dim(f'(已自动清理 {pruned} 条重复工具调用)')}")
                 state.trim_to_token_budget()
+                # Auto-compact: if history reaches 95% of budget, compress
+                if state.should_auto_compact() and not mock_model:
+                    adapter = fw._deps.model_adapter if fw._deps else None
+                    if adapter:
+                        print(f"  {_yellow('(上下文接近上限，自动压缩中...)')}")
+                        compact_result = await state.compact(adapter)
+                        print(f"  {_dim(compact_result)}")
         except Exception as e:
             print(f"\n  {_red('运行错误:')}")
             print(f"  {e}")
