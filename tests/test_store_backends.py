@@ -202,10 +202,17 @@ class TestPostgreSQLStore(StoreContractTests):
                 sql = sql.replace("TRUE", "1").replace("true", "1")
                 sql = sql.replace("FALSE", "0").replace("false", "0")
                 if params:
-                    # Convert booleans to int for SQLite
-                    params = tuple(
-                        int(p) if isinstance(p, bool) else p for p in params
-                    )
+                    # Convert types for SQLite compatibility
+                    from datetime import datetime as _dt
+                    converted = []
+                    for p in params:
+                        if isinstance(p, bool):
+                            converted.append(int(p))
+                        elif isinstance(p, _dt):
+                            converted.append(p.isoformat())
+                        else:
+                            converted.append(p)
+                    params = tuple(converted)
                 self._cur.execute(sql, params or ())
                 return self
             def fetchall(self):

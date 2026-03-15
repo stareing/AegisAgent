@@ -466,6 +466,7 @@ class TestAgentLoop:
             content="Hello!", finish_reason="stop", usage=TokenUsage(total_tokens=10)
         )
         mock_executor = AsyncMock()
+        mock_executor.is_tool_allowed = MagicMock(return_value=True)
 
         result = await loop.execute_iteration(
             agent, AgentLoopDeps(model_adapter=mock_adapter, tool_executor=mock_executor),
@@ -491,6 +492,7 @@ class TestAgentLoop:
             usage=TokenUsage(total_tokens=20),
         )
         mock_executor = AsyncMock()
+        mock_executor.is_tool_allowed = MagicMock(return_value=True)
         mock_executor.is_tool_allowed = MagicMock(return_value=True)
         mock_executor.batch_execute.return_value = [
             (ToolResult(tool_call_id="tc1", tool_name="search", success=True, output="found"),
@@ -527,6 +529,7 @@ class TestAgentLoop:
             usage=TokenUsage(total_tokens=20),
         )
         mock_executor = AsyncMock()
+        mock_executor.is_tool_allowed = MagicMock(return_value=True)
         mock_executor.is_tool_allowed = MagicMock(return_value=True)
         mock_executor.batch_execute.return_value = [
             (
@@ -566,6 +569,7 @@ class TestAgentLoop:
         mock_adapter = AsyncMock()
         mock_adapter.complete.side_effect = RuntimeError("API down")
         mock_executor = AsyncMock()
+        mock_executor.is_tool_allowed = MagicMock(return_value=True)
 
         result = await loop.execute_iteration(
             agent, AgentLoopDeps(model_adapter=mock_adapter, tool_executor=mock_executor),
@@ -589,6 +593,7 @@ class TestAgentLoop:
             usage=TokenUsage(total_tokens=50),
         )
         mock_executor = AsyncMock()
+        mock_executor.is_tool_allowed = MagicMock(return_value=True)
 
         result = await loop.execute_iteration(
             agent, AgentLoopDeps(model_adapter=mock_adapter, tool_executor=mock_executor),
@@ -611,6 +616,7 @@ class TestAgentLoop:
             usage=TokenUsage(total_tokens=10),
         )
         mock_executor = AsyncMock()
+        mock_executor.is_tool_allowed = MagicMock(return_value=True)
 
         result = await loop.execute_iteration(
             agent, AgentLoopDeps(model_adapter=mock_adapter, tool_executor=mock_executor),
@@ -642,6 +648,7 @@ class TestAgentLoop:
             usage=TokenUsage(total_tokens=10),
         )
         mock_executor = AsyncMock()
+        mock_executor.is_tool_allowed = MagicMock(return_value=True)
         mock_executor.is_tool_allowed = MagicMock(return_value=True)
 
         result = await loop.execute_iteration(
@@ -686,6 +693,7 @@ class TestRunCoordinator:
 
         mock_adapter = AsyncMock()
         mock_executor = AsyncMock()
+        mock_executor.is_tool_allowed = MagicMock(return_value=True)
         mock_sr = MagicMock()
         mock_sr.detect_skill.return_value = None
 
@@ -2069,6 +2077,7 @@ class TestStreamingPipeline:
 
         mock_adapter = AsyncMock()
         mock_executor = AsyncMock()
+        mock_executor.is_tool_allowed = MagicMock(return_value=True)
         mock_sr = MagicMock()
         mock_sr.detect_skill.return_value = None
 
@@ -2202,6 +2211,7 @@ class TestStreamingPipeline:
         mock_adapter = AsyncMock()
         mock_adapter.stream_complete = mock_stream
         mock_executor = AsyncMock()
+        mock_executor.is_tool_allowed = MagicMock(return_value=True)
 
         loop_deps = AgentLoopDeps(
             model_adapter=mock_adapter,
