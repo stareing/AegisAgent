@@ -124,6 +124,9 @@ class TestSubAgentScheduler:
 
         cancelled = await sched.cancel("s1")
         assert cancelled is True
+        result = await sched.await_result(handle)
+        assert result.success is False
+        assert "cancelled" in (result.error or "").lower()
 
     @pytest.mark.asyncio
     async def test_cancel_nonexistent(self):
@@ -134,6 +137,7 @@ class TestSubAgentScheduler:
     @pytest.mark.asyncio
     async def test_cancel_all_tasks(self):
         sched = SubAgentScheduler(max_per_run=10)
+        handles: list[SubAgentHandle] = []
 
         async def _slow():
             await asyncio.sleep(10)
@@ -141,12 +145,16 @@ class TestSubAgentScheduler:
 
         for i in range(3):
             h = self._make_handle(spawn_id=f"s{i}")
+            handles.append(h)
             task_record = sched.allocate_task_id("run_1", f"s{i}")
             sched.submit(h, _slow(), deadline_ms=60000, task_record=task_record)
 
         await asyncio.sleep(0.01)
         count = await sched.cancel_all_tasks("run_1")
         assert count >= 1
+        for handle in handles:
+            if handle.spawn_id in sched._tasks or handle.spawn_id in sched._results:
+                await sched.await_result(handle)
 
     def test_allocate_task_id(self):
         """SubAgentScheduler is the sole source of subagent_task_id (v2.6.3 §39)."""
