@@ -74,6 +74,8 @@ class ToolExecutor:
         self._current_run_id: str = ""
         # Set by RunCoordinator each iteration — used for child context seed.
         self._current_session_messages: list[Message] = []
+        # Set by RunCoordinator from EffectiveRunConfig
+        self._progressive_mode: bool = False
 
     def set_current_run_id(self, run_id: str) -> None:
         """Called by RunCoordinator to bind the current run_id for quota tracking."""
@@ -295,6 +297,11 @@ class ToolExecutor:
         mode_str = args.get("mode", "ephemeral").upper()
         scope_str = args.get("memory_scope", "isolated").upper()
         wait = args.get("wait", True)
+        # In progressive mode, force wait=True — the batch_execute_progressive
+        # already handles "return as each completes". Using wait=False would
+        # make spawn instant (just returns spawn_id) defeating progressive's purpose.
+        if self._progressive_mode:
+            wait = True
         parent_agent = self._parent_agent_getter() if self._parent_agent_getter else None
         parent_run_id = self._current_run_id
         if not parent_run_id and parent_agent and hasattr(parent_agent, "agent_id"):

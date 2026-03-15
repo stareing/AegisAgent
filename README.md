@@ -247,7 +247,11 @@ Progressive mode: LLM spawns 3 sub-agents → all run in parallel → as each fi
 
 #### Capability Plane Architecture
 
-All Agent-facing tools (local, MCP, A2A, subagent, memory_admin) route through `ToolExecutor.execute()`, which enforces:
+All Agent-facing tools (local, MCP, A2A, subagent, memory_admin) route through `ToolExecutor`:
+- Main agent loops call `ToolExecutor.batch_execute()` or `batch_execute_progressive()`
+- Those executor entrypoints then funnel each tool call through `ToolExecutor.execute()`
+
+This unified tool execution plane enforces:
 - **Capability policy** (`CapabilityPolicy` whitelist/blacklist)
 - **Confirmation handler** (auto-approve or CLI prompt)
 - **Error envelope** (structured `ToolResult` + `ToolExecutionError`)

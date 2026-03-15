@@ -149,7 +149,11 @@ Progressive 模式：LLM 同时派发 3 个子 Agent → 并行执行 → 每完
 
 #### 能力平面架构
 
-所有 Agent 可调用的外部能力（local / MCP / A2A / subagent / memory_admin）统一经过 `ToolExecutor.execute()`，保证：
+所有 Agent 可调用的外部能力（local / MCP / A2A / subagent / memory_admin）统一经过 `ToolExecutor`：
+- 主 Agent 循环调用的是 `ToolExecutor.batch_execute()` 或 `batch_execute_progressive()`
+- 这些入口内部再把单个工具请求统一收口到 `ToolExecutor.execute()`
+
+这条统一执行链保证：
 - **能力策略**（`CapabilityPolicy` 白名单/黑名单）
 - **确认处理**（自动放行或 CLI 确认）
 - **错误封装**（结构化 `ToolResult` + `ToolExecutionError`）

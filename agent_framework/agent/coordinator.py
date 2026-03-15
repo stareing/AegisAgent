@@ -129,11 +129,15 @@ class RunCoordinator:
         timeout_ms = run_timeout_ms or DEFAULT_RUN_TIMEOUT_MS
         run_start = time.monotonic()
 
-        # Bind run_id to tool executor for correct parent_run_id in spawn
+        # Bind run_id and progressive mode to tool executor
         if hasattr(deps.tool_executor, "set_current_run_id"):
             maybe = deps.tool_executor.set_current_run_id(run_id)
             if inspect.isawaitable(maybe):
                 await maybe
+        if hasattr(deps.tool_executor, "_progressive_mode"):
+            deps.tool_executor._progressive_mode = getattr(
+                agent.agent_config, "progressive_tool_results", False
+            )
 
         logger.info(
             "run.started",
@@ -433,6 +437,10 @@ class RunCoordinator:
             maybe = deps.tool_executor.set_current_run_id(run_id)
             if inspect.isawaitable(maybe):
                 await maybe
+        if hasattr(deps.tool_executor, "_progressive_mode"):
+            deps.tool_executor._progressive_mode = getattr(
+                agent.agent_config, "progressive_tool_results", False
+            )
 
         logger.info(
             "run_stream.started",
