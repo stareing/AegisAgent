@@ -313,7 +313,7 @@ class TestOrchestratorAgent:
         """ToolExecutor must use _current_run_id as primary parent_run_id."""
         import inspect
         from agent_framework.tools.executor import ToolExecutor
-        source = inspect.getsource(ToolExecutor._route_execution)
+        source = inspect.getsource(ToolExecutor._subagent_spawn)
         # Primary assignment uses _current_run_id
         assert "parent_run_id = self._current_run_id" in source
         # set_current_run_id must exist

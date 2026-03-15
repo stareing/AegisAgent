@@ -212,138 +212,137 @@ class ToolExecutor:
             )
 
     async def _route_execution(self, tool_entry: ToolEntry, validated_arguments: dict) -> Any:
-        """Route to appropriate executor based on tool source."""
-        source = tool_entry.meta.source
-        tool_name = tool_entry.meta.name
+        """Route to appropriate executor based on tool source.
 
+        Pure dispatch — each source has its own _route_* method.
+        """
+        source = tool_entry.meta.source
         logger.info(
             "tool.routing",
-            tool_name=tool_name,
+            tool_name=tool_entry.meta.name,
             source=source,
             arguments_keys=list(validated_arguments.keys()),
         )
 
-        if source == "local":
-            if tool_entry.callable_ref is None:
-                raise RuntimeError(f"No callable for tool {tool_name}")
-            if tool_entry.meta.is_async:
-                return await tool_entry.callable_ref(**validated_arguments)
-            else:
-                return await asyncio.to_thread(tool_entry.callable_ref, **validated_arguments)
+        router = {
+            "local": self._route_local,
+            "mcp": self._route_mcp,
+            "a2a": self._route_a2a,
+            "subagent": self._route_subagent,
+        }
+        handler = router.get(source)
+        if handler is None:
+            raise RuntimeError(f"Unknown tool source: {source}")
+        return await handler(tool_entry, validated_arguments)
 
-        if source == "mcp":
-            if self._mcp is None:
-                raise RuntimeError("MCPClientManager not configured")
-            server_id = tool_entry.meta.mcp_server_id
-            logger.info("tool.routing.mcp", tool_name=tool_name, server_id=server_id)
-            return await self._mcp.call_mcp_tool(
-                server_id, tool_entry.meta.name, validated_arguments
+    # ── Source-specific routing ───────────────────────────────
+
+    async def _route_local(self, entry: ToolEntry, args: dict) -> Any:
+        if entry.callable_ref is None:
+            raise RuntimeError(f"No callable for tool {entry.meta.name}")
+        if entry.meta.is_async:
+            return await entry.callable_ref(**args)
+        return await asyncio.to_thread(entry.callable_ref, **args)
+
+    async def _route_mcp(self, entry: ToolEntry, args: dict) -> Any:
+        if self._mcp is None:
+            raise RuntimeError("MCPClientManager not configured")
+        server_id = entry.meta.mcp_server_id
+        logger.info("tool.routing.mcp", tool_name=entry.meta.name, server_id=server_id)
+        return await self._mcp.call_mcp_tool(server_id, entry.meta.name, args)
+
+    async def _route_a2a(self, entry: ToolEntry, args: dict) -> Any:
+        if self._delegation is None:
+            raise RuntimeError("DelegationExecutor not configured")
+        agent_url = entry.meta.a2a_agent_url or ""
+        logger.info("tool.routing.a2a", tool_name=entry.meta.name, agent_url=agent_url)
+        result = await self._delegation.delegate_to_a2a(
+            agent_url=agent_url,
+            task_input=str(args.get("task_input", "")),
+            skill_id=args.get("skill_id"),
+        )
+        return result.final_answer if result.success else result.error
+
+    async def _route_subagent(self, entry: ToolEntry, args: dict) -> Any:
+        if self._delegation is None:
+            raise RuntimeError("DelegationExecutor not configured")
+
+        if entry.meta.name == "check_spawn_result":
+            return await self._subagent_collect(args)
+        return await self._subagent_spawn(args)
+
+    # ── Sub-agent operations ─────────────────────────────────
+
+    async def _subagent_spawn(self, args: dict) -> Any:
+        """Build SubAgentSpec from arguments and dispatch sync or async."""
+        from agent_framework.models.subagent import MemoryScope, SpawnMode, SubAgentSpec
+        from agent_framework.context.builder import ContextBuilder
+
+        mode_str = args.get("mode", "ephemeral").upper()
+        scope_str = args.get("memory_scope", "isolated").upper()
+        wait = args.get("wait", True)
+        parent_agent = self._parent_agent_getter() if self._parent_agent_getter else None
+        parent_run_id = self._current_run_id
+        if not parent_run_id and parent_agent and hasattr(parent_agent, "agent_id"):
+            parent_run_id = parent_agent.agent_id
+
+        spec = SubAgentSpec(
+            parent_run_id=parent_run_id,
+            task_input=args.get("task_input", ""),
+            mode=SpawnMode(mode_str) if mode_str in SpawnMode.__members__ else SpawnMode.EPHEMERAL,
+            skill_id=args.get("skill_id"),
+            tool_category_whitelist=args.get("tool_categories"),
+            memory_scope=MemoryScope(scope_str) if scope_str in MemoryScope.__members__ else MemoryScope.ISOLATED,
+            token_budget=int(args.get("token_budget", 4096)),
+            max_iterations=int(args.get("max_iterations", 10)),
+            deadline_ms=int(args.get("deadline_ms", 60000)),
+        )
+        if spec.context_seed is None:
+            spec.context_seed = ContextBuilder().build_spawn_seed(
+                session_messages=self._current_session_messages,
+                query=spec.task_input,
+                token_budget=spec.token_budget,
             )
 
-        if source == "a2a":
-            if self._delegation is None:
-                raise RuntimeError("DelegationExecutor not configured")
-            agent_url = tool_entry.meta.a2a_agent_url or ""
-            logger.info("tool.routing.a2a", tool_name=tool_name, agent_url=agent_url)
-            result = await self._delegation.delegate_to_a2a(
-                agent_url=agent_url,
-                task_input=str(validated_arguments.get("task_input", "")),
-                skill_id=validated_arguments.get("skill_id"),
-            )
-            return result.final_answer if result.success else result.error
+        parent_id = getattr(parent_agent, "agent_id", "unknown") if parent_agent else "none"
+        logger.info(
+            "tool.routing.subagent",
+            task_input=spec.task_input[:150],
+            mode=mode_str,
+            memory_scope=scope_str,
+            wait=wait,
+            parent_agent_id=parent_id,
+        )
 
-        if source == "subagent":
-            if self._delegation is None:
-                raise RuntimeError("DelegationExecutor not configured")
+        if not wait:
+            spawn_id = await self._delegation.delegate_to_subagent_async(spec, parent_agent)
+            logger.info("tool.routing.subagent.async_submitted", spawn_id=spawn_id)
+            return {
+                "spawn_id": spawn_id,
+                "status": "PENDING",
+                "message": "Sub-agent started asynchronously. Use check_spawn_result to collect the result.",
+            }
 
-            # Route check_spawn_result separately
-            if tool_name == "check_spawn_result":
-                return await self._handle_check_spawn_result(validated_arguments)
-
-            from agent_framework.models.subagent import MemoryScope, SpawnMode, SubAgentSpec
-            from agent_framework.context.builder import ContextBuilder
-
-            # Map all spawn_agent params (doc 14.6)
-            mode_str = validated_arguments.get("mode", "ephemeral").upper()
-            scope_str = validated_arguments.get("memory_scope", "isolated").upper()
-            wait = validated_arguments.get("wait", True)
-            parent_agent = self._parent_agent_getter() if self._parent_agent_getter else None
-            parent_run_id = self._current_run_id
-            if not parent_run_id and parent_agent and hasattr(parent_agent, "agent_id"):
-                parent_run_id = parent_agent.agent_id
-
-            spec = SubAgentSpec(
-                parent_run_id=parent_run_id,
-                task_input=validated_arguments.get("task_input", ""),
-                mode=SpawnMode(mode_str) if mode_str in SpawnMode.__members__ else SpawnMode.EPHEMERAL,
-                skill_id=validated_arguments.get("skill_id"),
-                tool_category_whitelist=validated_arguments.get("tool_categories"),
-                memory_scope=MemoryScope(scope_str) if scope_str in MemoryScope.__members__ else MemoryScope.ISOLATED,
-                token_budget=int(validated_arguments.get("token_budget", 4096)),
-                max_iterations=int(validated_arguments.get("max_iterations", 10)),
-                deadline_ms=int(validated_arguments.get("deadline_ms", 60000)),
-            )
-            if spec.context_seed is None:
-                seed_builder = ContextBuilder()
-                spec.context_seed = seed_builder.build_spawn_seed(
-                    session_messages=self._current_session_messages,
-                    query=spec.task_input,
-                    token_budget=spec.token_budget,
-                )
-            parent_id = getattr(parent_agent, "agent_id", "unknown") if parent_agent else "none"
-
-            logger.info(
-                "tool.routing.subagent",
-                task_input=spec.task_input[:150],
-                mode=mode_str,
-                memory_scope=scope_str,
-                wait=wait,
-                parent_agent_id=parent_id,
-            )
-
-            if not wait:
-                # Async mode: submit and return spawn_id immediately
-                spawn_id = await self._delegation.delegate_to_subagent_async(
-                    spec, parent_agent
-                )
-                logger.info("tool.routing.subagent.async_submitted", spawn_id=spawn_id)
-                return {
-                    "spawn_id": spawn_id,
-                    "status": "PENDING",
-                    "message": "Sub-agent started asynchronously. Use check_spawn_result to collect the result.",
-                }
-
-            # Sync mode: block until complete (existing behavior)
-            result = await self._delegation.delegate_to_subagent(spec, parent_agent)
-
-            logger.info(
-                "tool.routing.subagent.done",
-                spawn_id=result.spawn_id,
-                success=result.success,
-                iterations_used=result.iterations_used,
-                answer_preview=(result.final_answer or result.error or "")[:120],
-            )
-
-            from agent_framework.tools.delegation import DelegationExecutor
-            summary = DelegationExecutor.summarize_result(result)
-            return summary.model_dump()
-
-        raise RuntimeError(f"Unknown tool source: {source}")
-
-    async def _handle_check_spawn_result(self, arguments: dict) -> dict:
-        """Handle check_spawn_result tool call."""
-        spawn_id = arguments.get("spawn_id", "")
-        wait = arguments.get("wait", True)
-
-        result = await self._delegation.collect_subagent_result(spawn_id, wait=wait)
-
-        if result is None:
-            # Still running (non-blocking check)
-            return {"spawn_id": spawn_id, "status": "RUNNING"}
-
+        result = await self._delegation.delegate_to_subagent(spec, parent_agent)
+        logger.info(
+            "tool.routing.subagent.done",
+            spawn_id=result.spawn_id,
+            success=result.success,
+            iterations_used=result.iterations_used,
+            answer_preview=(result.final_answer or result.error or "")[:120],
+        )
         from agent_framework.tools.delegation import DelegationExecutor
-        summary = DelegationExecutor.summarize_result(result)
-        return summary.model_dump()
+        return DelegationExecutor.summarize_result(result).model_dump()
+
+    async def _subagent_collect(self, args: dict) -> dict:
+        """Collect async sub-agent result by spawn_id."""
+        spawn_id = args.get("spawn_id", "")
+        wait = args.get("wait", True)
+        result = await self._delegation.collect_subagent_result(spawn_id, wait=wait)
+        if result is None:
+            return {"spawn_id": spawn_id, "status": "RUNNING"}
+        from agent_framework.tools.delegation import DelegationExecutor
+        return DelegationExecutor.summarize_result(result).model_dump()
 
     def _handle_tool_error(
         self, tool_name: str, error: Exception, entry: ToolEntry | None = None, start: float = 0.0, tool_call_id: str = ""
