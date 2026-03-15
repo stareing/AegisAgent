@@ -143,8 +143,10 @@ class AgentLoop:
                 tool_count=len(model_response.tool_calls),
                 tool_names=tool_names,
             )
+            progressive = getattr(effective_config, "progressive_tool_results", False)
             tool_results, tool_metas = await self._dispatch_tool_calls(
-                agent, loop_deps.tool_executor, model_response.tool_calls, agent_state
+                agent, loop_deps.tool_executor, model_response.tool_calls, agent_state,
+                progressive=progressive,
             )
             success_count = sum(1 for r in tool_results if r.success)
             fail_count = len(tool_results) - success_count
@@ -419,8 +421,10 @@ class AgentLoop:
                     },
                 )
 
+            progressive = getattr(effective_config, "progressive_tool_results", False)
             tool_results, tool_metas = await self._dispatch_tool_calls(
-                agent, loop_deps.tool_executor, model_response.tool_calls, agent_state
+                agent, loop_deps.tool_executor, model_response.tool_calls, agent_state,
+                progressive=progressive,
             )
 
             for tr, tm in zip(tool_results, tool_metas):
@@ -678,6 +682,7 @@ class AgentLoop:
         tool_executor: ToolExecutorProtocol,
         tool_calls: list[ToolCallRequest],
         agent_state: AgentState,
+        progressive: bool = False,
     ) -> tuple[list[ToolResult], list[ToolExecutionMeta]]:
         """Dispatch tool calls with pre-dispatch constraints.
 
@@ -806,13 +811,32 @@ class AgentLoop:
             "tool.batch_executing",
             tool_names=[tc.function_name for tc in approved],
             count=len(approved),
+            mode="progressive" if progressive else "parallel",
         )
-        results_with_meta = await tool_executor.batch_execute(approved)
 
-        for result, meta in results_with_meta:
-            results.append(result)
-            metas.append(meta)
-            await agent.on_tool_call_completed(result)
+        if progressive and hasattr(tool_executor, "batch_execute_progressive"):
+            # Progressive: yield results as each tool completes (fastest first)
+            async for result, meta in tool_executor.batch_execute_progressive(approved):
+                results.append(result)
+                metas.append(meta)
+                await agent.on_tool_call_completed(result)
+                logger.info(
+                    "tool.progressive_completed",
+                    tool_name=result.tool_name,
+                    success=result.success,
+                    execution_time_ms=meta.execution_time_ms,
+                    completed_so_far=len(results),
+                    total_expected=len(approved) + len(pre_results),
+                )
+        else:
+            # Parallel: wait for all, return together
+            results_with_meta = await tool_executor.batch_execute(approved)
+            for result, meta in results_with_meta:
+                results.append(result)
+                metas.append(meta)
+                await agent.on_tool_call_completed(result)
+
+        for result, meta in zip(results[-len(approved):], metas[-len(approved):]):
             if result.success:
                 output_preview = str(result.output)[:150] if result.output else ""
                 logger.info(

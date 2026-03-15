@@ -260,6 +260,7 @@ class AgentConfig(BaseModel):
     allow_spawn_children: bool = False
     max_concurrent_tool_calls: int = 5
     allow_parallel_tool_calls: bool = True
+    progressive_tool_results: bool = False
 
 
 class CapabilityPolicy(BaseModel):
@@ -373,3 +374,4 @@ class EffectiveRunConfig(BaseModel):
     max_concurrent_tool_calls: int = 5
     subagent_token_budget: int = 4096
     allow_parallel_tool_calls: bool = True
+    progressive_tool_results: bool = False

@@ -82,6 +82,7 @@ class RunPolicyResolver:
             max_iterations=cfg.max_iterations,
             max_concurrent_tool_calls=cfg.max_concurrent_tool_calls,
             allow_parallel_tool_calls=cfg.allow_parallel_tool_calls,
+            progressive_tool_results=getattr(cfg, "progressive_tool_results", False),
         )
 
     @staticmethod

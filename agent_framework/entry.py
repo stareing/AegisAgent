@@ -233,6 +233,7 @@ class AgentFramework:
                 allow_spawn_children=True,
                 max_concurrent_tool_calls=self.config.tools.max_concurrent_tool_calls,
                 allow_parallel_tool_calls=self.config.tools.allow_parallel_tool_calls,
+                progressive_tool_results=(self.config.subagent.execution_mode == "progressive"),
             )
 
         # Bind config-sourced policies to agent so run-level policy

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any, Callable
 
 from pydantic import ValidationError
@@ -150,6 +151,24 @@ class ToolExecutor:
                 return await self.execute(req, policy=policy)
 
         return await asyncio.gather(*[_run(r) for r in tool_call_requests])
+
+    async def batch_execute_progressive(
+        self, tool_call_requests: list[ToolCallRequest], policy: CapabilityPolicy | None = None
+    ) -> AsyncIterator[tuple[ToolResult, ToolExecutionMeta]]:
+        """Execute concurrently, yield results as each tool completes (fastest first).
+
+        Unlike batch_execute which waits for all, this yields each result
+        immediately upon completion. Order is by completion time, not input order.
+        """
+        sem = asyncio.Semaphore(self._max_concurrent)
+
+        async def _run(req: ToolCallRequest) -> tuple[ToolResult, ToolExecutionMeta]:
+            async with sem:
+                return await self.execute(req, policy=policy)
+
+        tasks = {asyncio.create_task(_run(r)): r for r in tool_call_requests}
+        for coro in asyncio.as_completed(tasks.keys()):
+            yield await coro
 
     def is_tool_allowed(self, tool_name: str, policy: CapabilityPolicy) -> bool:
         """Hard runtime gate for tool permission ceiling.
