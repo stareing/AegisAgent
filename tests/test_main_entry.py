@@ -34,11 +34,9 @@ def test_main_delegates_to_cli_run(monkeypatch: pytest.MonkeyPatch) -> None:
     assert called["argv"] == ["--mock"]
 
 
-def test_textual_chat_location_advances_incrementally() -> None:
-    assert AegisAgentApp._advance_location((0, 0), "hello") == (0, 5)
-    assert AegisAgentApp._advance_location((0, 5), "\nworld") == (1, 5)
-    assert AegisAgentApp._advance_location((1, 5), "\nline2\nline3") == (3, 5)
-    assert AegisAgentApp._advance_location((0, 0), "a\nb\n") == (2, 0)
+def test_textual_app_has_flush_updates() -> None:
+    """AegisAgentApp must have _flush_updates for batched rendering."""
+    assert hasattr(AegisAgentApp, "_flush_updates")
 
 
 def test_format_result_can_omit_trace() -> None:

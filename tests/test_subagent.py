@@ -656,32 +656,8 @@ class TestAsyncLifecycleRegression:
         assert task_record.status == SubAgentTaskStatus.CANCELLED
 
     @pytest.mark.asyncio
-    async def test_max_spawn_depth_blocks_deep_spawn(self):
-        """max_spawn_depth must block spawn when depth limit reached."""
-        from agent_framework.subagent.runtime import SubAgentRuntime
-
-        mock_deps = MagicMock()
-        mock_deps.context_engineer.build_spawn_seed.return_value = []
-        mock_deps.tool_registry.list_tools.return_value = []
-
-        # max_spawn_depth=1, simulate depth already at 1
-        runtime = SubAgentRuntime(
-            parent_deps=mock_deps, max_concurrent=3, max_per_run=5,
-            max_spawn_depth=1,
-        )
-        runtime._current_depth = 1  # Already at max
-
-        spec = SubAgentSpec(parent_run_id="r1", task_input="deep spawn", deadline_ms=5000)
-
-        with pytest.raises(RuntimeError, match="depth limit"):
-            await runtime.spawn(spec, parent_agent=None)
-
-        # Verify _active not leaked
-        assert len(runtime._active) == 0
-
-    @pytest.mark.asyncio
-    async def test_spawn_depth_increments_and_decrements(self):
-        """_current_depth must increment on spawn start and decrement on finish."""
+    async def test_parallel_spawn_not_blocked_by_depth(self):
+        """Parallel spawns must not be blocked — depth is for recursive nesting only."""
         from agent_framework.models.message import TokenUsage
         from agent_framework.models.agent import AgentRunResult, StopSignal, StopReason
         from agent_framework.subagent.runtime import SubAgentRuntime
@@ -693,9 +669,8 @@ class TestAsyncLifecycleRegression:
 
         runtime = SubAgentRuntime(
             parent_deps=mock_deps, max_concurrent=3, max_per_run=5,
-            max_spawn_depth=5,
+            max_spawn_depth=1,
         )
-        assert runtime._current_depth == 0
 
         mock_run_result = AgentRunResult(
             run_id="child", success=True, final_answer="ok",
@@ -714,9 +689,8 @@ class TestAsyncLifecycleRegression:
             return_value=(mock_agent, mock_sub_deps)
         )
 
-        spec = SubAgentSpec(parent_run_id="r1", task_input="depth test", deadline_ms=5000)
-        result = await runtime.spawn(spec, parent_agent=None)
-
-        assert result.success is True
-        # After spawn completes, depth must return to 0
-        assert runtime._current_depth == 0
+        # Spawn 3 in sequence — none should be blocked
+        for i in range(3):
+            spec = SubAgentSpec(parent_run_id="r1", task_input=f"task {i}", deadline_ms=5000)
+            result = await runtime.spawn(spec, parent_agent=None)
+            assert result.success is True, f"Spawn {i} was unexpectedly blocked"
