@@ -121,11 +121,6 @@ class AgentFramework:
         from agent_framework.tools.builtin import register_all_builtins
         register_all_builtins(self._catalog)
 
-        # Bind memory context for memory_admin tools
-        from agent_framework.tools.builtin.memory_admin import set_memory_context
-        agent_id = agent.agent_config.agent_id if agent else "default"
-        set_memory_context(memory_manager, agent_id)
-
         # Tool registry
         self._registry = ToolRegistry()
         for entry in self._catalog.list_all():
@@ -245,6 +240,11 @@ class AgentFramework:
         # Bind config-sourced policies to agent so run-level policy
         # reflects FrameworkConfig rather than BaseAgent defaults.
         self._bind_config_policies(self._agent)
+
+        # Bind memory context for memory_admin tools — AFTER agent creation
+        # so agent_id matches the actual agent (e.g. "orchestrator" not "default")
+        from agent_framework.tools.builtin.memory_admin import set_memory_context
+        set_memory_context(memory_manager, self._agent.agent_id)
 
         self._coordinator = RunCoordinator()
         self._setup_done = True
