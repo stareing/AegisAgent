@@ -654,3 +654,69 @@ class TestAsyncLifecycleRegression:
         assert result.success is False
         assert handle.status == "CANCELLED"
         assert task_record.status == SubAgentTaskStatus.CANCELLED
+
+    @pytest.mark.asyncio
+    async def test_max_spawn_depth_blocks_deep_spawn(self):
+        """max_spawn_depth must block spawn when depth limit reached."""
+        from agent_framework.subagent.runtime import SubAgentRuntime
+
+        mock_deps = MagicMock()
+        mock_deps.context_engineer.build_spawn_seed.return_value = []
+        mock_deps.tool_registry.list_tools.return_value = []
+
+        # max_spawn_depth=1, simulate depth already at 1
+        runtime = SubAgentRuntime(
+            parent_deps=mock_deps, max_concurrent=3, max_per_run=5,
+            max_spawn_depth=1,
+        )
+        runtime._current_depth = 1  # Already at max
+
+        spec = SubAgentSpec(parent_run_id="r1", task_input="deep spawn", deadline_ms=5000)
+
+        with pytest.raises(RuntimeError, match="depth limit"):
+            await runtime.spawn(spec, parent_agent=None)
+
+        # Verify _active not leaked
+        assert len(runtime._active) == 0
+
+    @pytest.mark.asyncio
+    async def test_spawn_depth_increments_and_decrements(self):
+        """_current_depth must increment on spawn start and decrement on finish."""
+        from agent_framework.models.message import TokenUsage
+        from agent_framework.models.agent import AgentRunResult, StopSignal, StopReason
+        from agent_framework.subagent.runtime import SubAgentRuntime
+
+        mock_deps = MagicMock()
+        mock_deps.context_engineer.build_spawn_seed.return_value = []
+        mock_deps.tool_registry.list_tools.return_value = []
+        mock_deps.tool_registry.export_schemas.return_value = []
+
+        runtime = SubAgentRuntime(
+            parent_deps=mock_deps, max_concurrent=3, max_per_run=5,
+            max_spawn_depth=5,
+        )
+        assert runtime._current_depth == 0
+
+        mock_run_result = AgentRunResult(
+            run_id="child", success=True, final_answer="ok",
+            stop_signal=StopSignal(reason=StopReason.LLM_STOP),
+            usage=TokenUsage(total_tokens=10), iterations_used=1,
+        )
+        mock_coordinator = AsyncMock()
+        mock_coordinator.run = AsyncMock(return_value=mock_run_result)
+        runtime._coordinator = mock_coordinator
+
+        mock_agent = MagicMock()
+        mock_agent.agent_id = "sub"
+        mock_sub_deps = MagicMock()
+        mock_sub_deps.tool_registry.list_tools.return_value = []
+        runtime._factory.create_agent_and_deps = MagicMock(
+            return_value=(mock_agent, mock_sub_deps)
+        )
+
+        spec = SubAgentSpec(parent_run_id="r1", task_input="depth test", deadline_ms=5000)
+        result = await runtime.spawn(spec, parent_agent=None)
+
+        assert result.success is True
+        # After spawn completes, depth must return to 0
+        assert runtime._current_depth == 0

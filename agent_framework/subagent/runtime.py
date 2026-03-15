@@ -164,46 +164,50 @@ class SubAgentRuntime:
 
         # Schedule execution — runtime wraps the actual run
         async def _run() -> SubAgentResult:
-            # child_run_id is assigned by the runtime at actual start
-            child_run_id = str(uuid.uuid4())
-            task_record.child_run_id = child_run_id
-            task_record.status = SubAgentTaskStatus.RUNNING
+            # Track spawn depth — increment on entry, decrement on exit
+            self._current_depth += 1
+            try:
+                child_run_id = str(uuid.uuid4())
+                task_record.child_run_id = child_run_id
+                task_record.status = SubAgentTaskStatus.RUNNING
 
-            logger.info(
-                "subagent.run_started",
-                spawn_id=spec.spawn_id,
-                child_run_id=child_run_id,
-                task_id=task_record.subagent_task_id,
-            )
-            run_result = await coordinator.run(
-                sub_agent,
-                sub_deps,
-                spec.task_input,
-                initial_session_messages=initial_session_messages,
-            )
+                logger.info(
+                    "subagent.run_started",
+                    spawn_id=spec.spawn_id,
+                    child_run_id=child_run_id,
+                    task_id=task_record.subagent_task_id,
+                    depth=self._current_depth,
+                )
+                run_result = await coordinator.run(
+                    sub_agent,
+                    sub_deps,
+                    spec.task_input,
+                    initial_session_messages=initial_session_messages,
+                )
 
-            # Update task record status (runtime-owned transitions)
-            task_record.status = (
-                SubAgentTaskStatus.COMPLETED if run_result.success
-                else SubAgentTaskStatus.FAILED
-            )
+                task_record.status = (
+                    SubAgentTaskStatus.COMPLETED if run_result.success
+                    else SubAgentTaskStatus.FAILED
+                )
 
-            logger.info(
-                "subagent.run_finished",
-                spawn_id=spec.spawn_id,
-                child_run_id=child_run_id,
-                success=run_result.success,
-                iterations_used=run_result.iterations_used,
-                total_tokens=run_result.usage.total_tokens,
-            )
-            return SubAgentResult(
-                spawn_id=spec.spawn_id,
-                success=run_result.success,
-                final_answer=run_result.final_answer,
-                error=run_result.error,
-                usage=run_result.usage,
-                iterations_used=run_result.iterations_used,
-            )
+                logger.info(
+                    "subagent.run_finished",
+                    spawn_id=spec.spawn_id,
+                    child_run_id=child_run_id,
+                    success=run_result.success,
+                    iterations_used=run_result.iterations_used,
+                    total_tokens=run_result.usage.total_tokens,
+                )
+                return SubAgentResult(
+                    spawn_id=spec.spawn_id,
+                    success=run_result.success,
+                    final_answer=run_result.final_answer,
+                    error=run_result.error,
+                    usage=run_result.usage,
+                    iterations_used=run_result.iterations_used,
+                )
+            finally:
+                self._current_depth -= 1
 
         try:
             result = await self._scheduler.schedule(
@@ -249,6 +253,13 @@ class SubAgentRuntime:
             task_input=spec.task_input[:150],
         )
 
+        # Depth guard (same as spawn)
+        if self._max_spawn_depth > 0 and self._current_depth >= self._max_spawn_depth:
+            raise RuntimeError(
+                f"Spawn depth limit reached ({self._current_depth}/{self._max_spawn_depth}). "
+                "Cannot spawn further sub-agents."
+            )
+
         task_record = self._scheduler.allocate_task_id(
             spec.parent_run_id, spec.spawn_id
         )
@@ -290,6 +301,7 @@ class SubAgentRuntime:
             coordinator = RunCoordinator()
 
         async def _run() -> SubAgentResult:
+            self._current_depth += 1
             child_run_id = str(uuid.uuid4())
             task_record.child_run_id = child_run_id
             task_record.status = SubAgentTaskStatus.RUNNING
@@ -313,6 +325,7 @@ class SubAgentRuntime:
                     spawn_id=spec.spawn_id, success=False, error=str(e),
                 )
             finally:
+                self._current_depth -= 1
                 self._active.pop(spec.spawn_id, None)
 
         # submit() returns immediately — task runs in background
