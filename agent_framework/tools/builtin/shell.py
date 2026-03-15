@@ -14,23 +14,37 @@ from typing import Any
 
 from agent_framework.tools.decorator import tool
 
-# Sentinel marker to detect end of command output.
-_SENTINEL = "__AEGIS_CMD_DONE__"
 _DEFAULT_TIMEOUT = 120  # seconds
 _MAX_OUTPUT_CHARS = 100_000
 
-# Commands banned for security — network access, browsers, etc.
+# Commands banned for security — network access, browsers, privilege escalation, etc.
 _BANNED_COMMANDS = frozenset({
     "curl", "wget", "nc", "telnet", "lynx", "w3m", "links",
     "chrome", "firefox", "safari", "aria2c", "axel",
+    "sudo", "su", "chmod", "chown", "mount", "umount",
+    "iptables", "systemctl", "apt", "yum",
+})
+
+# Two-token banned commands (e.g. "pip install", "npm install").
+_BANNED_TWO_TOKEN_COMMANDS = frozenset({
+    ("pip", "install"),
+    ("npm", "install"),
 })
 
 
 def _check_banned(command: str) -> str | None:
     """Return error message if command starts with a banned prefix."""
-    first_token = command.strip().split()[0] if command.strip() else ""
+    tokens = command.strip().split()
+    if not tokens:
+        return None
+    first_token = tokens[0]
     if first_token in _BANNED_COMMANDS:
         return f"Command '{first_token}' is blocked for security. Use web_fetch for HTTP requests."
+    if len(tokens) >= 2:
+        pair = (tokens[0], tokens[1])
+        if pair in _BANNED_TWO_TOKEN_COMMANDS:
+            label = f"{pair[0]} {pair[1]}"
+            return f"Command '{label}' is blocked for security."
     return None
 
 
@@ -41,19 +55,11 @@ class _BashSession:
     environment variables, and shell state are preserved.
     """
 
-    _instance: _BashSession | None = None
-
     def __init__(self) -> None:
         self._proc: asyncio.subprocess.Process | None = None
         self._lock = asyncio.Lock()
         self._background_tasks: dict[str, asyncio.Task[dict]] = {}
         self._background_results: dict[str, dict] = {}
-
-    @classmethod
-    def get(cls) -> _BashSession:
-        if cls._instance is None:
-            cls._instance = cls()
-        return cls._instance
 
     async def _ensure_started(self) -> asyncio.subprocess.Process:
         if self._proc is None or self._proc.returncode is not None:
@@ -66,6 +72,40 @@ class _BashSession:
                 start_new_session=True,
             )
         return self._proc
+
+    async def _probe_health(self, proc: asyncio.subprocess.Process) -> bool:
+        """Send a health-check echo and verify the session responds."""
+        if proc.stdin is None or proc.stdout is None:
+            return False
+        probe_nonce = uuid.uuid4().hex
+        try:
+            probe_cmd = f"printf '\\n{probe_nonce}:0\\n'\n"
+            proc.stdin.write(probe_cmd.encode())
+            await proc.stdin.drain()
+            line_bytes = await asyncio.wait_for(
+                proc.stdout.readline(),
+                timeout=5,
+            )
+            if not line_bytes:
+                return False
+            return probe_nonce in line_bytes.decode(errors="replace")
+        except (asyncio.TimeoutError, OSError):
+            return False
+
+    async def _rebuild(self) -> None:
+        """Kill the current process and start a fresh one."""
+        if self._proc is not None:
+            try:
+                if self._proc.pid:
+                    os.killpg(os.getpgid(self._proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                pass
+            try:
+                self._proc.kill()
+            except ProcessLookupError:
+                pass
+            self._proc = None
+        await self._ensure_started()
 
     async def execute(
         self,
@@ -81,11 +121,14 @@ class _BashSession:
             assert proc.stdin is not None
             assert proc.stdout is not None
 
+            # Per-execution random nonce to avoid sentinel collisions.
+            nonce = uuid.uuid4().hex
+
             # Write command + sentinel echo so we know when output ends.
             wrapped = (
                 f"{command}\n"
                 f"__exit_code__=$?\n"
-                f"echo \"{_SENTINEL}:$__exit_code__\"\n"
+                f"printf '\\n{nonce}:%s\\n' \"$__exit_code__\"\n"
             )
             proc.stdin.write(wrapped.encode())
             await proc.stdin.drain()
@@ -103,7 +146,7 @@ class _BashSession:
                         # Process died
                         break
                     line = line_bytes.decode(errors="replace")
-                    if line.startswith(_SENTINEL):
+                    if line.startswith(nonce):
                         # Extract exit code from sentinel line
                         parts = line.strip().split(":")
                         exit_code = int(parts[1]) if len(parts) > 1 else -1
@@ -123,6 +166,11 @@ class _BashSession:
                         os.killpg(os.getpgid(proc.pid), signal.SIGINT)
                 except (ProcessLookupError, OSError):
                     pass
+
+                # Health probe: rebuild session if shell is unresponsive.
+                alive = await self._probe_health(proc)
+                if not alive:
+                    await self._rebuild()
 
             return {
                 "output": _truncate("".join(output_lines)),
@@ -180,6 +228,30 @@ class _BashSession:
         return "Shell session terminated"
 
 
+class _ShellSessionManager:
+    """Per-session shell manager replacing the global singleton.
+
+    Each session is identified by a string key. The default key ``"default"``
+    preserves backward compatibility with existing callers.
+    """
+
+    _sessions: dict[str, _BashSession] = {}
+
+    @classmethod
+    def get(cls, session_id: str = "default") -> _BashSession:
+        """Return (or create) the ``_BashSession`` for *session_id*."""
+        if session_id not in cls._sessions:
+            cls._sessions[session_id] = _BashSession()
+        return cls._sessions[session_id]
+
+    @classmethod
+    async def kill_all(cls) -> None:
+        """Terminate every tracked session and clear the registry."""
+        for session in list(cls._sessions.values()):
+            await session.kill()
+        cls._sessions.clear()
+
+
 def _truncate(text: str) -> str:
     if len(text) > _MAX_OUTPUT_CHARS:
         return text[:_MAX_OUTPUT_CHARS] + f"\n... (truncated, {len(text)} total chars)"
@@ -221,7 +293,7 @@ async def bash_exec(
     if banned_msg:
         return {"output": banned_msg, "exit_code": -2, "timed_out": False}
 
-    session = _BashSession.get()
+    session = _ShellSessionManager.get("default")
 
     if run_in_background:
         task_id = await session.execute_background(command, timeout_seconds)
@@ -245,7 +317,7 @@ def bash_output(task_id: str) -> dict:
     Returns:
         The command result if finished, or status 'running' if still executing.
     """
-    session = _BashSession.get()
+    session = _ShellSessionManager.get("default")
     result = session.get_background_result(task_id)
     if result is None:
         return {"status": "running", "task_id": task_id}
@@ -264,5 +336,5 @@ async def kill_shell() -> str:
     Returns:
         Confirmation message.
     """
-    session = _BashSession.get()
+    session = _ShellSessionManager.get("default")
     return await session.kill()

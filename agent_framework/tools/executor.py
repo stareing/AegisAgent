@@ -69,7 +69,7 @@ class ToolExecutor:
         self._current_session_messages = list(messages or [])
 
     async def execute(
-        self, tool_call_request: ToolCallRequest
+        self, tool_call_request: ToolCallRequest, policy: CapabilityPolicy | None = None
     ) -> tuple[ToolResult, ToolExecutionMeta]:
         start = time.monotonic()
         tool_name = tool_call_request.function_name
@@ -79,6 +79,10 @@ class ToolExecutor:
             return self._not_found(tool_call_request, start)
 
         entry = self._registry.get_tool(tool_name)
+
+        # Capability policy enforcement
+        if policy is not None and not self.is_tool_allowed(tool_name, policy):
+            return self._permission_denied(tool_call_request, start)
 
         # Confirmation — decision is policy + tool metadata, handler only executes flow
         if self._should_confirm(entry) and self._confirmation:
@@ -115,10 +119,10 @@ class ToolExecutor:
                 self._meta(entry, start),
             )
         except Exception as e:
-            return self._handle_tool_error(tool_name, e, entry, start)
+            return self._handle_tool_error(tool_name, e, entry, start, tool_call_id=tool_call_request.id)
 
     async def batch_execute(
-        self, tool_call_requests: list[ToolCallRequest]
+        self, tool_call_requests: list[ToolCallRequest], policy: CapabilityPolicy | None = None
     ) -> list[tuple[ToolResult, ToolExecutionMeta]]:
         """Execute multiple tool calls concurrently with bounded parallelism.
 
@@ -143,7 +147,7 @@ class ToolExecutor:
 
         async def _run(req: ToolCallRequest) -> tuple[ToolResult, ToolExecutionMeta]:
             async with sem:
-                return await self.execute(req)
+                return await self.execute(req, policy=policy)
 
         return await asyncio.gather(*[_run(r) for r in tool_call_requests])
 
@@ -323,7 +327,7 @@ class ToolExecutor:
         return summary.model_dump()
 
     def _handle_tool_error(
-        self, tool_name: str, error: Exception, entry: ToolEntry | None = None, start: float = 0.0
+        self, tool_name: str, error: Exception, entry: ToolEntry | None = None, start: float = 0.0, tool_call_id: str = ""
     ) -> tuple[ToolResult, ToolExecutionMeta]:
         logger.error(
             "tool.failed",
@@ -333,7 +337,7 @@ class ToolExecutor:
         source = entry.meta.source if entry else "local"
         return (
             ToolResult(
-                tool_call_id="",
+                tool_call_id=tool_call_id,
                 tool_name=tool_name,
                 success=False,
                 error=ToolExecutionError(

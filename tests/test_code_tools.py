@@ -14,6 +14,12 @@ from unittest.mock import patch
 import pytest
 
 
+# All code tools use tmp_path which is outside the default sandbox (cwd).
+@pytest.fixture(autouse=True)
+def _allow_tmp_sandbox(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENT_FS_SANDBOX_ROOTS", str(tmp_path))
+
+
 # ── edit_file ──────────────────────────────────────────────
 
 class TestEditFile:
@@ -59,11 +65,11 @@ class TestEditFile:
         with pytest.raises(ValueError, match="identical"):
             edit_file(str(f), "hello", "hello")
 
-    def test_file_not_found(self) -> None:
+    def test_file_not_found(self, tmp_path: Path) -> None:
         from agent_framework.tools.builtin.code_edit import edit_file
 
         with pytest.raises(FileNotFoundError):
-            edit_file("/nonexistent/path.txt", "a", "b")
+            edit_file(str(tmp_path / "nonexistent.txt"), "a", "b")
 
 
 # ── notebook_edit ──────────────────────────────────────────
@@ -259,16 +265,16 @@ class TestGlobFiles:
 
 class TestBashExec:
     def test_basic_command(self) -> None:
-        from agent_framework.tools.builtin.shell import bash_exec, _BashSession
-        _BashSession._instance = None  # fresh session
+        from agent_framework.tools.builtin.shell import bash_exec, _ShellSessionManager
+        _ShellSessionManager._sessions.clear()  # fresh session
 
         result = asyncio.run(bash_exec("echo hello"))
         assert result["exit_code"] == 0
         assert "hello" in result["output"]
 
     def test_persistent_cwd(self) -> None:
-        from agent_framework.tools.builtin.shell import bash_exec, _BashSession
-        _BashSession._instance = None
+        from agent_framework.tools.builtin.shell import bash_exec, _ShellSessionManager
+        _ShellSessionManager._sessions.clear()
 
         async def _run():
             await bash_exec("cd /tmp")
@@ -279,22 +285,22 @@ class TestBashExec:
         assert "/tmp" in result["output"]
 
     def test_exit_code(self) -> None:
-        from agent_framework.tools.builtin.shell import bash_exec, _BashSession
-        _BashSession._instance = None
+        from agent_framework.tools.builtin.shell import bash_exec, _ShellSessionManager
+        _ShellSessionManager._sessions.clear()
 
         result = asyncio.run(bash_exec("false"))
         assert result["exit_code"] != 0
 
     def test_timeout(self) -> None:
-        from agent_framework.tools.builtin.shell import bash_exec, _BashSession
-        _BashSession._instance = None
+        from agent_framework.tools.builtin.shell import bash_exec, _ShellSessionManager
+        _ShellSessionManager._sessions.clear()
 
         result = asyncio.run(bash_exec("sleep 10", timeout_seconds=1))
         assert result["timed_out"] is True
 
     def test_background_and_output(self) -> None:
-        from agent_framework.tools.builtin.shell import bash_exec, bash_output, _BashSession
-        _BashSession._instance = None
+        from agent_framework.tools.builtin.shell import bash_exec, bash_output, _ShellSessionManager
+        _ShellSessionManager._sessions.clear()
 
         async def _run():
             bg = await bash_exec("echo bg_done", run_in_background=True)
@@ -310,8 +316,8 @@ class TestBashExec:
 
 class TestKillShell:
     def test_kill(self) -> None:
-        from agent_framework.tools.builtin.shell import bash_exec, kill_shell, _BashSession
-        _BashSession._instance = None
+        from agent_framework.tools.builtin.shell import bash_exec, kill_shell, _ShellSessionManager
+        _ShellSessionManager._sessions.clear()
 
         async def _run():
             await bash_exec("echo start")
