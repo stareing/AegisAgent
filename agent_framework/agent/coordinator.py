@@ -940,6 +940,10 @@ class RunCoordinator:
                             role="assistant",
                             content=mid_response.content,
                         )])
+                        # Store for terminal display
+                        if not hasattr(agent_state, "_progressive_responses"):
+                            agent_state._progressive_responses = []
+                        agent_state._progressive_responses.append(mid_response.content)
                         logger.info(
                             "progressive.llm_intermediate",
                             index=i + 1,
@@ -974,6 +978,7 @@ class RunCoordinator:
         # Promote artifacts from sub-agent delegation results
         promoted_artifacts = self._collect_subagent_artifacts(agent_state)
 
+        progressive_responses = getattr(agent_state, "_progressive_responses", [])
         return AgentRunResult(
             run_id=agent_state.run_id,
             success=stop_signal.reason in (StopReason.LLM_STOP, StopReason.CUSTOM),
@@ -983,6 +988,7 @@ class RunCoordinator:
             iterations_used=agent_state.iteration_count,
             iteration_history=list(agent_state.iteration_history),
             artifacts=promoted_artifacts,
+            progressive_responses=list(progressive_responses),
         )
 
     @staticmethod

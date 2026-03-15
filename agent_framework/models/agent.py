@@ -232,6 +232,7 @@ class AgentRunResult(BaseModel):
     iteration_history: list[IterationResult] = Field(default_factory=list)
     artifacts: list[Artifact] = Field(default_factory=list)
     error: str | None = None
+    progressive_responses: list[str] = Field(default_factory=list)
     # v2.6.1 §32: Explicit termination classification for audit
     termination_source: str = "runtime"
 

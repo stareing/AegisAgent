@@ -996,6 +996,16 @@ def _print_result(result: Any, include_trace: bool = True) -> None:
                 else:
                     print(f"      {_red(str(tool_result.error or tool_result.output or '未知错误'))}")
 
+    # Progressive intermediate responses — display like conversation turns
+    progressive = getattr(result, "progressive_responses", [])
+    if progressive:
+        print(f"\n  {_bold(_yellow('Progressive 中间回复:'))}")
+        for pi, resp in enumerate(progressive, 1):
+            print(f"  {_dim(f'[{pi}/{len(progressive)}]')} {_cyan('Agent:')}")
+            for line in resp.splitlines():
+                print(f"    {line}")
+            print()
+
     if result.success:
         print(f"\n  {_green('Agent 回复:')}")
         print(f"  {'─' * 56}")
