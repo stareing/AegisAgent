@@ -59,7 +59,7 @@ _BG_INPUT = "#0e1820"
 _BORDER = "#2e4455"
 _DIM = "#6a7a8a"
 _FG = "#ddd8d0"
-_MAX_CHAT_LINES = 1200
+_MAX_CHAT_LINES = 1500
 _MAX_PALETTE_RESULTS = 40
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -186,6 +186,7 @@ class CommandPaletteScreen(ModalScreen[str | None]):
         self._list_view: ListView | None = None
         self._search_input: Input | None = None
         self._last_commands: tuple[str, ...] = ()
+        self._search_timer: Any = None
 
     def compose(self) -> ComposeResult:
         with Container(id="pal-box"):
@@ -202,7 +203,11 @@ class CommandPaletteScreen(ModalScreen[str | None]):
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "pal-search":
-            self._refresh(event.value)
+            if self._search_timer is not None:
+                self._search_timer.stop()
+            self._search_timer = self.set_timer(
+                0.08, lambda: self._refresh(event.value)
+            )
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         """Enter pressed while search input has focus — select highlighted item."""
@@ -352,6 +357,8 @@ class AegisAgentApp(App[None]):
         self._chat_end_location: tuple[int, int] = (0, 0)
         self._chat_has_content = False
         self._chat_line_count = 0
+        self._pending_updates: list[tuple[str, bool]] = []
+        self._flush_pending = False
 
     def compose(self) -> ComposeResult:
         yield AegisHeader(id="hdr")
@@ -389,7 +396,7 @@ class AegisAgentApp(App[None]):
                 self._append_chat(f"[已恢复 {loaded} 条历史消息 (conv: {self._state.conversation_id[:8]}...)]")
                 summary = self._state.render_history_summary()
                 if summary:
-                    self._append_chat(summary)
+                    self._append_chat(_strip_ansi(summary))
         else:
             self._state.conversation_id = str(uuid.uuid4())
         # 异步连接 MCP/A2A
@@ -584,6 +591,7 @@ class AegisAgentApp(App[None]):
 
     def action_new_session(self) -> None:
         self._state = ReplState()
+        self._pending_updates.clear()
         self._clear_chat_view()
         hdr = self._header
         assert hdr is not None
@@ -634,6 +642,7 @@ class AegisAgentApp(App[None]):
         if event.worker.group != "agent":
             return
         if event.state in (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED):
+            self._flush_updates()
             self._set_busy(False)
             assert self._prompt is not None and self._header is not None
             self._prompt.focus()
@@ -644,49 +653,65 @@ class AegisAgentApp(App[None]):
         await _setup_protocols(self._fw)
 
     async def on_unmount(self) -> None:
+        self._flush_updates()
         if self._fw._memory_store:
             self._state.save_to_db(self._fw._memory_store, self._project_id)
         await self._fw.shutdown()
 
     def _append_chat(self, text: str) -> None:
-        assert self._chat is not None
-        normalized = text.replace("\r\n", "\n").replace("\r", "\n")
-        had_content = self._chat_has_content
-        insertion = normalized if not had_content else f"\n{normalized}"
-        self._chat.insert(
-            insertion,
-            location=self._chat_end_location,
-            maintain_selection_offset=False,
-        )
-        self._chat_end_location = self._advance_location(self._chat_end_location, insertion)
-        self._chat_has_content = True
-        added_lines = max(1, len(normalized.splitlines())) if normalized else 1
-        self._chat_line_count = added_lines if not had_content else self._chat_line_count + added_lines
-        # Defer trimming — only trim every 50 appends to avoid O(n) on every insert
-        self._append_count = getattr(self, "_append_count", 0) + 1
-        if self._append_count % 50 == 0:
-            self._trim_chat_if_needed()
-        self._schedule_scroll()
+        self._push_update(text, is_raw=False)
 
     def _append_chat_raw(self, text: str) -> None:
-        """Append raw text without adding a leading newline.
+        self._push_update(text, is_raw=True)
 
-        Used for streaming tokens — each chunk is appended directly
-        to the current position without line breaks.
-        """
-        assert self._chat is not None
+    def _push_update(self, text: str, is_raw: bool) -> None:
         if not text:
             return
         normalized = text.replace("\r\n", "\n").replace("\r", "\n")
-        self._chat.insert(
-            normalized,
-            location=self._chat_end_location,
-            maintain_selection_offset=False,
-        )
-        self._chat_end_location = self._advance_location(self._chat_end_location, normalized)
-        self._chat_has_content = True
-        self._chat_line_count += normalized.count("\n")
-        self._schedule_scroll()
+        self._pending_updates.append((normalized, is_raw))
+        if not self._flush_pending:
+            self._flush_pending = True
+            self.set_timer(0.04, self._flush_updates)
+
+    def _flush_updates(self) -> None:
+        """Process buffered chat updates in a single batch to avoid UI lag."""
+        self._flush_pending = False
+        if not self._pending_updates or self._chat is None:
+            return
+
+        updates = self._pending_updates[:]
+        self._pending_updates.clear()
+
+        full_insertion = ""
+        had_initial_content = self._chat_has_content
+        for text, is_raw in updates:
+            if not is_raw and (had_initial_content or full_insertion):
+                full_insertion += "\n" + text
+            else:
+                full_insertion += text
+
+        if not full_insertion:
+            return
+
+        with self.app.batch_update():
+            self._chat.insert(
+                full_insertion,
+                location=self._chat_end_location,
+                maintain_selection_offset=False,
+            )
+            self._chat_end_location = self._advance_location(
+                self._chat_end_location, full_insertion
+            )
+            
+            added_lines = full_insertion.count("\n")
+            if not self._chat_has_content and full_insertion:
+                added_lines += 1
+            
+            self._chat_has_content = True
+            self._chat_line_count += added_lines
+            
+            self._trim_chat_if_needed()
+            self._schedule_scroll()
 
     def _schedule_scroll(self) -> None:
         """Throttle scroll_end to at most once per 50ms to avoid UI lag."""
@@ -695,7 +720,6 @@ class AegisAgentApp(App[None]):
         now = time.monotonic()
         last = getattr(self, "_last_scroll_time", 0.0)
         if now - last < 0.05:
-            # Schedule a deferred scroll if not already pending
             if not getattr(self, "_scroll_pending", False):
                 self._scroll_pending = True
                 self.set_timer(0.05, self._do_deferred_scroll)
