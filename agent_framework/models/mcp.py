@@ -32,3 +32,40 @@ class MCPToolInfo(BaseModel):
     description: str = ""
     input_schema: dict = Field(default_factory=dict)
     server_id: str = ""
+
+
+class MCPResourceInfo(BaseModel):
+    """Resource metadata discovered from an MCP server."""
+
+    name: str
+    uri: str
+    description: str = ""
+    mime_type: str | None = None
+    server_id: str = ""
+
+
+class MCPResourceTemplateInfo(BaseModel):
+    """Resource template metadata discovered from an MCP server."""
+
+    name: str
+    uri_template: str
+    description: str = ""
+    mime_type: str | None = None
+    server_id: str = ""
+
+
+class MCPPromptArgument(BaseModel):
+    """A single argument for an MCP prompt."""
+
+    name: str
+    description: str = ""
+    required: bool = False
+
+
+class MCPPromptInfo(BaseModel):
+    """Prompt metadata discovered from an MCP server."""
+
+    name: str
+    description: str = ""
+    arguments: list[MCPPromptArgument] = Field(default_factory=list)
+    server_id: str = ""

@@ -368,6 +368,33 @@ class AgentFramework:
                     if entry.meta.source == "a2a" and not self._registry.has_tool(entry.meta.name):
                         self._registry.register(entry)
 
+    # ── MCP resource/prompt facade ──────────────────────────────
+
+    async def list_mcp_resources(self, server_id: str) -> list:
+        if not self._mcp_manager:
+            return []
+        return await self._mcp_manager.list_resources(server_id)
+
+    async def read_mcp_resource(self, server_id: str, uri: str) -> list:
+        if not self._mcp_manager:
+            raise RuntimeError("MCP not configured")
+        return await self._mcp_manager.read_resource(server_id, uri)
+
+    async def list_mcp_prompts(self, server_id: str) -> list:
+        if not self._mcp_manager:
+            return []
+        return await self._mcp_manager.list_prompts(server_id)
+
+    async def get_mcp_prompt(self, server_id: str, name: str, arguments: dict | None = None) -> dict:
+        if not self._mcp_manager:
+            raise RuntimeError("MCP not configured")
+        return await self._mcp_manager.get_prompt(server_id, name, arguments)
+
+    async def list_mcp_resource_templates(self, server_id: str) -> list:
+        if not self._mcp_manager:
+            return []
+        return await self._mcp_manager.list_resource_templates(server_id)
+
     def list_memories(self, user_id: str | None = None) -> list:
         """List saved memories for the current agent."""
         if not self._setup_done:
@@ -561,6 +588,32 @@ class AgentFramework:
             if hasattr(adapter, "_session") and adapter._session.active:
                 adapter.end_session()
                 logger.info("conversation.session_ended")
+
+    def build_a2a_server(
+        self,
+        *,
+        name: str = "aegis-agent",
+        description: str = "Aegis Agent Framework A2A Server",
+        host: str = "0.0.0.0",
+        port: int = 8080,
+        skills: list[dict] | None = None,
+    ) -> Any:
+        """Build a FastAPI app exposing this framework as an A2A server.
+
+        Usage::
+
+            app = framework.build_a2a_server(name="my-agent", port=9000)
+            uvicorn.run(app, host="0.0.0.0", port=9000)
+        """
+        from agent_framework.protocols.a2a.a2a_client_adapter import A2AClientAdapter
+        adapter = A2AClientAdapter()
+        return adapter.build_a2a_server_app(
+            self,
+            name=name,
+            description=description,
+            url=f"http://{host}:{port}",
+            skills=skills,
+        )
 
     async def shutdown(self) -> None:
         """Clean up resources."""

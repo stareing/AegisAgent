@@ -392,6 +392,8 @@ class AegisAgentApp(App[None]):
                     self._append_chat(summary)
         else:
             self._state.conversation_id = str(uuid.uuid4())
+        # 异步连接 MCP/A2A
+        self.call_later(self._setup_protocols)
 
         hdr = self._header
         hdr.model_name = "Mock" if self._mock else self._fw.config.model.default_model_name
@@ -609,6 +611,10 @@ class AegisAgentApp(App[None]):
             assert self._prompt is not None and self._header is not None
             self._prompt.focus()
             self._header.focus_mode = "input"
+
+    async def _setup_protocols(self) -> None:
+        from agent_framework.terminal_runtime import _setup_protocols
+        await _setup_protocols(self._fw)
 
     async def on_unmount(self) -> None:
         if self._fw._memory_store:

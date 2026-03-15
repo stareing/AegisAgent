@@ -31,18 +31,16 @@ class A2AClientAdapter:
         Returns the agent card as a dict.
         """
         try:
-            from a2a.client import A2AClient
+            from a2a.client import ClientFactory
         except ImportError:
             raise ImportError(
-                "A2A SDK not installed. Install with: pip install a2a-python"
+                "A2A SDK not installed. Install with: pip install a2a-sdk"
             )
 
         try:
-            client = await A2AClient.get_client_from_agent_card_url(
-                f"{agent_url.rstrip('/')}/.well-known/agent.json"
-            )
-            agent_card = client.agent_card
-            effective_alias = alias or agent_card.name or agent_url.split("/")[-1]
+            client = await ClientFactory.connect(agent_url.rstrip("/"))
+            agent_card = await client.get_card()
+            effective_alias = alias or getattr(agent_card, "name", None) or agent_url.split("/")[-1]
 
             self._clients[effective_alias] = client
             self._known_agents[effective_alias] = {
@@ -88,24 +86,26 @@ class A2AClientAdapter:
 
         try:
             import uuid
-            from a2a.types import MessageSendParams, TextPart, Part, Message, Role
+            from a2a.client import create_text_message_object
+            from a2a.types import TaskState
 
             task_id = str(uuid.uuid4())
+            message = create_text_message_object(content=task_input)
 
-            params = MessageSendParams(
-                message=Message(
-                    messageId=str(uuid.uuid4()),
-                    role=Role.user,
-                    parts=[Part(root=TextPart(text=task_input))],
-                ),
-            )
+            final_answer: str | None = None
+            async for event in client.send_message(message):
+                if isinstance(event, tuple):
+                    task, _update = event
+                    if task.status.state == TaskState.completed and task.status.message:
+                        parts_text = []
+                        for part in task.status.message.parts:
+                            root = getattr(part, "root", part)
+                            if hasattr(root, "text"):
+                                parts_text.append(root.text)
+                        if parts_text:
+                            final_answer = "\n".join(parts_text)
 
-            response = await client.send_message(params)
-
-            # Parse response
-            final_answer = self._extract_answer(response)
             success = final_answer is not None
-
             logger.info(
                 "a2a.task_completed",
                 alias=alias,
@@ -200,67 +200,219 @@ class A2AClientAdapter:
             return
 
         try:
-            import uuid
-            from a2a.types import MessageSendParams, TextPart, Part, Message, Role
+            from a2a.client import create_text_message_object
 
-            params = MessageSendParams(
-                message=Message(
-                    messageId=str(uuid.uuid4()),
-                    role=Role.user,
-                    parts=[Part(root=TextPart(text=task_input))],
-                ),
-            )
+            message = create_text_message_object(content=task_input)
 
-            response = await client.send_message_streaming(params)
-            async for event in response:
+            async for event in client.send_message_streaming(message):
                 yield {"type": "event", "data": str(event)}
 
         except Exception as e:
             logger.error("a2a.stream_failed", alias=alias, error=str(e))
             yield {"type": "error", "data": str(e)}
 
-    async def register_as_a2a_server(
-        self,
-        agent: Any,
-        host: str = "0.0.0.0",
-        port: int = 8080,
-    ) -> None:
-        """Register the current agent as an A2A server.
+    def _get_client(self, alias: str) -> Any:
+        client = self._clients.get(alias)
+        if client is None:
+            raise RuntimeError(f"A2A agent '{alias}' not discovered")
+        return client
 
-        Uses the a2a-python SDK to expose the agent via A2A protocol.
-        """
+    async def get_task(self, alias: str, task_id: str) -> dict:
+        """Retrieve task status from a remote A2A agent."""
+        client = self._get_client(alias)
         try:
-            from a2a.server import A2AServer, TaskHandler
+            from a2a.types import TaskQueryParams
+            task = await client.get_task(TaskQueryParams(id=task_id))
+            result = {
+                "task_id": task.id,
+                "state": str(task.status.state),
+                "message": None,
+                "artifacts": [],
+            }
+            if task.status.message:
+                parts = []
+                for part in task.status.message.parts:
+                    root = getattr(part, "root", part)
+                    if hasattr(root, "text"):
+                        parts.append(root.text)
+                result["message"] = "\n".join(parts) if parts else None
+            if hasattr(task, "artifacts") and task.artifacts:
+                for artifact in task.artifacts:
+                    art_parts = []
+                    for part in getattr(artifact, "parts", []):
+                        root = getattr(part, "root", part)
+                        if hasattr(root, "text"):
+                            art_parts.append(root.text)
+                    result["artifacts"].append({
+                        "id": getattr(artifact, "artifact_id", ""),
+                        "name": getattr(artifact, "name", ""),
+                        "parts": art_parts,
+                    })
+            logger.info("a2a.task_retrieved", alias=alias, task_id=task_id)
+            return result
+        except Exception as e:
+            logger.error("a2a.get_task_failed", alias=alias, task_id=task_id, error=str(e))
+            raise
 
-            class _AgentTaskHandler(TaskHandler):
-                def __init__(self, agent_ref: Any) -> None:
-                    self._agent = agent_ref
+    async def cancel_task(self, alias: str, task_id: str) -> dict:
+        """Cancel a running task on a remote A2A agent."""
+        client = self._get_client(alias)
+        try:
+            from a2a.types import TaskIdParams
+            task = await client.cancel_task(TaskIdParams(id=task_id))
+            logger.info("a2a.task_cancelled", alias=alias, task_id=task_id)
+            return {"task_id": task_id, "state": str(task.status.state)}
+        except Exception as e:
+            logger.error("a2a.cancel_task_failed", alias=alias, task_id=task_id, error=str(e))
+            raise
 
-                async def handle(self, request: Any) -> Any:
-                    # Extract task input from the request
-                    task_text = ""
-                    if hasattr(request, "message") and hasattr(request.message, "parts"):
-                        for part in request.message.parts:
+    async def resubscribe(self, alias: str, task_id: str) -> AsyncIterator[dict]:
+        """Resubscribe to streaming updates for an existing task."""
+        client = self._get_client(alias)
+        try:
+            from a2a.types import TaskIdParams
+            logger.info("a2a.task_resubscribed", alias=alias, task_id=task_id)
+            async for event in client.resubscribe(TaskIdParams(id=task_id)):
+                if isinstance(event, tuple):
+                    task, update = event
+                    yield {
+                        "type": "update",
+                        "task_id": task.id,
+                        "state": str(task.status.state),
+                        "data": str(update),
+                    }
+                else:
+                    yield {"type": "event", "data": str(event)}
+        except Exception as e:
+            logger.error("a2a.resubscribe_failed", alias=alias, task_id=task_id, error=str(e))
+            yield {"type": "error", "data": str(e)}
+
+    async def delegate_task_streaming(self, alias: str, task_input: str) -> AsyncIterator[dict]:
+        """Delegate a task with streaming response (by alias)."""
+        client = self._get_client(alias)
+        try:
+            from a2a.client import create_text_message_object
+            message = create_text_message_object(content=task_input)
+            logger.info("a2a.streaming_started", alias=alias)
+            async for event in client.send_message_streaming(message):
+                if isinstance(event, tuple):
+                    task, update = event
+                    result: dict = {
+                        "type": "update",
+                        "task_id": task.id,
+                        "state": str(task.status.state),
+                    }
+                    if task.status.message:
+                        parts = []
+                        for part in task.status.message.parts:
                             root = getattr(part, "root", part)
                             if hasattr(root, "text"):
-                                task_text += root.text
-                    # Delegate to agent (requires framework.run integration)
-                    return {"status": "received", "task": task_text}
+                                parts.append(root.text)
+                        result["message"] = "\n".join(parts)
+                    yield result
+                else:
+                    yield {"type": "event", "data": str(event)}
+        except Exception as e:
+            logger.error("a2a.streaming_failed", alias=alias, error=str(e))
+            yield {"type": "error", "data": str(e)}
 
-            handler = _AgentTaskHandler(agent)
-            server = A2AServer(handler=handler, host=host, port=port)
+    def build_a2a_server_app(
+        self,
+        framework: Any,
+        *,
+        name: str = "aegis-agent",
+        description: str = "Aegis Agent Framework A2A Server",
+        url: str = "http://localhost:8080",
+        skills: list[dict] | None = None,
+    ) -> Any:
+        """Build a FastAPI app that exposes the local framework as an A2A server.
 
-            logger.info("a2a.server_started", host=host, port=port)
-            await server.start()
-
+        Returns a FastAPI app (call uvicorn.run(app, ...) to start).
+        """
+        try:
+            from a2a.server.agent_execution import AgentExecutor, RequestContext
+            from a2a.server.events import EventQueue
+            from a2a.server.request_handlers import DefaultRequestHandler
+            from a2a.server.tasks import InMemoryTaskStore
+            from a2a.server.apps import A2AFastAPIApplication
+            from a2a.types import (
+                AgentCard, AgentCapabilities, AgentSkill,
+                Task, TaskStatus, TaskState,
+            )
+            from a2a.utils.message import new_agent_text_message
         except ImportError:
             raise ImportError(
-                "A2A server requires a2a-python with server support. "
-                "Install with: pip install a2a-python[server]"
+                "A2A server requires a2a-sdk. Install with: pip install a2a-sdk"
             )
-        except Exception as e:
-            logger.error("a2a.server_start_failed", error=str(e))
-            raise
+
+        fw_ref = framework
+
+        class _FrameworkExecutor(AgentExecutor):
+            async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
+                user_text = ""
+                if context.message and context.message.parts:
+                    for part in context.message.parts:
+                        root = getattr(part, "root", part)
+                        if hasattr(root, "text"):
+                            user_text += root.text
+
+                try:
+                    result = await fw_ref.run(user_text)
+                    answer = result.final_answer or ""
+                except Exception as e:
+                    answer = f"Error: {e}"
+
+                await event_queue.enqueue_event(
+                    Task(
+                        id=context.task_id,
+                        context_id=context.context_id,
+                        status=TaskStatus(
+                            state=TaskState.completed,
+                            message=new_agent_text_message(
+                                answer, context.context_id, context.task_id,
+                            ),
+                        ),
+                    )
+                )
+
+            async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
+                await event_queue.enqueue_event(
+                    Task(
+                        id=context.task_id,
+                        context_id=context.context_id,
+                        status=TaskStatus(state=TaskState.canceled),
+                    )
+                )
+
+        agent_skills = [
+            AgentSkill(
+                id=s.get("id", "default"),
+                name=s.get("name", "Default"),
+                description=s.get("description", ""),
+                tags=s.get("tags", ["agent"]),
+            )
+            for s in (skills or [{"id": "chat", "name": "Chat", "description": description, "tags": ["agent"]}])
+        ]
+
+        agent_card = AgentCard(
+            name=name,
+            description=description,
+            url=url,
+            version="1.0.0",
+            capabilities=AgentCapabilities(streaming=False),
+            skills=agent_skills,
+            defaultInputModes=["text/plain"],
+            defaultOutputModes=["text/plain"],
+        )
+
+        executor = _FrameworkExecutor()
+        handler = DefaultRequestHandler(
+            agent_executor=executor,
+            task_store=InMemoryTaskStore(),
+        )
+        app_builder = A2AFastAPIApplication(agent_card, handler)
+        logger.info("a2a.server_app_built", name=name, url=url)
+        return app_builder.build()
 
     def _extract_answer(self, response: Any) -> str | None:
         """Extract text answer from A2A response object."""

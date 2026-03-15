@@ -4,7 +4,15 @@ import asyncio
 from typing import Any
 
 from agent_framework.infra.logger import get_logger
-from agent_framework.models.mcp import MCPServerConfig, MCPToolInfo, MCPTransportType
+from agent_framework.models.mcp import (
+    MCPPromptArgument,
+    MCPPromptInfo,
+    MCPResourceInfo,
+    MCPResourceTemplateInfo,
+    MCPServerConfig,
+    MCPToolInfo,
+    MCPTransportType,
+)
 from agent_framework.models.tool import ToolEntry, ToolMeta
 
 logger = get_logger(__name__)
@@ -24,6 +32,7 @@ class MCPClientManager:
         self._servers: dict[str, MCPServerConfig] = {}
         self._clients: dict[str, Any] = {}  # server_id -> MCP client session
         self._discovered_tools: dict[str, list[MCPToolInfo]] = {}
+        self._sampling_callback: Any = None
 
     async def connect_server(self, config: MCPServerConfig) -> None:
         """Connect to an MCP server and discover its tools."""
@@ -103,9 +112,7 @@ class MCPClientManager:
         self, server_id: str, tool_name: str, arguments: dict
     ) -> Any:
         """Call a tool on a specific MCP server."""
-        session = self._clients.get(server_id)
-        if session is None:
-            raise RuntimeError(f"MCP server '{server_id}' not connected")
+        session = self._get_session(server_id)
 
         try:
             result = await session.call_tool(tool_name, arguments=arguments)
@@ -131,6 +138,134 @@ class MCPClientManager:
                 tool_name=tool_name,
                 error=str(e),
             )
+            raise
+
+    def set_sampling_callback(self, callback: Any) -> None:
+        """Set a sampling callback for LLM requests from MCP servers.
+
+        The callback signature must match:
+            async def callback(context, params) -> CreateMessageResult
+        Set before calling connect_server().
+        """
+        self._sampling_callback = callback
+
+    def _get_session(self, server_id: str) -> Any:
+        session = self._clients.get(server_id)
+        if session is None:
+            raise RuntimeError(f"MCP server '{server_id}' not connected")
+        return session
+
+    async def list_resources(self, server_id: str) -> list[MCPResourceInfo]:
+        """List resources available on an MCP server."""
+        session = self._get_session(server_id)
+        try:
+            result = await session.list_resources()
+            resources = [
+                MCPResourceInfo(
+                    name=r.name,
+                    uri=str(r.uri),
+                    description=getattr(r, "description", "") or "",
+                    mime_type=getattr(r, "mimeType", None),
+                    server_id=server_id,
+                )
+                for r in result.resources
+            ]
+            logger.info("mcp.resources_listed", server_id=server_id, count=len(resources))
+            return resources
+        except Exception as e:
+            logger.error("mcp.list_resources_failed", server_id=server_id, error=str(e))
+            raise
+
+    async def read_resource(self, server_id: str, uri: str) -> list[dict]:
+        """Read a resource by URI from an MCP server."""
+        from pydantic import AnyUrl
+
+        session = self._get_session(server_id)
+        try:
+            result = await session.read_resource(AnyUrl(uri))
+            contents = []
+            for c in result.contents:
+                contents.append({
+                    "uri": str(getattr(c, "uri", "")),
+                    "mime_type": getattr(c, "mimeType", None),
+                    "text": getattr(c, "text", None),
+                    "blob": getattr(c, "blob", None),
+                })
+            logger.info("mcp.resource_read", server_id=server_id, uri=uri)
+            return contents
+        except Exception as e:
+            logger.error("mcp.read_resource_failed", server_id=server_id, uri=uri, error=str(e))
+            raise
+
+    async def list_resource_templates(self, server_id: str) -> list[MCPResourceTemplateInfo]:
+        """List resource templates available on an MCP server."""
+        session = self._get_session(server_id)
+        try:
+            result = await session.list_resource_templates()
+            templates = [
+                MCPResourceTemplateInfo(
+                    name=t.name,
+                    uri_template=t.uriTemplate,
+                    description=getattr(t, "description", "") or "",
+                    mime_type=getattr(t, "mimeType", None),
+                    server_id=server_id,
+                )
+                for t in result.resourceTemplates
+            ]
+            logger.info("mcp.resource_templates_listed", server_id=server_id, count=len(templates))
+            return templates
+        except Exception as e:
+            logger.error("mcp.list_resource_templates_failed", server_id=server_id, error=str(e))
+            raise
+
+    async def list_prompts(self, server_id: str) -> list[MCPPromptInfo]:
+        """List prompts available on an MCP server."""
+        session = self._get_session(server_id)
+        try:
+            result = await session.list_prompts()
+            prompts = [
+                MCPPromptInfo(
+                    name=p.name,
+                    description=getattr(p, "description", "") or "",
+                    arguments=[
+                        MCPPromptArgument(
+                            name=a.name,
+                            description=getattr(a, "description", "") or "",
+                            required=getattr(a, "required", False),
+                        )
+                        for a in (getattr(p, "arguments", None) or [])
+                    ],
+                    server_id=server_id,
+                )
+                for p in result.prompts
+            ]
+            logger.info("mcp.prompts_listed", server_id=server_id, count=len(prompts))
+            return prompts
+        except Exception as e:
+            logger.error("mcp.list_prompts_failed", server_id=server_id, error=str(e))
+            raise
+
+    async def get_prompt(
+        self, server_id: str, name: str, arguments: dict[str, str] | None = None,
+    ) -> dict:
+        """Get a prompt from an MCP server, returns rendered messages."""
+        session = self._get_session(server_id)
+        try:
+            result = await session.get_prompt(name, arguments=arguments)
+            messages = []
+            for m in result.messages:
+                content = m.content
+                if hasattr(content, "text"):
+                    text = content.text
+                elif isinstance(content, str):
+                    text = content
+                else:
+                    text = str(content)
+                messages.append({"role": str(m.role), "content": text})
+            logger.info("mcp.prompt_retrieved", server_id=server_id, name=name)
+            return {"description": getattr(result, "description", None), "messages": messages}
+        except Exception as e:
+            logger.error("mcp.get_prompt_failed", server_id=server_id, name=name, error=str(e))
             raise
 
     def get_discovered_tools(self, server_id: str | None = None) -> list[MCPToolInfo]:
@@ -202,12 +337,7 @@ class MCPClientManager:
             # stdio_client is an async context manager that yields (read, write)
             transport = stdio_client(server_params)
             read_stream, write_stream = await transport.__aenter__()
-            session = ClientSession(read_stream, write_stream)
-            await session.__aenter__()
-            await session.initialize()
-            # Store transport for cleanup
-            session._transport_cm = transport  # type: ignore[attr-defined]
-            return transport, session
+            return await self._init_session(transport, read_stream, write_stream)
 
         if config.transport == MCPTransportType.SSE:
             from mcp.client.sse import sse_client
@@ -217,14 +347,9 @@ class MCPClientManager:
 
             transport = sse_client(config.url, headers=config.headers or None)
             read_stream, write_stream = await transport.__aenter__()
-            session = ClientSession(read_stream, write_stream)
-            await session.__aenter__()
-            await session.initialize()
-            session._transport_cm = transport  # type: ignore[attr-defined]
-            return transport, session
+            return await self._init_session(transport, read_stream, write_stream)
 
         if config.transport == MCPTransportType.STREAMABLE_HTTP:
-            # streamable_http uses the same pattern as SSE in newer SDK versions
             try:
                 from mcp.client.streamable_http import streamablehttp_client
             except ImportError:
@@ -235,13 +360,20 @@ class MCPClientManager:
 
             transport = streamablehttp_client(config.url, headers=config.headers or None)
             read_stream, write_stream = await transport.__aenter__()
-            session = ClientSession(read_stream, write_stream)
-            await session.__aenter__()
-            await session.initialize()
-            session._transport_cm = transport  # type: ignore[attr-defined]
-            return transport, session
+            return await self._init_session(transport, read_stream, write_stream)
 
         raise ValueError(f"Unsupported transport type: {config.transport}")
+
+    async def _init_session(self, transport: Any, read_stream: Any, write_stream: Any) -> tuple[Any, Any]:
+        from mcp import ClientSession
+        session = ClientSession(
+            read_stream, write_stream,
+            sampling_callback=self._sampling_callback,
+        )
+        await session.__aenter__()
+        await session.initialize()
+        session._transport_cm = transport  # type: ignore[attr-defined]
+        return transport, session
 
     async def _discover_tools(self, session: Any, server_id: str) -> list[MCPToolInfo]:
         """Discover tools from an MCP server session."""

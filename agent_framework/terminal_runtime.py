@@ -1263,6 +1263,24 @@ async def execute_user_input_stream(
         yield event
 
 
+async def _setup_protocols(fw: AgentFramework) -> None:
+    """连接配置中的 MCP servers 和 A2A agents。"""
+    if fw.config.mcp.servers:
+        try:
+            await fw.setup_mcp()
+            count = len(fw._mcp_manager.list_connected_servers()) if fw._mcp_manager else 0
+            print(f"  {_green(f'MCP: 已连接 {count} 个服务')}")
+        except Exception as e:
+            print(f"  {_red(f'MCP 连接失败: {e}')}")
+    if fw.config.a2a.known_agents:
+        try:
+            await fw.setup_a2a()
+            count = len(fw._a2a_adapter.list_known_agents()) if fw._a2a_adapter else 0
+            print(f"  {_green(f'A2A: 已发现 {count} 个远程 Agent')}")
+        except Exception as e:
+            print(f"  {_red(f'A2A 连接失败: {e}')}")
+
+
 async def run_classic_repl(fw: AgentFramework, mock_model: InteractiveMockModel | None) -> None:
     import uuid
     from pathlib import Path
@@ -1278,6 +1296,8 @@ async def run_classic_repl(fw: AgentFramework, mock_model: InteractiveMockModel 
                 print(summary)
     else:
         state.conversation_id = str(uuid.uuid4())
+    # 连接 MCP/A2A（如果配置了）
+    await _setup_protocols(fw)
     print(render_banner(mock_model is not None, None, fw))
     while True:
         try:
