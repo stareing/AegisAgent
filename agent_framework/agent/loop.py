@@ -318,8 +318,14 @@ class AgentLoop:
             args_str = "".join(accum["arguments_parts"]) or "{}"
             try:
                 arguments = _json.loads(args_str)
-            except (ValueError, _json.JSONDecodeError):
-                arguments = {}
+            except (ValueError, _json.JSONDecodeError) as parse_err:
+                logger.warning(
+                    "llm.tool_call_parse_error",
+                    tool_name=accum["name"],
+                    raw_arguments=args_str[:200],
+                    error=str(parse_err),
+                )
+                arguments = {"_parse_error": str(parse_err), "_raw": args_str[:500]}
             tool_calls.append(ToolCallRequest(
                 id=accum["id"],
                 function_name=accum["name"],
@@ -452,18 +458,18 @@ class AgentLoop:
             return StopSignal(reason=StopReason.LLM_STOP)
 
         # Edge case: some models return finish_reason="stop" WITH tool_calls.
-        # Prioritize LLM_STOP — the tool_calls will be discarded.
+        # Prioritize tool_calls — the model produced actionable calls despite
+        # the misleading finish_reason. Treat as tool_calls finish_reason.
         if model_response.finish_reason == "stop" and model_response.tool_calls:
             tool_names = [tc.function_name for tc in model_response.tool_calls]
             logger.warning(
                 "stop_check.stop_with_tool_calls",
                 iteration_index=agent_state.iteration_count,
                 tool_names=tool_names,
-                hint="finish_reason=stop takes priority; tool_calls discarded",
+                hint="tool_calls present; overriding finish_reason to tool_calls",
             )
-            # Clear tool_calls so they won't be dispatched
-            model_response.tool_calls = []
-            return StopSignal(reason=StopReason.LLM_STOP)
+            model_response.finish_reason = "tool_calls"
+            return None  # Do not stop — let tool dispatch proceed
 
         if model_response.finish_reason == "length":
             logger.warning(

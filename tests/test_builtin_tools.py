@@ -22,6 +22,12 @@ from agent_framework.tools.builtin.system import get_env, run_command
 # =====================================================================
 
 
+@pytest.fixture(autouse=True)
+def _allow_tmp_sandbox(monkeypatch, tmp_path):
+    """Allow test tmp_path in filesystem sandbox."""
+    monkeypatch.setenv("AGENT_FS_SANDBOX_ROOTS", str(tmp_path))
+
+
 class TestReadFile:
 
     def test_read_existing_file(self, tmp_path):
@@ -29,9 +35,9 @@ class TestReadFile:
         f.write_text("hello world")
         assert read_file(str(f)) == "hello world"
 
-    def test_read_nonexistent_raises(self):
+    def test_read_nonexistent_raises(self, tmp_path):
         with pytest.raises(FileNotFoundError):
-            read_file("/nonexistent/path/file.txt")
+            read_file(str(tmp_path / "nonexistent" / "file.txt"))
 
     def test_read_directory_raises(self, tmp_path):
         with pytest.raises(ValueError, match="not a file"):
@@ -82,9 +88,9 @@ class TestListDirectory:
         assert "b.py" in result
         assert "a.txt" not in result
 
-    def test_list_nonexistent_raises(self):
+    def test_list_nonexistent_raises(self, tmp_path):
         with pytest.raises(FileNotFoundError):
-            list_directory("/nonexistent/dir")
+            list_directory(str(tmp_path / "nonexistent_dir"))
 
     def test_list_file_raises(self, tmp_path):
         f = tmp_path / "file.txt"

@@ -165,12 +165,37 @@ Implementation chain:
 - Hard exit guard: forces stop after 3 post-spawn iterations without synthesis
 - Sub-agent cleanup on run exit
 
-### Memory
-- SQLite persistence (`data/memories.db`)
+### Memory & Storage Backends
+
+Multi-backend persistence via `MemoryStoreProtocol`:
+
+| Backend | Config `store_type` | Dependency | Status |
+|---------|-------------------|------------|--------|
+| **SQLite** | `sqlite` (default) | built-in | Production |
+| **PostgreSQL** | `postgresql` | `psycopg2-binary` | Production |
+| **MongoDB** | `mongodb` | `pymongo` | Production |
+| **Neo4j** | `neo4j` | `neo4j` | Production |
+
+```json
+// SQLite (default)
+{"memory": {"db_path": "data/memories.db"}}
+
+// PostgreSQL
+{"memory": {"store_type": "postgresql", "connection_url": "postgresql://user:pass@host/db"}}
+
+// MongoDB
+{"memory": {"store_type": "mongodb", "connection_url": "mongodb://host:27017", "database_name": "agent_db"}}
+
+// Neo4j
+{"memory": {"store_type": "neo4j", "connection_url": "bolt://host:7687", "neo4j_auth": "neo4j:pass"}}
+```
+
+Features (all backends):
 - Pattern-based auto-extraction (preferences, constraints, project context)
 - Provenance tracking: user / agent / subagent / admin
 - Confidence filtering: low-confidence inferred candidates discarded
 - Governance: pin, unpin, activate, deactivate, clear
+- Conversation history persistence with multi-session support
 
 ### Conversation History Persistence
 - SQLite-backed (`data/memories.db`, shared with memory store)

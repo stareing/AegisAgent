@@ -41,9 +41,18 @@ class MemoryConfig(BaseModel):
     Quota semantics:
     - max_memories_in_context: SOFT — excess memories are trimmed by relevance, not error
     - max_memory_items_per_user: SOFT — oldest/lowest-priority purged on overflow
+
+    store_type: "sqlite" (default) | "postgresql" | "mongodb"
+    - sqlite: uses db_path
+    - postgresql: uses connection_url (e.g. "postgresql+asyncpg://user:pass@host/db")
+    - mongodb: uses connection_url (e.g. "mongodb://host:27017/db")
     """
 
+    store_type: str = "sqlite"
     db_path: str = "data/memories.db"
+    connection_url: str | None = None
+    database_name: str | None = None
+    neo4j_auth: str | None = None  # "user:password" for neo4j
     enable_saved_memory: bool = True
     auto_extract_memory: bool = True
     max_memories_in_context: int = 10

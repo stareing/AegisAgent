@@ -1,20 +1,80 @@
 """Built-in web tools.
 
-Provides web page fetching with content extraction.
+Provides web page fetching with content extraction and SSRF protection.
 """
 
 from __future__ import annotations
 
+import ipaddress
 import re
+import socket
 from html.parser import HTMLParser
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from agent_framework.tools.decorator import tool
 
 _MAX_CONTENT_CHARS = 80_000
+_MAX_RESPONSE_BYTES = 2 * 1024 * 1024  # 2 MB
+_READ_CHUNK_SIZE = 65_536
 _DEFAULT_TIMEOUT = 30
 _USER_AGENT = "AegisAgent/0.1 (Python)"
+
+_DECODABLE_CONTENT_TYPES = {"text/", "application/json"}
+
+
+def _check_ssrf(url: str) -> None:
+    """Block requests to private, loopback, and link-local addresses."""
+    parsed = urlparse(url)
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError(f"Cannot extract hostname from URL: {url}")
+
+    try:
+        addr_infos = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ValueError(f"Cannot resolve hostname '{hostname}': {exc}") from exc
+
+    for family, _type, _proto, _canonname, sockaddr in addr_infos:
+        ip_str = sockaddr[0]
+        addr = ipaddress.ip_address(ip_str)
+        if (
+            addr.is_private
+            or addr.is_loopback
+            or addr.is_link_local
+            or addr.is_reserved
+            or addr.is_multicast
+        ):
+            raise ValueError(
+                f"URL '{url}' resolves to blocked address {ip_str}. "
+                "Requests to private, loopback, link-local, reserved, "
+                "and multicast addresses are not allowed."
+            )
+
+
+def _is_decodable_content_type(content_type: str) -> bool:
+    """Return True if the content type should be decoded as text."""
+    ct_lower = content_type.lower()
+    return any(prefix in ct_lower for prefix in _DECODABLE_CONTENT_TYPES)
+
+
+def _streaming_read(resp, max_bytes: int = _MAX_RESPONSE_BYTES) -> bytes:
+    """Read response body in chunks, enforcing a maximum size."""
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = resp.read(_READ_CHUNK_SIZE)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            # Keep only up to the limit
+            overshoot = total - max_bytes
+            chunks.append(chunk[: len(chunk) - overshoot])
+            break
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 class _TextExtractor(HTMLParser):
@@ -86,11 +146,24 @@ def web_fetch(
     if not url.startswith(("http://", "https://")):
         raise ValueError(f"URL must start with http:// or https://, got: {url}")
 
+    _check_ssrf(url)
+
     req = Request(url, headers={"User-Agent": _USER_AGENT})
     try:
         with urlopen(req, timeout=timeout_seconds) as resp:
             content_type = resp.headers.get("Content-Type", "")
-            raw = resp.read().decode(errors="replace")
+            raw_bytes = _streaming_read(resp)
+
+            if not _is_decodable_content_type(content_type):
+                return {
+                    "title": "",
+                    "content": f"[Non-text content: {content_type}]",
+                    "url": url,
+                    "content_length": len(raw_bytes),
+                    "content_type": content_type,
+                }
+
+            raw = raw_bytes.decode(errors="replace")
     except HTTPError as e:
         return {
             "error": f"HTTP {e.code}: {e.reason}",

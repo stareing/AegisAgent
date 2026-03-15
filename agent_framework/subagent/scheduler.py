@@ -152,11 +152,23 @@ class SubAgentScheduler:
                 deadline_ms=deadline_ms,
                 parent_run_id=parent_run_id,
             )
+            # Wrap coro as a managed task for clean cancellation.
+            # Using ensure_future + wait (not wait_for) avoids Python's
+            # "coroutine was never awaited" warning on cancel/timeout.
+            inner = asyncio.ensure_future(coro)
             try:
                 async with self._semaphore:
-                    result = await asyncio.wait_for(
-                        coro, timeout=deadline_ms / 1000.0
+                    done, _ = await asyncio.wait(
+                        {inner}, timeout=deadline_ms / 1000.0
                     )
+                    if inner in done:
+                        if inner.cancelled():
+                            raise asyncio.CancelledError()
+                        if inner.exception():
+                            raise inner.exception()
+                        result = inner.result()
+                    else:
+                        raise asyncio.TimeoutError()
                 duration = int((time.monotonic() - start) * 1000)
                 result.duration_ms = duration
                 handle.status = "COMPLETED" if result.success else "FAILED"
@@ -169,8 +181,15 @@ class SubAgentScheduler:
                 )
                 return result
             except asyncio.TimeoutError:
+                inner.cancel()
+                try:
+                    await inner
+                except (asyncio.CancelledError, Exception):
+                    pass
                 duration = int((time.monotonic() - start) * 1000)
                 handle.status = "TIMEOUT"
+                if task_record:
+                    task_record.status = SubAgentTaskStatus.TIMEOUT
                 logger.error(
                     "scheduler.task_timeout",
                     spawn_id=spawn_id,
@@ -185,8 +204,15 @@ class SubAgentScheduler:
                     duration_ms=duration,
                 )
             except asyncio.CancelledError:
+                inner.cancel()
+                try:
+                    await inner
+                except (asyncio.CancelledError, Exception):
+                    pass
                 duration = int((time.monotonic() - start) * 1000)
                 handle.status = "CANCELLED"
+                if task_record:
+                    task_record.status = SubAgentTaskStatus.CANCELLED
                 logger.warning(
                     "scheduler.task_cancelled",
                     spawn_id=spawn_id,
@@ -202,6 +228,8 @@ class SubAgentScheduler:
             except Exception as e:
                 duration = int((time.monotonic() - start) * 1000)
                 handle.status = "FAILED"
+                if task_record:
+                    task_record.status = SubAgentTaskStatus.FAILED
                 logger.error(
                     "scheduler.task_failed",
                     spawn_id=spawn_id,
@@ -218,6 +246,13 @@ class SubAgentScheduler:
                 )
             finally:
                 self._tasks.pop(spawn_id, None)
+                # Ensure inner task is fully cleaned up
+                if not inner.done():
+                    inner.cancel()
+                    try:
+                        await inner
+                    except (asyncio.CancelledError, Exception):
+                        pass
 
         task = asyncio.create_task(_wrapped())
         self._tasks[spawn_id] = task
@@ -239,6 +274,15 @@ class SubAgentScheduler:
 
         task.add_done_callback(_on_done)
         return handle
+
+    def get_result_if_ready(self, spawn_id: str) -> SubAgentResult | None:
+        """Non-blocking: return result if done, else None."""
+        return self._results.pop(spawn_id, None)
+
+    def is_running(self, spawn_id: str) -> bool:
+        """Check if a task is still running."""
+        task = self._tasks.get(spawn_id)
+        return task is not None and not task.done()
 
     async def await_result(self, handle: SubAgentHandle) -> SubAgentResult:
         """Wait for a submitted sub-agent to complete and return its result."""

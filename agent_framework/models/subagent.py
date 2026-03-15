@@ -181,6 +181,7 @@ class SubAgentTaskStatus(str, Enum):
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
+    TIMEOUT = "TIMEOUT"
 
 
 class SubAgentTaskRecord(BaseModel):

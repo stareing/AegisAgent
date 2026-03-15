@@ -98,7 +98,7 @@ class AgentFramework:
         configure_logging(self.config.logging)
 
         # Memory
-        memory_store = SQLiteMemoryStore(db_path=self.config.memory.db_path)
+        memory_store = _create_memory_store(self.config.memory)
         self._memory_store = memory_store
         memory_manager = DefaultMemoryManager(
             store=memory_store,
@@ -620,4 +620,38 @@ class AgentFramework:
         self.end_conversation()
         if self._mcp_manager:
             await self._mcp_manager.disconnect_all()
+        if self._memory_store:
+            self._memory_store.close()
         logger.info("framework.shutdown")
+
+
+def _create_memory_store(config: Any) -> Any:
+    """Factory: create memory store based on config.store_type."""
+    store_type = getattr(config, "store_type", "sqlite")
+
+    if store_type == "postgresql":
+        from agent_framework.memory.pg_store import PostgreSQLMemoryStore
+        if not config.connection_url:
+            raise ValueError("postgresql store requires memory.connection_url")
+        return PostgreSQLMemoryStore(connection_url=config.connection_url)
+
+    if store_type == "mongodb":
+        from agent_framework.memory.mongo_store import MongoDBMemoryStore
+        if not config.connection_url:
+            raise ValueError("mongodb store requires memory.connection_url")
+        db_name = config.database_name or "agent_memory"
+        return MongoDBMemoryStore(connection_url=config.connection_url, database_name=db_name)
+
+    if store_type == "neo4j":
+        from agent_framework.memory.neo4j_store import Neo4jMemoryStore
+        if not config.connection_url:
+            raise ValueError("neo4j store requires memory.connection_url")
+        auth = ("neo4j", "neo4j")
+        if hasattr(config, "neo4j_auth") and config.neo4j_auth:
+            parts = config.neo4j_auth.split(":", 1)
+            auth = (parts[0], parts[1] if len(parts) > 1 else "")
+        db_name = config.database_name or "neo4j"
+        return Neo4jMemoryStore(connection_url=config.connection_url, auth=auth, database=db_name)
+
+    # Default: sqlite
+    return SQLiteMemoryStore(db_path=config.db_path)

@@ -66,13 +66,37 @@ python -m agent_framework.main --config config/deepseek.json
 - **冻结前缀**：系统提示 + 技能 addon 生成不可变前缀，跨迭代复用提升 provider 端 KV cache 命中率
 - **XML 结构化注入**：`<system-identity>` / `<agent-capabilities>` / `<available-skills>` / `<saved-memories>` 分区，LLM 可清晰区分各区域
 
-### 记忆系统
+### 记忆系统 & 存储后端
 
-- SQLite 持久化（`data/memories.db`）
+通过 `MemoryStoreProtocol` 支持多存储后端：
+
+| 后端 | `store_type` | 依赖 |
+|------|-------------|------|
+| **SQLite** | `sqlite`（默认） | 内置 |
+| **PostgreSQL** | `postgresql` | `psycopg2-binary` |
+| **MongoDB** | `mongodb` | `pymongo` |
+| **Neo4j** | `neo4j` | `neo4j` |
+
+```json
+// SQLite（默认）
+{"memory": {"db_path": "data/memories.db"}}
+
+// PostgreSQL
+{"memory": {"store_type": "postgresql", "connection_url": "postgresql://user:pass@host/db"}}
+
+// MongoDB
+{"memory": {"store_type": "mongodb", "connection_url": "mongodb://host:27017", "database_name": "agent_db"}}
+
+// Neo4j
+{"memory": {"store_type": "neo4j", "connection_url": "bolt://host:7687", "neo4j_auth": "neo4j:pass"}}
+```
+
+全后端统一功能：
 - 基于规则的自动提取（偏好、约束、项目上下文）
 - 来源追踪：user / agent / subagent / admin
 - 置信度过滤：低置信度推断候选默认丢弃
 - 治理接口：置顶、取消置顶、激活、停用、清空
+- 会话历史持久化（多窗口）
 
 ### 会话历史持久化
 - SQLite 存储（`data/memories.db`，与记忆系统共享同一数据库）

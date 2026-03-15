@@ -252,9 +252,13 @@ class SubAgentRuntime:
         )
         self._active[spec.spawn_id] = handle
 
-        sub_agent, sub_deps = self._factory.create_agent_and_deps(
-            spec, parent_agent
-        )
+        try:
+            sub_agent, sub_deps = self._factory.create_agent_and_deps(
+                spec, parent_agent
+            )
+        except Exception:
+            self._active.pop(spec.spawn_id, None)
+            raise
 
         if spec.context_seed is None:
             spec.context_seed = self._parent_deps.context_engineer.build_spawn_seed(
@@ -302,10 +306,16 @@ class SubAgentRuntime:
                 self._active.pop(spec.spawn_id, None)
 
         # submit() returns immediately — task runs in background
-        self._scheduler.submit(
-            handle, _run(), deadline_ms=spec.deadline_ms,
-            task_record=task_record,
-        )
+        coro = _run()
+        try:
+            self._scheduler.submit(
+                handle, coro, deadline_ms=spec.deadline_ms,
+                task_record=task_record,
+            )
+        except Exception:
+            self._active.pop(spec.spawn_id, None)
+            coro.close()
+            raise
 
         logger.info(
             "subagent.async_submitted",
@@ -330,23 +340,21 @@ class SubAgentRuntime:
 
         # Already completed and cleaned up — check scheduler results
         if handle is None:
-            if spawn_id in self._scheduler._results:
-                return self._scheduler._results.pop(spawn_id)
-            # Check if task exists but already collected
+            result = self._scheduler.get_result_if_ready(spawn_id)
+            if result is not None:
+                return result
             return SubAgentResult(
                 spawn_id=spawn_id, success=False,
                 error=f"No active sub-agent with spawn_id={spawn_id}",
             )
 
         if not wait:
-            # Non-blocking check: is it done?
-            task = self._scheduler._tasks.get(spawn_id)
-            if task is not None and not task.done():
+            if self._scheduler.is_running(spawn_id):
                 return None  # Still running
-            # Done — collect
-            if spawn_id in self._scheduler._results:
+            result = self._scheduler.get_result_if_ready(spawn_id)
+            if result is not None:
                 self._active.pop(spawn_id, None)
-                return self._scheduler._results.pop(spawn_id)
+                return result
             return None
 
         # Blocking: await the scheduler result
