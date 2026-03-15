@@ -21,8 +21,12 @@ python -m agent_framework.main --config config/openai.json
 # Run demo
 python run_demo.py
 
-# Run tests (678 passing)
+# Run tests (757 passing)
 pytest tests/
+
+# Run with Textual TUI (if installed)
+pip install textual
+python -m agent_framework.main --config config/deepseek.json
 ```
 
 ---
@@ -168,6 +172,30 @@ Implementation chain:
 - Confidence filtering: low-confidence inferred candidates discarded
 - Governance: pin, unpin, activate, deactivate, clear
 
+### Conversation History Persistence
+- SQLite-backed (`data/memories.db`, shared with memory store)
+- **Project-scoped**: uses `cwd` folder name (e.g. `my-agent`) as unique project ID
+- **Multi-session**: each `/reset` creates a new conversation window; old ones preserved
+- Auto-save on exit, auto-restore on startup (with last 3 turns summary)
+- Commands: `/sessions` (list all), `/session-switch <id>` (switch), `/reset` (new window), `/history-clear` (delete current)
+
+### Interactive Commands
+
+| Command | Description |
+|---------|-------------|
+| `/help` | Show all available commands |
+| `/reset` | Save current & open new context window |
+| `/sessions` | List all conversation sessions for this project |
+| `/session-switch <id>` | Switch to a different session (prefix match) |
+| `/history` | View conversation history |
+| `/history-clear` | Clear current session (memory + DB) |
+| `/tools` | List registered tools |
+| `/skills` | List available skills |
+| `/config` | Show current configuration |
+| `/stats` | Show context token statistics |
+| `/compact` | LLM-based history compression |
+| `/exit` | Save & exit |
+
 ### Multi-Agent Orchestration
 - **SubAgentFactory** spawns children with 3 memory scopes: `ISOLATED` / `INHERIT_READ` / `SHARED_WRITE`
 - **Scheduler/Runtime separation**: Scheduler handles quota/queuing, Runtime handles execution/lifecycle
@@ -268,7 +296,7 @@ agent_framework/
 ├── cli.py           # CLI entry point
 └── main.py          # Interactive terminal
 config/              # Model configuration files (JSON)
-tests/               # 577 tests across 10 files
+tests/               # 757 tests across 10+ files
 ```
 
 ---
@@ -350,12 +378,119 @@ class MyAdapter:
 
 Implement `MemoryStoreProtocol` and pass to `DefaultMemoryManager(store=my_store)`.
 
+### Programmatic Usage (Secondary Development)
+
+```python
+import asyncio
+from agent_framework.entry import AgentFramework
+from agent_framework.infra.config import load_config
+from agent_framework.tools.decorator import tool
+
+# 1. Define custom tools
+@tool(name="search", description="Search the knowledge base")
+def search(query: str) -> str:
+    return f"Results for: {query}"
+
+# 2. Load config & setup
+config = load_config("config/deepseek.json")
+fw = AgentFramework(config=config)
+fw.setup(auto_approve_tools=True)
+fw.register_tool(search)
+
+# 3. Single run
+async def main():
+    result = await fw.run("What is Python?")
+    print(result.final_answer)
+
+    # Multi-turn with history
+    result1 = await fw.run("Read /tmp/test.txt")
+    result2 = await fw.run(
+        "Summarize it",
+        initial_session_messages=result1.session_messages,
+    )
+    print(result2.final_answer)
+    await fw.shutdown()
+
+asyncio.run(main())
+```
+
+### Streaming Output
+
+```python
+async for event in fw.run_stream("Explain async in Python"):
+    if event.type.name == "TOKEN":
+        print(event.data["token"], end="", flush=True)
+    elif event.type.name == "DONE":
+        result = event.data["result"]
+```
+
+### Custom Skill (File-based)
+
+Create `skills/my-skill/SKILL.md`:
+
+```markdown
+---
+name: my-skill
+description: Analyzes code quality
+allowed-tools: [read_file, list_directory]
+---
+
+Analyze the code in $ARGUMENTS for quality issues.
+Focus on: naming, complexity, error handling.
+```
+
+Then: `/skill my-skill src/main.py` in the interactive terminal, or register programmatically:
+
+```python
+fw.register_skill(Skill(
+    skill_id="my-skill",
+    name="Code Quality",
+    description="Analyzes code quality",
+    system_prompt_addon="You are a code quality reviewer...",
+))
+```
+
+### Embedding in Web Applications
+
+```python
+from fastapi import FastAPI
+from agent_framework.entry import AgentFramework
+
+app = FastAPI()
+fw = AgentFramework(config=load_config("config/openai.json"))
+fw.setup(auto_approve_tools=True)
+
+@app.post("/chat")
+async def chat(message: str, session_id: str | None = None):
+    # Load prior messages from your session store
+    prior_messages = load_session(session_id) if session_id else []
+    result = await fw.run(
+        message,
+        initial_session_messages=prior_messages,
+        user_id="web-user",
+    )
+    # Save updated messages to your session store
+    save_session(session_id, result.session_messages)
+    return {"answer": result.final_answer}
+```
+
+### Key Extension Points
+
+| Extension | Protocol/Base | How to Inject |
+|-----------|---------------|---------------|
+| Agent behavior | `BaseAgent` | `fw.setup(agent=MyAgent(...))` |
+| Model provider | `ModelAdapterProtocol` | `fw._deps.model_adapter = MyAdapter()` |
+| Memory storage | `MemoryStoreProtocol` | `DefaultMemoryManager(store=...)` |
+| Tools | `@tool` decorator | `fw.register_tool(fn)` |
+| Skills | `Skill` model | `fw.register_skill(skill)` |
+| MCP servers | Config JSON | `fw.config.mcp.servers` |
+
 ---
 
 ## Testing
 
 ```bash
-# Full suite (577 tests)
+# Full suite (757 tests)
 pytest tests/
 
 # Architecture guard tests only

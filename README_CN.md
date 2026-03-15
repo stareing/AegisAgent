@@ -21,8 +21,12 @@ python -m agent_framework.main --config config/openai.json
 # 运行演示
 python run_demo.py
 
-# 运行测试（678 项全部通过）
+# 运行测试（757 项全部通过）
 pytest tests/
+
+# 使用 Textual TUI 运行（需安装）
+pip install textual
+python -m agent_framework.main --config config/deepseek.json
 ```
 
 ---
@@ -69,6 +73,30 @@ pytest tests/
 - 来源追踪：user / agent / subagent / admin
 - 置信度过滤：低置信度推断候选默认丢弃
 - 治理接口：置顶、取消置顶、激活、停用、清空
+
+### 会话历史持久化
+- SQLite 存储（`data/memories.db`，与记忆系统共享同一数据库）
+- **项目级隔离**：以运行目录名（如 `my-agent`）作为唯一 project ID
+- **多窗口会话**：每次 `/reset` 创建新会话窗口，旧窗口保留在 DB 中可随时切换
+- 退出时自动保存，启动时自动恢复（显示最近 3 轮摘要）
+- 命令：`/sessions`（列出所有）、`/session-switch <id>`（切换）、`/reset`（新窗口）、`/history-clear`（删除当前）
+
+### 交互命令
+
+| 命令 | 说明 |
+|------|------|
+| `/help` | 显示所有可用命令 |
+| `/reset` | 保存当前会话，开启新上下文窗口 |
+| `/sessions` | 列出当前项目的所有会话窗口 |
+| `/session-switch <id>` | 切换到指定会话（支持 ID 前缀匹配） |
+| `/history` | 查看对话历史 |
+| `/history-clear` | 清空当前会话（内存 + DB） |
+| `/tools` | 列出已注册工具 |
+| `/skills` | 列出可用技能 |
+| `/config` | 显示当前配置 |
+| `/stats` | 显示上下文 token 统计 |
+| `/compact` | LLM 压缩历史 |
+| `/exit` | 保存并退出 |
 
 ### 多智能体协调
 
@@ -285,7 +313,7 @@ agent_framework/
 ├── cli.py           # CLI 入口点
 └── main.py          # 交互式终端
 config/              # 模型配置文件（JSON）
-tests/               # 577 项测试
+tests/               # 757 项测试
 ```
 
 ---
@@ -367,12 +395,119 @@ class MyAdapter:
 
 实现 `MemoryStoreProtocol`，传入 `DefaultMemoryManager(store=my_store)` 即可替换底层存储。
 
+### 编程式使用（二次开发）
+
+```python
+import asyncio
+from agent_framework.entry import AgentFramework
+from agent_framework.infra.config import load_config
+from agent_framework.tools.decorator import tool
+
+# 1. 定义自定义工具
+@tool(name="search", description="搜索知识库")
+def search(query: str) -> str:
+    return f"搜索结果: {query}"
+
+# 2. 加载配置并初始化
+config = load_config("config/deepseek.json")
+fw = AgentFramework(config=config)
+fw.setup(auto_approve_tools=True)
+fw.register_tool(search)
+
+# 3. 单次运行
+async def main():
+    result = await fw.run("Python 是什么？")
+    print(result.final_answer)
+
+    # 多轮对话（传入历史消息）
+    result1 = await fw.run("读取 /tmp/test.txt")
+    result2 = await fw.run(
+        "总结一下内容",
+        initial_session_messages=result1.session_messages,
+    )
+    print(result2.final_answer)
+    await fw.shutdown()
+
+asyncio.run(main())
+```
+
+### 流式输出
+
+```python
+async for event in fw.run_stream("解释 Python 的 async"):
+    if event.type.name == "TOKEN":
+        print(event.data["token"], end="", flush=True)
+    elif event.type.name == "DONE":
+        result = event.data["result"]
+```
+
+### 自定义技能（文件方式）
+
+创建 `skills/my-skill/SKILL.md`：
+
+```markdown
+---
+name: my-skill
+description: 分析代码质量
+allowed-tools: [read_file, list_directory]
+---
+
+分析 $ARGUMENTS 中的代码质量问题。
+关注：命名规范、复杂度、错误处理。
+```
+
+交互终端中使用：`/skill my-skill src/main.py`，或编程注册：
+
+```python
+fw.register_skill(Skill(
+    skill_id="my-skill",
+    name="代码质量",
+    description="分析代码质量",
+    system_prompt_addon="你是一个代码质量审查员...",
+))
+```
+
+### 嵌入 Web 应用
+
+```python
+from fastapi import FastAPI
+from agent_framework.entry import AgentFramework
+
+app = FastAPI()
+fw = AgentFramework(config=load_config("config/openai.json"))
+fw.setup(auto_approve_tools=True)
+
+@app.post("/chat")
+async def chat(message: str, session_id: str | None = None):
+    # 从你的会话存储加载历史消息
+    prior_messages = load_session(session_id) if session_id else []
+    result = await fw.run(
+        message,
+        initial_session_messages=prior_messages,
+        user_id="web-user",
+    )
+    # 保存更新后的消息到你的会话存储
+    save_session(session_id, result.session_messages)
+    return {"answer": result.final_answer}
+```
+
+### 关键扩展点
+
+| 扩展方向 | 协议/基类 | 注入方式 |
+|----------|-----------|----------|
+| Agent 行为 | `BaseAgent` | `fw.setup(agent=MyAgent(...))` |
+| 模型提供商 | `ModelAdapterProtocol` | `fw._deps.model_adapter = MyAdapter()` |
+| 记忆存储 | `MemoryStoreProtocol` | `DefaultMemoryManager(store=...)` |
+| 工具 | `@tool` 装饰器 | `fw.register_tool(fn)` |
+| 技能 | `Skill` 模型 | `fw.register_skill(skill)` |
+| MCP 服务 | 配置 JSON | `fw.config.mcp.servers` |
+
 ---
 
 ## 测试
 
 ```bash
-# 全量测试（577 项）
+# 全量测试（757 项）
 pytest tests/
 
 # 仅运行架构守卫测试
@@ -388,10 +523,10 @@ pytest tests/test_subagent.py -v
 
 | 类别 | 说明 | 数量 |
 |------|------|------|
-| 单元测试 | Agent、工具、记忆、上下文、子 Agent 各模块 | ~250 |
+| 单元测试 | Agent、工具、记忆、上下文、子 Agent 各模块 | ~300 |
 | 红线测试 | v2.5.2 – v2.6.5 架构边界断言 | 106 |
 | 架构守卫 | 反旁路扫描 + 故障注入 + 数据流不变量 | 43 |
-| 集成测试 | 完整 run 生命周期、模型适配器冒烟测试 | ~180 |
+| 集成测试 | 完整 run 生命周期、模型适配器冒烟测试 | ~300 |
 
 ### 架构守卫覆盖（test_architecture_guard.py）
 

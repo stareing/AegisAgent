@@ -374,11 +374,24 @@ class AegisAgentApp(App[None]):
     # ── Mount ──────────────────────────────────────────
 
     def on_mount(self) -> None:
+        import uuid
+        from pathlib import Path
+        self._project_id = Path.cwd().name
         self._header = self.query_one("#hdr", AegisHeader)
         self._chat = self.query_one("#chat", TextArea)
         self._prompt = self.query_one("#prompt", Input)
         self._busy_line = self.query_one("#busy-line", Static)
         self._prompt.focus()
+        # 从 DB 恢复最近一次会话历史
+        if self._fw._memory_store:
+            loaded = self._state.load_from_db(self._fw._memory_store, self._project_id)
+            if loaded:
+                self._append_chat(f"[已恢复 {loaded} 条历史消息 (conv: {self._state.conversation_id[:8]}...)]")
+                summary = self._state.render_history_summary()
+                if summary:
+                    self._append_chat(summary)
+        else:
+            self._state.conversation_id = str(uuid.uuid4())
 
         hdr = self._header
         hdr.model_name = "Mock" if self._mock else self._fw.config.model.default_model_name
@@ -598,6 +611,8 @@ class AegisAgentApp(App[None]):
             self._header.focus_mode = "input"
 
     async def on_unmount(self) -> None:
+        if self._fw._memory_store:
+            self._state.save_to_db(self._fw._memory_store, self._project_id)
         await self._fw.shutdown()
 
     def _append_chat(self, text: str) -> None:

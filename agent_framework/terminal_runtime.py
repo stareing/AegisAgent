@@ -263,6 +263,7 @@ class ReplState:
         self.user_id: str | None = None
         self.recent_commands: list[str] = []
         self.total_tokens_estimate = 0
+        self.conversation_id: str | None = None
 
     def append_turn(self, user_input: str, result: Any) -> None:
         from agent_framework.agent.message_projector import MessageProjector
@@ -400,6 +401,72 @@ class ReplState:
             total += self._estimate_message_tokens(message)
         return max(total, 1)
 
+    def save_to_db(self, store: Any, project_id: str) -> None:
+        """持久化当前会话到 SQLiteMemoryStore。"""
+        if not self.history or not self.conversation_id:
+            return
+        store.save_conversation(project_id, self.conversation_id, self.history)
+
+    def load_from_db(self, store: Any, project_id: str) -> int:
+        """从 SQLiteMemoryStore 恢复最近一次会话，返回加载的消息数。"""
+        conv_id = store.get_latest_conversation_id(project_id)
+        if not conv_id:
+            self.conversation_id = store.new_conversation_id()
+            return 0
+        messages = store.load_conversation(conv_id)
+        if not messages:
+            self.conversation_id = store.new_conversation_id()
+            return 0
+        self.conversation_id = conv_id
+        self.history = messages
+        self.total_tokens_estimate = sum(
+            self._estimate_message_tokens(m) for m in messages
+        )
+        self.turn_count = sum(1 for m in messages if m.role == "user")
+        return len(messages)
+
+    def new_context(self, store: Any, project_id: str) -> None:
+        """保存当前会话后开启新上下文窗口。旧会话保留在 DB。"""
+        self.save_to_db(store, project_id)
+        self.clear()
+        self.conversation_id = store.new_conversation_id()
+
+    def switch_conversation(self, store: Any, project_id: str, target_conv_id: str) -> int:
+        """保存当前会话，切换到指定 conversation_id，返回加载的消息数。"""
+        self.save_to_db(store, project_id)
+        messages = store.load_conversation(target_conv_id)
+        self.clear()
+        self.conversation_id = target_conv_id
+        if not messages:
+            return 0
+        self.history = messages
+        self.total_tokens_estimate = sum(
+            self._estimate_message_tokens(m) for m in messages
+        )
+        self.turn_count = sum(1 for m in messages if m.role == "user")
+        return len(messages)
+
+    def render_history_summary(self, max_turns: int = 3) -> str:
+        """渲染最近几轮 user/assistant 摘要，用于恢复后显示。"""
+        pairs: list[tuple[str, str]] = []
+        current_user = ""
+        for msg in self.history:
+            if msg.role == "user":
+                current_user = (msg.content or "")[:80]
+            elif msg.role == "assistant" and current_user:
+                pairs.append((current_user, (msg.content or "")[:80]))
+                current_user = ""
+        if not pairs:
+            return ""
+        recent = pairs[-max_turns:]
+        lines = []
+        for user_text, agent_text in recent:
+            lines.append(f"    {_dim('User:')} {_dim(user_text)}")
+            lines.append(f"    {_dim('Agent:')} {_dim(agent_text)}")
+        if len(pairs) > max_turns:
+            lines.insert(0, f"    {_dim(f'... 省略 {len(pairs) - max_turns} 轮 ...')}")
+        return "\n".join(lines)
+
     @staticmethod
     def _estimate_message_tokens(message: Message) -> int:
         text = message.content or ""
@@ -439,13 +506,16 @@ async def _cmd_exit(fw: AgentFramework, mock: InteractiveMockModel | None, state
     return
 
 
-@_register_cmd("reset", "重置对话状态（清空历史 + Mock 状态）", category="通用")
+@_register_cmd("reset", "新建上下文窗口（当前会话保存到 DB，开启全新对话）", category="通用")
 async def _cmd_reset(fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str) -> None:
-    state.clear()
+    from pathlib import Path
+    if fw._memory_store:
+        state.new_context(fw._memory_store, Path.cwd().name)
+    else:
+        state.clear()
     if mock:
         mock._reset_turn()
-    mode_text = "Mock 状态也已重置" if mock else "在线模式"
-    print(f"  {_green('对话历史已清空')} ({_dim(mode_text)})")
+    print(f"  {_green('已开启新上下文窗口')} ({_dim(f'conversation: {state.conversation_id[:8]}...')})")
 
 
 @_register_cmd("tools", "列出所有已注册工具", category="查看")
@@ -562,10 +632,66 @@ async def _cmd_history(fw: AgentFramework, mock: InteractiveMockModel | None, st
     print(f"\n  {_dim(f'消息数: {state.message_count()}  |  ~{estimate} tokens')}")
 
 
-@_register_cmd("history-clear", "清空对话历史", category="会话")
+@_register_cmd("history-clear", "清空当前上下文的对话历史（含 DB）", category="会话")
 async def _cmd_history_clear(fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str) -> None:
+    if fw._memory_store and state.conversation_id:
+        fw._memory_store.clear_conversation(state.conversation_id)
     state.clear()
-    print(f"  {_green('对话历史已清空')}")
+    print(f"  {_green('当前上下文历史已清空')}")
+
+
+@_register_cmd("sessions", "列出当前项目的所有会话窗口", category="会话")
+async def _cmd_sessions(fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str) -> None:
+    from pathlib import Path
+    if not fw._memory_store:
+        print(f"  {_dim('(记忆存储未启用)')}")
+        return
+    # 先保存当前会话再列出
+    state.save_to_db(fw._memory_store, Path.cwd().name)
+    convs = fw._memory_store.list_conversations(Path.cwd().name)
+    if not convs:
+        print(f"  {_dim('(无历史会话)')}")
+        return
+    print(f"\n  {_bold('会话列表')} ({len(convs)} 个):\n")
+    for conv in convs:
+        cid = conv["conversation_id"]
+        short_id = cid[:8]
+        is_current = cid == state.conversation_id
+        marker = _green(" ◀ 当前") if is_current else ""
+        print(f"    {_cyan(short_id)}  {conv['message_count']:3d} 条  {_dim(conv['created_at'][:19])}  {conv['preview'][:40]}{marker}")
+    print(f"\n  {_dim('使用 /session-switch <id前缀> 切换会话')}")
+
+
+@_register_cmd("session-switch", "切换到指定会话窗口", usage="/session-switch <id前缀>", category="会话")
+async def _cmd_session_switch(fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str) -> None:
+    from pathlib import Path
+    prefix = args.strip()
+    if not prefix:
+        print(f"  {_red('请提供会话 ID 前缀')}，使用 /sessions 查看列表")
+        return
+    if not fw._memory_store:
+        print(f"  {_dim('(记忆存储未启用)')}")
+        return
+    project_id = Path.cwd().name
+    convs = fw._memory_store.list_conversations(project_id)
+    matches = [c for c in convs if c["conversation_id"].startswith(prefix)]
+    if not matches:
+        print(f"  {_red('未找到匹配的会话:')} {prefix}")
+        return
+    if len(matches) > 1:
+        print(f"  {_red('前缀不唯一，匹配到 ' + str(len(matches)) + ' 个会话:')}")
+        for c in matches:
+            print(f"    {_cyan(c['conversation_id'][:8])}  {c['preview'][:40]}")
+        return
+    target_id = matches[0]["conversation_id"]
+    if target_id == state.conversation_id:
+        print(f"  {_dim('已在当前会话中')}")
+        return
+    loaded = state.switch_conversation(fw._memory_store, project_id, target_id)
+    print(f"  {_green(f'已切换到会话 {target_id[:8]}...')} ({loaded} 条消息)")
+    summary = state.render_history_summary()
+    if summary:
+        print(summary)
 
 
 @_register_cmd("user", "设置当前 user_id（记忆隔离）", usage="/user <id>|off", category="会话")
@@ -1138,7 +1264,20 @@ async def execute_user_input_stream(
 
 
 async def run_classic_repl(fw: AgentFramework, mock_model: InteractiveMockModel | None) -> None:
+    import uuid
+    from pathlib import Path
+    project_id = Path.cwd().name
     state = ReplState()
+    # 从 DB 恢复最近一次会话历史，或新建 conversation_id
+    if fw._memory_store:
+        loaded = state.load_from_db(fw._memory_store, project_id)
+        if loaded:
+            print(f"  {_dim(f'已恢复 {loaded} 条历史消息 (project: {project_id}, conv: {state.conversation_id[:8]}...)')}")
+            summary = state.render_history_summary()
+            if summary:
+                print(summary)
+    else:
+        state.conversation_id = str(uuid.uuid4())
     print(render_banner(mock_model is not None, None, fw))
     while True:
         try:
@@ -1163,6 +1302,9 @@ async def run_classic_repl(fw: AgentFramework, mock_model: InteractiveMockModel 
             print(f"  {exc}")
             if os.environ.get("DEBUG"):
                 traceback.print_exc()
+    # 退出时持久化会话历史
+    if fw._memory_store:
+        state.save_to_db(fw._memory_store, project_id)
     await fw.shutdown()
 
 

@@ -83,6 +83,7 @@ class AgentFramework:
         self._mcp_manager: Any = None
         self._a2a_adapter: Any = None
         self._setup_done = False
+        self._memory_store: SQLiteMemoryStore | None = None
         # Integration-layer active skill tracking for interactive UIs.
         # This is NOT the run-scoped active skill — it's a UI convenience
         # that the interactive terminal uses between runs.
@@ -98,6 +99,7 @@ class AgentFramework:
 
         # Memory
         memory_store = SQLiteMemoryStore(db_path=self.config.memory.db_path)
+        self._memory_store = memory_store
         memory_manager = DefaultMemoryManager(
             store=memory_store,
             max_memories_in_context=self.config.memory.max_memories_in_context,

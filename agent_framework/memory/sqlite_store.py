@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from agent_framework.models.memory import MemoryKind, MemoryRecord
+from agent_framework.models.message import Message
 
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS saved_memories (
@@ -28,10 +29,22 @@ CREATE TABLE IF NOT EXISTS saved_memories (
 );
 """
 
+_CREATE_CONVERSATION_HISTORY = """
+CREATE TABLE IF NOT EXISTS conversation_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    message_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+"""
+
 _CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_mem_user ON saved_memories (agent_id, user_id, is_active);",
     "CREATE INDEX IF NOT EXISTS idx_mem_kind ON saved_memories (agent_id, user_id, kind);",
     "CREATE INDEX IF NOT EXISTS idx_mem_updated ON saved_memories (agent_id, user_id, updated_at DESC);",
+    "CREATE INDEX IF NOT EXISTS idx_conv_proj_id ON conversation_history (project_id, conversation_id);",
 ]
 
 
@@ -47,9 +60,25 @@ class SQLiteMemoryStore:
     def _init_db(self) -> None:
         cur = self._conn.cursor()
         cur.execute(_CREATE_TABLE)
+        # 迁移：如果旧表缺少 conversation_id 列则重建
+        self._migrate_conversation_table(cur)
+        cur.execute(_CREATE_CONVERSATION_HISTORY)
         for idx_sql in _CREATE_INDEXES:
             cur.execute(idx_sql)
         self._conn.commit()
+
+    def _migrate_conversation_table(self, cur: sqlite3.Cursor) -> None:
+        """旧表没有 conversation_id 列时，删除旧表让 CREATE IF NOT EXISTS 重建。"""
+        cur.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='conversation_history'"
+        )
+        if not cur.fetchone():
+            return
+        cur.execute("PRAGMA table_info(conversation_history)")
+        columns = {row[1] for row in cur.fetchall()}
+        if "conversation_id" not in columns:
+            cur.execute("DROP TABLE conversation_history")
+            cur.execute("DROP INDEX IF EXISTS idx_conv_project")
 
     def _row_to_record(self, row: sqlite3.Row) -> MemoryRecord:
         return MemoryRecord(
@@ -185,6 +214,96 @@ class SQLiteMemoryStore:
             (agent_id, user_id),
         )
         return cur.fetchone()[0]
+
+    # ── conversation history ──────────────────────────────────────
+
+    def new_conversation_id(self) -> str:
+        import uuid
+        return str(uuid.uuid4())
+
+    def save_conversation(
+        self, project_id: str, conversation_id: str, messages: list[Message],
+    ) -> None:
+        """全量覆写指定 conversation_id 的会话消息。"""
+        now = datetime.now(timezone.utc).isoformat()
+        cur = self._conn.cursor()
+        cur.execute(
+            "DELETE FROM conversation_history WHERE conversation_id=?",
+            (conversation_id,),
+        )
+        for seq, msg in enumerate(messages):
+            cur.execute(
+                "INSERT INTO conversation_history "
+                "(conversation_id, project_id, seq, message_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (conversation_id, project_id, seq, msg.model_dump_json(), now),
+            )
+        self._conn.commit()
+
+    def load_conversation(self, conversation_id: str) -> list[Message]:
+        """按序加载指定 conversation_id 的会话消息。"""
+        cur = self._conn.execute(
+            "SELECT message_json FROM conversation_history "
+            "WHERE conversation_id=? ORDER BY seq",
+            (conversation_id,),
+        )
+        messages: list[Message] = []
+        for row in cur.fetchall():
+            try:
+                messages.append(Message.model_validate_json(row["message_json"]))
+            except Exception:
+                continue
+        return messages
+
+    def get_latest_conversation_id(self, project_id: str) -> str | None:
+        """获取某 project 最近一次会话的 conversation_id。"""
+        cur = self._conn.execute(
+            "SELECT conversation_id FROM conversation_history "
+            "WHERE project_id=? ORDER BY id DESC LIMIT 1",
+            (project_id,),
+        )
+        row = cur.fetchone()
+        return row["conversation_id"] if row else None
+
+    def list_conversations(self, project_id: str) -> list[dict]:
+        """列出某 project 下所有会话，返回 [{conversation_id, message_count, first_user_msg, created_at}]。"""
+        cur = self._conn.execute(
+            "SELECT conversation_id, MIN(created_at) as created_at, COUNT(*) as msg_count "
+            "FROM conversation_history WHERE project_id=? "
+            "GROUP BY conversation_id ORDER BY created_at DESC",
+            (project_id,),
+        )
+        results = []
+        for row in cur.fetchall():
+            conv_id = row["conversation_id"]
+            # 取第一条 user 消息作为摘要
+            first = self._conn.execute(
+                "SELECT message_json FROM conversation_history "
+                "WHERE conversation_id=? ORDER BY seq LIMIT 1",
+                (conv_id,),
+            ).fetchone()
+            preview = ""
+            if first:
+                try:
+                    msg = Message.model_validate_json(first["message_json"])
+                    preview = (msg.content or "")[:60]
+                except Exception:
+                    pass
+            results.append({
+                "conversation_id": conv_id,
+                "message_count": row["msg_count"],
+                "created_at": row["created_at"],
+                "preview": preview,
+            })
+        return results
+
+    def clear_conversation(self, conversation_id: str) -> None:
+        """清空指定 conversation_id 的会话历史。"""
+        self._conn.execute(
+            "DELETE FROM conversation_history WHERE conversation_id=?",
+            (conversation_id,),
+        )
+        self._conn.commit()
 
     def close(self) -> None:
         self._conn.close()
