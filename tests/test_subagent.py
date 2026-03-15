@@ -541,3 +541,104 @@ class TestAsyncSpawn:
         summary = DelegationExecutor.summarize_result(result)
         assert "COMPLETED" in summary.status
         assert "delegated result" in summary.summary
+
+
+# ── Async lifecycle regression tests ─────────────────────────────
+
+
+class TestAsyncLifecycleRegression:
+    """Tests for exception cleanup, status convergence in async paths."""
+
+    @pytest.mark.asyncio
+    async def test_factory_error_cleans_active(self):
+        """When create_agent_and_deps raises, _active must not leak."""
+        from agent_framework.subagent.runtime import SubAgentRuntime
+
+        mock_deps = MagicMock()
+        mock_deps.context_engineer.build_spawn_seed.return_value = []
+        mock_deps.tool_registry.list_tools.return_value = []
+
+        runtime = SubAgentRuntime(parent_deps=mock_deps, max_concurrent=3, max_per_run=5)
+        runtime._factory.create_agent_and_deps = MagicMock(
+            side_effect=RuntimeError("factory boom")
+        )
+
+        spec = SubAgentSpec(parent_run_id="r1", task_input="test", deadline_ms=5000)
+
+        with pytest.raises(RuntimeError, match="factory boom"):
+            await runtime.spawn_async(spec, parent_agent=None)
+
+        assert len(runtime._active) == 0, "_active leaked after factory error"
+
+    @pytest.mark.asyncio
+    async def test_quota_exceeded_cleans_active(self):
+        """When quota is exceeded on submit, _active must not leak."""
+        from agent_framework.subagent.runtime import SubAgentRuntime
+
+        mock_deps = MagicMock()
+        mock_deps.context_engineer.build_spawn_seed.return_value = []
+        mock_deps.tool_registry.list_tools.return_value = []
+
+        runtime = SubAgentRuntime(parent_deps=mock_deps, max_concurrent=1, max_per_run=0)
+
+        mock_agent = MagicMock()
+        mock_agent.agent_id = "sub"
+        mock_sub_deps = MagicMock()
+        runtime._factory.create_agent_and_deps = MagicMock(
+            return_value=(mock_agent, mock_sub_deps)
+        )
+        runtime._coordinator = AsyncMock()
+
+        spec = SubAgentSpec(parent_run_id="r1", task_input="over quota", deadline_ms=5000)
+
+        with pytest.raises(RuntimeError, match="quota"):
+            await runtime.spawn_async(spec, parent_agent=None)
+
+        assert len(runtime._active) == 0, "_active leaked after quota error"
+
+    @pytest.mark.asyncio
+    async def test_timeout_sets_task_record_status(self):
+        """task_record.status must be TIMEOUT after deadline exceeded."""
+        from agent_framework.subagent.scheduler import SubAgentScheduler
+        from agent_framework.models.subagent import SubAgentTaskStatus
+
+        sched = SubAgentScheduler(max_concurrent=3, max_per_run=5)
+        task_record = sched.allocate_task_id("r1", "sp_timeout")
+
+        handle = SubAgentHandle(spawn_id="sp_timeout", parent_run_id="r1", status="PENDING")
+
+        async def _slow():
+            await asyncio.sleep(10)
+            return SubAgentResult(spawn_id="sp_timeout", success=True)
+
+        sched.submit(handle, _slow(), deadline_ms=100, task_record=task_record)
+        result = await sched.await_result(handle)
+
+        assert result.success is False
+        assert "timed out" in result.error
+        assert handle.status == "TIMEOUT"
+        assert task_record.status == SubAgentTaskStatus.TIMEOUT
+
+    @pytest.mark.asyncio
+    async def test_cancel_sets_task_record_status(self):
+        """task_record.status must be CANCELLED after cancel."""
+        from agent_framework.subagent.scheduler import SubAgentScheduler
+        from agent_framework.models.subagent import SubAgentTaskStatus
+
+        sched = SubAgentScheduler(max_concurrent=3, max_per_run=5)
+        task_record = sched.allocate_task_id("r1", "sp_cancel")
+
+        handle = SubAgentHandle(spawn_id="sp_cancel", parent_run_id="r1", status="PENDING")
+
+        async def _long():
+            await asyncio.sleep(30)
+            return SubAgentResult(spawn_id="sp_cancel", success=True)
+
+        sched.submit(handle, _long(), deadline_ms=30000, task_record=task_record)
+        await asyncio.sleep(0.05)
+        await sched.cancel("sp_cancel")
+        result = await sched.await_result(handle)
+
+        assert result.success is False
+        assert handle.status == "CANCELLED"
+        assert task_record.status == SubAgentTaskStatus.CANCELLED
