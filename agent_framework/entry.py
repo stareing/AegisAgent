@@ -227,6 +227,7 @@ class AgentFramework:
             self._agent = OrchestratorAgent(
                 model_name=self.config.model.default_model_name,
                 temperature=self.config.model.temperature,
+                max_output_tokens=self.config.model.max_output_tokens,
                 allow_spawn_children=True,
                 max_concurrent_tool_calls=self.config.tools.max_concurrent_tool_calls,
                 allow_parallel_tool_calls=self.config.tools.allow_parallel_tool_calls,

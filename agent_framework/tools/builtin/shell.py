@@ -19,6 +19,20 @@ _SENTINEL = "__AEGIS_CMD_DONE__"
 _DEFAULT_TIMEOUT = 120  # seconds
 _MAX_OUTPUT_CHARS = 100_000
 
+# Commands banned for security — network access, browsers, etc.
+_BANNED_COMMANDS = frozenset({
+    "curl", "wget", "nc", "telnet", "lynx", "w3m", "links",
+    "chrome", "firefox", "safari", "aria2c", "axel",
+})
+
+
+def _check_banned(command: str) -> str | None:
+    """Return error message if command starts with a banned prefix."""
+    first_token = command.strip().split()[0] if command.strip() else ""
+    if first_token in _BANNED_COMMANDS:
+        return f"Command '{first_token}' is blocked for security. Use web_fetch for HTTP requests."
+    return None
+
 
 class _BashSession:
     """Manages a persistent bash subprocess.
@@ -201,6 +215,12 @@ async def bash_exec(
         Dict with 'output' and 'exit_code', or 'task_id' for background.
     """
     timeout_seconds = min(timeout_seconds, 600)
+
+    # Security: check banned commands
+    banned_msg = _check_banned(command)
+    if banned_msg:
+        return {"output": banned_msg, "exit_code": -2, "timed_out": False}
+
     session = _BashSession.get()
 
     if run_in_background:

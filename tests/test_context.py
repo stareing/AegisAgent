@@ -74,6 +74,18 @@ class TestContextSourceProvider:
         assert "gpt-4" in result
         assert "runtime-environment" in result
 
+    def test_collect_system_core_with_investigation_protocol(self):
+        config = AgentConfig(system_prompt="base")
+        result = self.provider.collect_system_core(
+            config,
+            {
+                "investigation_mode": "codebase_analysis",
+                "investigation_expectation": "Use glob_files/grep_search before summarizing.",
+            },
+        )
+        assert "investigation-protocol" in result
+        assert "glob_files/grep_search" in result
+
     def test_collect_skill_addon_with_skill(self):
         skill = Skill(skill_id="s1", system_prompt_addon="Use math tools")
         result = self.provider.collect_skill_addon(skill)

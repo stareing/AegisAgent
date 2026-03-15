@@ -38,6 +38,23 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+_CODE_INVESTIGATION_KEYWORDS = (
+    "架构",
+    "代码架构",
+    "审查",
+    "review",
+    "code review",
+    "实现",
+    "源码",
+    "真实代码",
+    "read the real code",
+    "不要看md",
+    "不要偷懒",
+    "根因",
+    "root cause",
+    "分析代码",
+)
+
 
 class RunCoordinator:
     """Manages the full lifecycle of an agent run.
@@ -401,6 +418,7 @@ class RunCoordinator:
         deps: AgentRuntimeDeps | None = None,
         effective_config: EffectiveRunConfig | None = None,
         agent_state: AgentState | None = None,
+        task: str | None = None,
     ) -> dict[str, str]:
         """Collect runtime environment and agent capabilities for context injection.
 
@@ -467,7 +485,19 @@ class RunCoordinator:
             info["current_iteration"] = str(agent_state.iteration_count)
             info["spawned_subagents"] = str(agent_state.spawn_count)
 
+        if task and RunCoordinator._requires_code_investigation(task):
+            info["investigation_mode"] = "codebase_analysis"
+            info["investigation_expectation"] = (
+                "Use glob_files/grep_search before summarizing; read multiple "
+                "implementation files and distinguish verified facts from inference."
+            )
+
         return info
+
+    @staticmethod
+    def _requires_code_investigation(task: str) -> bool:
+        task_lower = task.lower()
+        return any(keyword in task_lower for keyword in _CODE_INVESTIGATION_KEYWORDS)
 
     async def _prepare_llm_request(
         self,
@@ -496,7 +526,7 @@ class RunCoordinator:
             skill_descriptions = []
 
         runtime_info = self._collect_runtime_info(
-            agent, deps, effective_config, agent_state
+            agent, deps, effective_config, agent_state, task
         )
         if inspect.isawaitable(runtime_info):
             runtime_info = await runtime_info

@@ -58,6 +58,7 @@ _BG_INPUT = "#0e1820"
 _BORDER = "#2e4455"
 _DIM = "#6a7a8a"
 _FG = "#ddd8d0"
+_MAX_CHAT_LINES = 1200
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -169,6 +170,9 @@ class CommandPaletteScreen(ModalScreen[str | None]):
         super().__init__()
         self._entries = entries
         self._recent = recent
+        self._list_view: ListView | None = None
+        self._search_input: Input | None = None
+        self._last_commands: tuple[str, ...] = ()
 
     def compose(self) -> ComposeResult:
         with Container(id="pal-box"):
@@ -178,7 +182,9 @@ class CommandPaletteScreen(ModalScreen[str | None]):
             yield Static("Enter=run | Esc=close | Up/Down=navigate", id="pal-hint")
 
     def on_mount(self) -> None:
-        self.query_one("#pal-search", Input).focus()
+        self._search_input = self.query_one("#pal-search", Input)
+        self._list_view = self.query_one("#pal-list", ListView)
+        self._search_input.focus()
         self._refresh("")
 
     def on_input_changed(self, event: Input.Changed) -> None:
@@ -198,21 +204,29 @@ class CommandPaletteScreen(ModalScreen[str | None]):
         self.dismiss(None)
 
     def action_cursor_down(self) -> None:
-        self.query_one("#pal-list", ListView).action_cursor_down()
+        assert self._list_view is not None
+        self._list_view.action_cursor_down()
 
     def action_cursor_up(self) -> None:
-        self.query_one("#pal-list", ListView).action_cursor_up()
+        assert self._list_view is not None
+        self._list_view.action_cursor_up()
 
     def _select_highlighted(self) -> None:
         """Dismiss with the currently highlighted command."""
-        lv = self.query_one("#pal-list", ListView)
+        assert self._list_view is not None
+        lv = self._list_view
         h = lv.highlighted_child
         if isinstance(h, _CmdItem):
             self.dismiss(h.command)
 
     def _refresh(self, query: str) -> None:
-        lv = self.query_one("#pal-list", ListView)
+        assert self._list_view is not None
+        lv = self._list_view
         filtered = _filter_entries(self._entries, query, self._recent)
+        command_keys = tuple(entry.command for entry in filtered)
+        if command_keys == self._last_commands:
+            return
+        self._last_commands = command_keys
         lv.clear()
         for e in filtered:
             lv.append(_CmdItem(e))
@@ -311,7 +325,13 @@ class AegisAgentApp(App[None]):
         self._busy = False
         self._suppress_slash = False
         self._cancel_event: asyncio.Event | None = None
-        self._chat_buffer = ""
+        self._header: AegisHeader | None = None
+        self._chat: TextArea | None = None
+        self._prompt: Input | None = None
+        self._busy_line: Static | None = None
+        self._chat_end_location: tuple[int, int] = (0, 0)
+        self._chat_has_content = False
+        self._chat_line_count = 0
 
     def compose(self) -> ComposeResult:
         yield AegisHeader(id="hdr")
@@ -323,6 +343,8 @@ class AegisAgentApp(App[None]):
             show_cursor=False,
             soft_wrap=True,
             compact=True,
+            highlight_cursor_line=False,
+            max_checkpoints=0,
         )
         yield Static("", id="busy-line")
         with Horizontal(id="input-bar"):
@@ -332,19 +354,26 @@ class AegisAgentApp(App[None]):
     # ── Mount ──────────────────────────────────────────
 
     def on_mount(self) -> None:
-        self.query_one("#prompt", Input).focus()
+        self._header = self.query_one("#hdr", AegisHeader)
+        self._chat = self.query_one("#chat", TextArea)
+        self._prompt = self.query_one("#prompt", Input)
+        self._busy_line = self.query_one("#busy-line", Static)
+        self._prompt.focus()
 
-        hdr = self.query_one("#hdr", AegisHeader)
+        hdr = self._header
         hdr.model_name = "Mock" if self._mock else self._fw.config.model.default_model_name
         hdr.tool_count = len(self._fw._registry.list_tools()) if self._fw._registry else 0
         hdr.skill_count = len(self._fw.list_skills())
         hdr.config_path = self._config_path or "-"
         hdr.focus_mode = "input"
 
-        for line in AEGIS_LOGO_LINES:
-            self._append_chat(line)
-        self._append_chat("Welcome! Type a question or /help for commands.")
-        self._append_chat("")
+        self._append_chat_block(
+            [
+                *AEGIS_LOGO_LINES,
+                "Welcome! Type a question or /help for commands.",
+                "",
+            ]
+        )
 
     # ── Input ──────────────────────────────────────────
 
@@ -367,13 +396,13 @@ class AegisAgentApp(App[None]):
             await self._submit_input()
 
     async def _submit_input(self) -> None:
-        prompt = self.query_one("#prompt", Input)
+        prompt = self._prompt
+        assert prompt is not None
         text = prompt.value.strip()
         prompt.value = ""
         if not text or self._busy:
             return
-        self._append_chat("")
-        self._append_chat(f"You > {text}")
+        self._append_chat_block(["", f"You > {text}"])
         self._set_busy(True)
         self.run_worker(self._dispatch(text), exclusive=True, group="agent")
 
@@ -397,14 +426,16 @@ class AegisAgentApp(App[None]):
             output = await execute_user_input(
                 self._fw, self._mock, self._state, text,
                 cancel_event=cancel_event,
+                include_trace=False,
             )
             elapsed = time.monotonic() - t0
             self._append_chat(_strip_ansi(output))
             self._append_chat(f"({elapsed:.1f}s)")
 
-            hdr = self.query_one("#hdr", AegisHeader)
+            hdr = self._header
+            assert hdr is not None
             hdr.turn_count = self._state.turn_count
-            hdr.total_tokens += sum(len(m.content or "") // 4 for m in self._state.history)
+            hdr.total_tokens = sum(len(m.content or "") // 4 for m in self._state.history)
         except Exception as exc:
             self._append_chat(f"Error: {exc}")
         finally:
@@ -413,10 +444,12 @@ class AegisAgentApp(App[None]):
 
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
-        self.query_one("#busy-line", Static).update(
+        assert self._busy_line is not None
+        self._busy_line.update(
             "[bold yellow]  Working...[/]" if busy else ""
         )
-        self.query_one("#hdr", AegisHeader).is_busy = busy
+        assert self._header is not None
+        self._header.is_busy = busy
 
     # ── Actions ────────────────────────────────────────
 
@@ -430,13 +463,13 @@ class AegisAgentApp(App[None]):
         )
 
     def _palette_closed(self, command: str | None) -> None:
-        prompt = self.query_one("#prompt", Input)
+        prompt = self._prompt
+        assert prompt is not None
         if command:
             self._suppress_slash = True
             prompt.value = ""
             prompt.focus()
-            self._append_chat("")
-            self._append_chat(f"> {command}")
+            self._append_chat_block(["", f"> {command}"])
             self._set_busy(True)
             self.run_worker(self._dispatch(command), exclusive=True, group="agent")
         else:
@@ -449,31 +482,38 @@ class AegisAgentApp(App[None]):
     def action_new_session(self) -> None:
         self._state = ReplState()
         self._clear_chat_view()
-        hdr = self.query_one("#hdr", AegisHeader)
+        hdr = self._header
+        assert hdr is not None
         hdr.turn_count = 0
         hdr.total_tokens = 0
         # Reset conversation session so next run sends full context
         self._fw.end_conversation()
         self._fw.begin_conversation()
         self.notify("New session started", timeout=2)
-        self.query_one("#prompt", Input).focus()
+        assert self._prompt is not None
+        self._prompt.focus()
 
     def action_focus_chat(self) -> None:
-        self.query_one("#chat", TextArea).focus()
-        self.query_one("#hdr", AegisHeader).focus_mode = "chat"
+        assert self._chat is not None and self._header is not None
+        self._chat.focus()
+        self._header.focus_mode = "chat"
         self.notify("Chat focused: select/copy with Ctrl+C, scroll with mouse or PageUp/PageDown", timeout=2)
 
     def action_scroll_chat_up_page(self) -> None:
-        self.query_one("#chat", TextArea).scroll_page_up(animate=False)
+        assert self._chat is not None
+        self._chat.scroll_page_up(animate=False)
 
     def action_scroll_chat_down_page(self) -> None:
-        self.query_one("#chat", TextArea).scroll_page_down(animate=False)
+        assert self._chat is not None
+        self._chat.scroll_page_down(animate=False)
 
     def action_scroll_chat_up(self) -> None:
-        self.query_one("#chat", TextArea).scroll_up(animate=False)
+        assert self._chat is not None
+        self._chat.scroll_up(animate=False)
 
     def action_scroll_chat_down(self) -> None:
-        self.query_one("#chat", TextArea).scroll_down(animate=False)
+        assert self._chat is not None
+        self._chat.scroll_down(animate=False)
 
     def action_focus_prompt(self) -> None:
         if self._busy and self._cancel_event:
@@ -481,30 +521,72 @@ class AegisAgentApp(App[None]):
             self.workers.cancel_group(self, "agent")
             self._append_chat("[Cancelled by user]")
             self._set_busy(False)
-        self.query_one("#prompt", Input).focus()
-        self.query_one("#hdr", AegisHeader).focus_mode = "input"
+        assert self._prompt is not None and self._header is not None
+        self._prompt.focus()
+        self._header.focus_mode = "input"
 
     async def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         if event.worker.group != "agent":
             return
         if event.state in (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED):
             self._set_busy(False)
-            self.query_one("#prompt", Input).focus()
-            self.query_one("#hdr", AegisHeader).focus_mode = "input"
+            assert self._prompt is not None and self._header is not None
+            self._prompt.focus()
+            self._header.focus_mode = "input"
 
     async def on_unmount(self) -> None:
         await self._fw.shutdown()
 
     def _append_chat(self, text: str) -> None:
-        chat = self.query_one("#chat", TextArea)
+        assert self._chat is not None
         normalized = text.replace("\r\n", "\n").replace("\r", "\n")
-        self._chat_buffer = f"{self._chat_buffer}\n{normalized}" if self._chat_buffer else normalized
-        chat.load_text(self._chat_buffer)
-        chat.scroll_end(animate=False)
+        had_content = self._chat_has_content
+        insertion = normalized if not had_content else f"\n{normalized}"
+        self._chat.insert(
+            insertion,
+            location=self._chat_end_location,
+            maintain_selection_offset=False,
+        )
+        self._chat_end_location = self._advance_location(self._chat_end_location, insertion)
+        self._chat_has_content = True
+        added_lines = max(1, len(normalized.splitlines())) if normalized else 1
+        self._chat_line_count = added_lines if not had_content else self._chat_line_count + added_lines
+        self._trim_chat_if_needed()
+        self._chat.scroll_end(animate=False)
+
+    def _append_chat_block(self, lines: list[str]) -> None:
+        normalized_lines = [line.replace("\r\n", "\n").replace("\r", "\n") for line in lines]
+        self._append_chat("\n".join(normalized_lines))
 
     def _clear_chat_view(self) -> None:
-        self._chat_buffer = ""
-        self.query_one("#chat", TextArea).load_text("")
+        assert self._chat is not None
+        self._chat.load_text("")
+        self._chat_end_location = (0, 0)
+        self._chat_has_content = False
+        self._chat_line_count = 0
+
+    def _trim_chat_if_needed(self) -> None:
+        if self._chat_line_count <= _MAX_CHAT_LINES:
+            return
+        assert self._chat is not None
+        lines = self._chat.text.splitlines()
+        trimmed_lines = lines[-_MAX_CHAT_LINES:]
+        trimmed_text = "\n".join(trimmed_lines)
+        self._chat.load_text(trimmed_text)
+        self._chat_line_count = len(trimmed_lines)
+        self._chat_has_content = bool(trimmed_text)
+        self._chat_end_location = self._advance_location((0, 0), trimmed_text)
+
+    @staticmethod
+    def _advance_location(
+        location: tuple[int, int],
+        inserted_text: str,
+    ) -> tuple[int, int]:
+        row, column = location
+        parts = inserted_text.split("\n")
+        if len(parts) == 1:
+            return row, column + len(parts[0])
+        return row + len(parts) - 1, len(parts[-1])
 
 
 def run_textual_cli(framework: Any, mock_model: Any, config_path: str | None) -> None:

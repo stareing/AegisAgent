@@ -30,6 +30,7 @@ def register_all_builtins(catalog: GlobalToolCatalog) -> int:
     from agent_framework.tools.builtin.shell import bash_exec, bash_output, kill_shell
     from agent_framework.tools.builtin.web import web_fetch
     from agent_framework.tools.builtin.task_manager import todo_write, todo_read
+    from agent_framework.tools.builtin.think import think
     from agent_framework.tools.builtin_skills import invoke_skill
 
     builtins = [
@@ -46,6 +47,8 @@ def register_all_builtins(catalog: GlobalToolCatalog) -> int:
         web_fetch,
         # Task management
         todo_write, todo_read,
+        # Reasoning
+        think,
         # Sub-agents
         spawn_agent, check_spawn_result,
         # Skills

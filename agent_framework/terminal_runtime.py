@@ -109,22 +109,6 @@ class InteractiveMockModel(BaseModelAdapter):
         lowered_input = user_input.lower()
         calls: list[ToolCallRequest] = []
 
-        if "calculator" in tool_names and any(
-            keyword in lowered_input for keyword in ("计算", "算", "calc", "+", "*", "/")
-        ):
-            expression = "42 * 13 + 7"
-            for part in user_input.split():
-                if any(char in part for char in "0123456789+-*/."):
-                    expression = part
-                    break
-            calls.append(
-                ToolCallRequest(
-                    id="tc_calc",
-                    function_name="calculator",
-                    arguments={"expression": expression},
-                )
-            )
-
         if "weather" in tool_names and any(keyword in lowered_input for keyword in ("天气", "weather")):
             city = "北京"
             for known_city in ("北京", "上海", "深圳", "东京", "广州"):
@@ -136,15 +120,6 @@ class InteractiveMockModel(BaseModelAdapter):
                     id="tc_weather",
                     function_name="weather",
                     arguments={"city": city},
-                )
-            )
-
-        if "note" in tool_names and any(keyword in lowered_input for keyword in ("笔记", "记录", "note")):
-            calls.append(
-                ToolCallRequest(
-                    id="tc_note",
-                    function_name="note",
-                    arguments={"title": "用户笔记", "content": user_input},
                 )
             )
 
@@ -200,18 +175,6 @@ class InteractiveMockModel(BaseModelAdapter):
         return True
 
 
-@tool(name="calculator", description="计算数学表达式", category="math")
-def calculator(expression: str) -> str:
-    allowed = set("0123456789+-*/.() ")
-    if not all(char in allowed for char in expression):
-        return f"错误：表达式包含非法字符: {expression}"
-    try:
-        result = eval(expression)
-    except Exception as exc:  # noqa: S307 - demo tool only
-        return f"计算错误: {exc}"
-    return f"{expression} = {result}"
-
-
 @tool(name="weather", description="查询城市天气（模拟数据）", category="info")
 def weather(city: str) -> str:
     fake_data = {
@@ -223,51 +186,7 @@ def weather(city: str) -> str:
     }
     return fake_data.get(city, f"未找到 {city} 的天气数据")
 
-
-def _make_note_tool(memory_manager_ref: list[Any]) -> Any:
-    @tool(name="note", description="保存一条笔记到长期记忆", category="util")
-    def note(title: str, content: str) -> str:
-        manager = memory_manager_ref[0] if memory_manager_ref else None
-        if manager is not None:
-            from agent_framework.models.memory import (
-                MemoryCandidate,
-                MemoryCandidateSource,
-                MemoryConfidence,
-                MemoryKind,
-            )
-
-            candidate = MemoryCandidate(
-                kind=MemoryKind.CUSTOM,
-                title=title,
-                content=content,
-                tags=["note"],
-                reason="User requested note save via tool",
-                candidate_source=MemoryCandidateSource.EXPLICIT_USER,
-                confidence=MemoryConfidence.HIGH,
-            )
-            memory_id = manager.remember(candidate)
-            if memory_id:
-                return f"已保存笔记 [{title}] (memory_id={memory_id})"
-        return f"已保存笔记 [{title}]: {content}"
-
-    return note
-
-
 BUILTIN_SKILLS = [
-    Skill(
-        skill_id="math_expert",
-        name="数学专家",
-        description="激活数学专家模式，提供详细计算步骤",
-        trigger_keywords=["数学", "计算", "math", "calculate"],
-        system_prompt_addon="你是一位数学专家。请用清晰的步骤解释计算过程，给出精确结果。",
-    ),
-    Skill(
-        skill_id="translator",
-        name="翻译助手",
-        description="激活翻译模式，进行中英互译",
-        trigger_keywords=["翻译", "translate", "英译中", "中译英"],
-        system_prompt_addon="你是一位专业翻译。请准确翻译用户的文本，保持原文风格和语气。",
-    ),
     Skill(
         skill_id="code_reviewer",
         name="代码审查",
@@ -312,10 +231,7 @@ def build_framework(
     else:
         framework.setup(auto_approve_tools=auto_approve)
 
-    memory_manager_ref: list[Any] = [getattr(framework._deps, "memory_manager", None)] if framework._deps else []
-    framework.register_tool(calculator)
     framework.register_tool(weather)
-    framework.register_tool(_make_note_tool(memory_manager_ref))
     for skill in BUILTIN_SKILLS:
         framework.register_skill(skill)
     # Start conversation-level session for cross-turn delta optimization
@@ -427,7 +343,6 @@ class ReplState:
             messages_to_text(compress_messages),
             model_adapter,
             previous_summary=previous_summary,
-            messages=compress_messages,
         )
         if not summary_text:
             return "[Compaction produced empty summary]"
@@ -679,7 +594,7 @@ async def _cmd_context_edit(fw: AgentFramework, mock: InteractiveMockModel | Non
 async def _cmd_call(fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str) -> None:
     if not args:
         print(f"  {_red('用法:')} /call <tool_name> {{\"arg\": \"value\"}}")
-        print(f"  {_dim('示例:')} /call calculator {{\"expression\": \"2+3\"}}")
+        print(f"  {_dim('示例:')} /call weather {{\"city\": \"北京\"}}")
         return
 
     parts = args.split(maxsplit=1)
@@ -839,14 +754,11 @@ async def _cmd_memory_toggle(fw: AgentFramework, mock: InteractiveMockModel | No
         print(f"  {_red('用法:')} /memory-toggle on|off")
 
 
-@_register_cmd("demo", "运行内置演示场景", usage="/demo [calc|weather|multi|skill|note]", category="演示")
+@_register_cmd("demo", "运行内置演示场景", usage="/demo [weather|skill]", category="演示")
 async def _cmd_demo(fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str) -> None:
     demos = {
-        "calc": "帮我计算 42*13+7",
         "weather": "查询北京和上海的天气",
-        "multi": "算一下 100/3 然后查深圳天气",
-        "skill": "帮我用数学方法分析 2**10 的值",
-        "note": "帮我记录一条笔记: 今天学习了 Agent Framework",
+        "skill": "请审查这段 Python 代码的可读性和潜在问题: def add(a,b): return a+b",
     }
     if not args or args.strip() not in demos:
         print(f"\n  {_bold('可用演示场景:')}")
@@ -863,7 +775,7 @@ async def _cmd_demo(fw: AgentFramework, mock: InteractiveMockModel | None, state
 
 @_register_cmd("demo-all", "依次运行所有演示场景", category="演示")
 async def _cmd_demo_all(fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str) -> None:
-    for demo_name in ["calc", "weather", "multi", "note", "skill"]:
+    for demo_name in ["weather", "skill"]:
         print(f"\n  {_bold(_yellow(f'--- demo: {demo_name} ---'))}")
         await _cmd_demo(fw, mock, state, demo_name)
         print()
@@ -889,8 +801,8 @@ def _render_tool_output(output: Any, tool_name: str) -> str:
     return str(output) if output else "(no output)"
 
 
-def _print_result(result: Any) -> None:
-    if getattr(result, "iteration_history", None):
+def _print_result(result: Any, include_trace: bool = True) -> None:
+    if include_trace and getattr(result, "iteration_history", None):
         print(f"\n  {_bold('执行轨迹:')}")
         for iteration in result.iteration_history:
             print(f"  {_dim(f'[Iteration {iteration.iteration_index + 1}]')}")
@@ -933,10 +845,10 @@ def _print_result(result: Any) -> None:
         print(f"  {_dim(f'迭代: {result.iterations_used} | Tokens: {result.usage.total_tokens}')}")
 
 
-def format_result(result: Any) -> str:
+def format_result(result: Any, include_trace: bool = True) -> str:
     buffer = io.StringIO()
     with redirect_stdout(buffer):
-        _print_result(result)
+        _print_result(result, include_trace=include_trace)
     return buffer.getvalue().rstrip()
 
 
@@ -1151,6 +1063,7 @@ async def execute_user_input(
     state: ReplState,
     user_input: str,
     cancel_event: asyncio.Event | None = None,
+    include_trace: bool = True,
 ) -> str:
     if mock_model:
         mock_model._reset_turn()
@@ -1160,7 +1073,7 @@ async def execute_user_input(
         user_id=state.user_id,
         cancel_event=cancel_event,
     )
-    output = format_result(result)
+    output = format_result(result, include_trace=include_trace)
     if result.success:
         state.append_turn(user_input, result)
     return output
@@ -1213,4 +1126,3 @@ def build_framework_from_args(args: argparse.Namespace) -> tuple[AgentFramework,
         auto_approve=args.auto_approve,
         model_override=args.model,
     )
-

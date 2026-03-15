@@ -55,6 +55,7 @@ class ContextSourceProvider:
                 "max_iterations", "max_concurrent_subagents", "max_subagents_per_run",
                 "current_iteration", "spawned_subagents",
             }
+            meta_keys = {"investigation_mode", "investigation_expectation"}
 
             env_lines = [
                 f"  <{k}>{_xml_escape(str(v))}</{k}>"
@@ -66,7 +67,8 @@ class ContextSourceProvider:
             ]
             other_lines = [
                 f"  <{k}>{_xml_escape(str(v))}</{k}>"
-                for k, v in runtime_info.items() if k not in env_keys and k not in cap_keys
+                for k, v in runtime_info.items()
+                if k not in env_keys and k not in cap_keys and k not in meta_keys
             ]
 
             if env_lines or other_lines:
@@ -80,6 +82,20 @@ class ContextSourceProvider:
                     "<agent-capabilities>\n"
                     + "\n".join(cap_lines)
                     + "\n</agent-capabilities>"
+                )
+            if runtime_info.get("investigation_mode") == "codebase_analysis":
+                expectation = _xml_escape(str(runtime_info.get("investigation_expectation", "")))
+                parts.append(
+                    "<investigation-protocol type=\"codebase-analysis\">\n"
+                    "  <required>true</required>\n"
+                    "  <rules>\n"
+                    "    <rule>Start with code search / file discovery before summarizing architecture.</rule>\n"
+                    "    <rule>Inspect multiple implementation files, not only entrypoints or __init__ files.</rule>\n"
+                    "    <rule>Cross-check at least entry, runtime, and one downstream subsystem relevant to the question.</rule>\n"
+                    "    <rule>In the final answer, clearly separate verified facts from inferences.</rule>\n"
+                    f"    <rule>{expectation}</rule>\n"
+                    "  </rules>\n"
+                    "</investigation-protocol>"
                 )
         return "\n\n".join(parts)
 

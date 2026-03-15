@@ -200,7 +200,7 @@ class TestOrchestratorAgent:
         prompt = agent.agent_config.system_prompt
         assert "spawn_agent" in prompt
         assert "delegate" in prompt.lower()
-        assert "Decision Policy" in prompt
+        assert "decision policy" in prompt.lower()
 
     @pytest.mark.asyncio
     async def test_spawn_approved_by_default(self):
@@ -716,6 +716,13 @@ class TestRunCoordinator:
             deps=deps,
         )
         assert info["parallel_tool_calls"] == "false"
+
+    def test_runtime_info_marks_code_investigation_tasks(self):
+        info = RunCoordinator._collect_runtime_info(
+            task="分析当前代码架构，不要偷懒看md那不是真实的",
+        )
+        assert info["investigation_mode"] == "codebase_analysis"
+        assert "glob_files/grep_search" in info["investigation_expectation"]
 
     @pytest.mark.asyncio
     async def test_simple_run_success(self):
