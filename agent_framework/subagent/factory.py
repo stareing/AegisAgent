@@ -91,7 +91,9 @@ class SubAgentFactory:
         sub_agent_id = f"sub_{spec.spawn_id or uuid.uuid4().hex[:8]}"
         override = spec.config_override
 
-        parent_model = parent_agent.agent_config.model_name if parent_agent else "gpt-3.5-turbo"
+        parent_config = parent_agent.agent_config if parent_agent else None
+        parent_model = parent_config.model_name if parent_config else "gpt-3.5-turbo"
+        parent_max_output = parent_config.max_output_tokens if parent_config else 4096
         default_prompt = SUB_AGENT_SYSTEM_PROMPT
 
         # Build system prompt: base + optional addon from override
@@ -105,6 +107,7 @@ class SubAgentFactory:
             system_prompt=system_prompt,
             temperature=(override.temperature if override and override.temperature is not None else 1.0),
             max_iterations=spec.max_iterations,
+            max_output_tokens=parent_max_output,
             # Section 14.2 & 20.2: SubAgentFactory MUST force allow_spawn_children=False
             allow_spawn_children=False,
         )

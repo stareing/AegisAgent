@@ -814,7 +814,7 @@ class AgentLoop:
             mode="progressive" if progressive else "parallel",
         )
 
-        if progressive and hasattr(tool_executor, "batch_execute_progressive"):
+        if progressive and hasattr(type(tool_executor), "batch_execute_progressive"):
             # Progressive: yield results as each tool completes (fastest first)
             async for result, meta in tool_executor.batch_execute_progressive(approved):
                 results.append(result)

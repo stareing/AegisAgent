@@ -23,7 +23,7 @@ class DefaultAgent(BaseAgent):
         allow_spawn_children: bool = False,
         max_concurrent_tool_calls: int = 5,
         allow_parallel_tool_calls: bool = True,
-        progressive_tool_results: bool = False,
+        progressive_tool_results: bool = True,
     ) -> None:
         config = AgentConfig(
             agent_id=agent_id,
