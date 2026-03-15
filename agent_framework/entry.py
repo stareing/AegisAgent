@@ -507,6 +507,34 @@ class AgentFramework:
             cancel_event=cancel_event,
         )
 
+    async def run_stream(
+        self,
+        task: str,
+        initial_session_messages: list[Message] | None = None,
+        user_id: str | None = None,
+        cancel_event: asyncio.Event | None = None,
+    ):
+        """Stream agent execution, yielding StreamEvents in real-time.
+
+        Usage:
+            async for event in framework.run_stream("Hello"):
+                if event.type == StreamEventType.TOKEN:
+                    print(event.data["text"], end="", flush=True)
+                elif event.type == StreamEventType.DONE:
+                    result = event.data["result"]
+        """
+        if not self._setup_done:
+            self.setup()
+        async for event in self._coordinator.run_stream(
+            self._agent,
+            self._deps,
+            task,
+            initial_session_messages=initial_session_messages,
+            user_id=user_id,
+            cancel_event=cancel_event,
+        ):
+            yield event
+
     def begin_conversation(self, conversation_id: str = "") -> None:
         """Start a conversation-level stateful session.
 

@@ -88,6 +88,8 @@ class GoogleAdapter(BaseModelAdapter):
         self,
         messages: list[Message],
         tools: list[dict] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
     ) -> AsyncIterator[ModelChunk]:
         system_instruction, contents = self._convert_messages(messages)
         config = self._build_config(

@@ -109,6 +109,8 @@ class BaseModelAdapter(ABC):
         self,
         messages: list[Message],
         tools: list[dict] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
     ) -> AsyncIterator[ModelChunk]:
         ...
 

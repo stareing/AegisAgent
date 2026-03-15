@@ -2,7 +2,7 @@
   "model": {
     "adapter_type": "zhipu",
     "default_model_name": "glm-4",
-    "temperature": 0.7,
+    "temperature": 1.0,
     "max_output_tokens": 4096,
     "api_key": "${ZHIPU_API_KEY}",
     "api_base": "https://open.bigmodel.cn/api/paas/v4",

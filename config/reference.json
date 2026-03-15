@@ -5,7 +5,7 @@
     "_comment": "LLM model and adapter settings",
     "adapter_type": "openai",
     "default_model_name": "gpt-4o",
-    "temperature": 0.7,
+    "temperature": 1.0,
     "max_output_tokens": 4096,
     "api_key": "${OPENAI_API_KEY}",
     "api_base": null,

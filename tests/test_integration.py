@@ -71,6 +71,8 @@ class MockModelAdapter(BaseModelAdapter):
         self,
         messages: list[Message],
         tools: list[dict] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
     ) -> AsyncIterator[ModelChunk]:
         resp = await self.complete(messages, tools)
         yield ModelChunk(delta_content=resp.content, finish_reason=resp.finish_reason)

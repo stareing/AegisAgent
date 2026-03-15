@@ -10,7 +10,7 @@ from pydantic_settings import BaseSettings
 class ModelConfig(BaseModel):
     adapter_type: str = "litellm"  # "litellm"|"openai"|"anthropic"|"google"|"deepseek"|"doubao"|"qwen"|"zhipu"|"minimax"|"custom"
     default_model_name: str = "gpt-3.5-turbo"
-    temperature: float = 0.7
+    temperature: float = 1.0
     max_output_tokens: int = 4096
     api_key: str | None = None
     api_base: str | None = None

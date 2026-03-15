@@ -282,7 +282,7 @@ class ResolvedSubAgentRuntimeBundle(BaseModel):
     """
 
     resolved_model_name: str = "gpt-3.5-turbo"
-    resolved_temperature: float = 0.7
+    resolved_temperature: float = 1.0
     resolved_system_prompt: str = ""
     resolved_memory_scope: str = "ISOLATED"  # MemoryScope value
     resolved_tool_names: list[str] = Field(default_factory=list)

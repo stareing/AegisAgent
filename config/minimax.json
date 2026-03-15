@@ -2,7 +2,7 @@
   "model": {
     "adapter_type": "minimax",
     "default_model_name": "abab6.5s-chat",
-    "temperature": 0.7,
+    "temperature": 1.0,
     "max_output_tokens": 4096,
     "api_key": "${MINIMAX_API_KEY}",
     "api_base": "https://api.minimax.chat/v1",

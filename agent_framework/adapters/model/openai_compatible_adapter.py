@@ -207,8 +207,13 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
         self,
         messages: list[Message],
         tools: list[dict] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
     ):
-        kwargs = self._build_kwargs(messages, tools=tools, stream=True)
+        kwargs = self._build_kwargs(
+            messages, tools=tools, temperature=temperature,
+            max_tokens=max_tokens, stream=True,
+        )
         raw_stream = await self._call_with_retry(kwargs)
         async for chunk in raw_stream:
             yield self._parse_chunk(chunk)

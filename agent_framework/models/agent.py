@@ -254,7 +254,7 @@ class AgentConfig(BaseModel):
     agent_id: str = "default"
     model_name: str = "gpt-3.5-turbo"
     system_prompt: str = "You are a helpful assistant."
-    temperature: float = 0.7
+    temperature: float = 1.0
     max_output_tokens: int = 4096
     max_iterations: int = 20
     allow_spawn_children: bool = False
@@ -366,7 +366,7 @@ class EffectiveRunConfig(BaseModel):
     model_config = {"frozen": True}
 
     model_name: str = "gpt-3.5-turbo"
-    temperature: float = 0.7
+    temperature: float = 1.0
     max_output_tokens: int = 4096
     max_iterations: int = 20
     reserve_for_output: int = 1024

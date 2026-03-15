@@ -2,7 +2,7 @@
   "model": {
     "adapter_type": "doubao",
     "default_model_name": "doubao-seed-2-0-pro-260215",
-    "temperature": 0.7,
+    "temperature": 1.0,
     "max_output_tokens": 4096,
     "api_key": "${DOUBAO_API_KEY}",
     "api_base": "https://ark.cn-beijing.volces.com/api/v3",

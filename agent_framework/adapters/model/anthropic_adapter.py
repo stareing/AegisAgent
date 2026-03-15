@@ -89,8 +89,13 @@ class AnthropicAdapter(BaseModelAdapter):
         self,
         messages: list[Message],
         tools: list[dict] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
     ) -> AsyncIterator[ModelChunk]:
-        kwargs = self._build_kwargs(messages, tools=tools, stream=True)
+        kwargs = self._build_kwargs(
+            messages, tools=tools, temperature=temperature,
+            max_tokens=max_tokens, stream=True,
+        )
         kwargs.pop("stream", None)
         async with self._client.messages.stream(**kwargs) as stream:
             async for event in stream:

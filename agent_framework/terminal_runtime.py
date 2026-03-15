@@ -164,9 +164,26 @@ class InteractiveMockModel(BaseModelAdapter):
         self,
         messages: list[Message],
         tools: list[dict] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
     ) -> AsyncIterator[ModelChunk]:
-        response = await self.complete(messages, tools)
-        yield ModelChunk(delta_content=response.content, finish_reason=response.finish_reason)
+        response = await self.complete(messages, tools, temperature, max_tokens)
+        # Simulate token-by-token streaming for mock
+        content = response.content or ""
+        for i in range(0, len(content), 4):
+            chunk_text = content[i:i + 4]
+            yield ModelChunk(delta_content=chunk_text)
+            await asyncio.sleep(0.01)
+        yield ModelChunk(
+            finish_reason=response.finish_reason,
+            delta_tool_calls=(
+                [{"index": j, "id": tc.id,
+                  "function": {"name": tc.function_name,
+                               "arguments": __import__("json").dumps(tc.arguments)}}
+                 for j, tc in enumerate(response.tool_calls)]
+                if response.tool_calls else None
+            ),
+        )
 
     def count_tokens(self, messages: list[Message]) -> int:
         return sum(len(message.content or "") // 4 for message in messages)
@@ -245,25 +262,30 @@ class ReplState:
         self.turn_count = 0
         self.user_id: str | None = None
         self.recent_commands: list[str] = []
+        self.total_tokens_estimate = 0
 
     def append_turn(self, user_input: str, result: Any) -> None:
         from agent_framework.agent.message_projector import MessageProjector
 
-        self.history.append(Message(role="user", content=user_input))
+        user_message = Message(role="user", content=user_input)
+        self.history.append(user_message)
+        self.total_tokens_estimate += self._estimate_message_tokens(user_message)
         if getattr(result, "iteration_history", None):
             for iteration in result.iteration_history:
                 for message in MessageProjector.project_iteration(iteration):
-                    self.history.append(
-                        Message(
-                            role=message.role,
-                            content=message.content,
-                            tool_calls=message.tool_calls,
-                            tool_call_id=message.tool_call_id,
-                            name=message.name,
-                        )
+                    projected = Message(
+                        role=message.role,
+                        content=message.content,
+                        tool_calls=message.tool_calls,
+                        tool_call_id=message.tool_call_id,
+                        name=message.name,
                     )
+                    self.history.append(projected)
+                    self.total_tokens_estimate += self._estimate_message_tokens(projected)
         else:
-            self.history.append(Message(role="assistant", content=result.final_answer or ""))
+            assistant = Message(role="assistant", content=result.final_answer or "")
+            self.history.append(assistant)
+            self.total_tokens_estimate += self._estimate_message_tokens(assistant)
         self.turn_count += 1
 
     def apply_context_editing(self) -> int:
@@ -355,6 +377,7 @@ class ReplState:
         ]
         self.turn_count = 0
         new_tokens = self._estimate_tokens()
+        self.total_tokens_estimate = new_tokens
         return f"Compacted {old_count} messages (~{old_tokens} tokens) -> 1 summary (~{new_tokens} tokens)"
 
     def record_command(self, command_name: str) -> None:
@@ -366,6 +389,7 @@ class ReplState:
     def clear(self) -> None:
         self.history.clear()
         self.turn_count = 0
+        self.total_tokens_estimate = 0
 
     def message_count(self) -> int:
         return len(self.history)
@@ -373,11 +397,15 @@ class ReplState:
     def _estimate_tokens(self) -> int:
         total = 0
         for message in self.history:
-            text = message.content or ""
-            cjk_chars = sum(1 for char in text if "\u4e00" <= char <= "\u9fff")
-            ascii_chars = len(text) - cjk_chars
-            total += ascii_chars // 4 + int(cjk_chars / 1.5)
+            total += self._estimate_message_tokens(message)
         return max(total, 1)
+
+    @staticmethod
+    def _estimate_message_tokens(message: Message) -> int:
+        text = message.content or ""
+        cjk_chars = sum(1 for char in text if "\u4e00" <= char <= "\u9fff")
+        ascii_chars = len(text) - cjk_chars
+        return ascii_chars // 4 + int(cjk_chars / 1.5)
 
 
 _COMMANDS: dict[str, tuple[Any, str, str, str]] = {}
@@ -1077,6 +1105,36 @@ async def execute_user_input(
     if result.success:
         state.append_turn(user_input, result)
     return output
+
+
+async def execute_user_input_stream(
+    fw: AgentFramework,
+    mock_model: InteractiveMockModel | None,
+    state: ReplState,
+    user_input: str,
+    cancel_event: asyncio.Event | None = None,
+):
+    """Streaming variant — yields StreamEvents in real-time.
+
+    The consumer (TUI) renders tokens incrementally. The final DONE event
+    carries the AgentRunResult for state bookkeeping.
+    """
+    from agent_framework.models.stream import StreamEvent, StreamEventType
+
+    if mock_model:
+        mock_model._reset_turn()
+
+    async for event in fw.run_stream(
+        user_input,
+        initial_session_messages=state.history,
+        user_id=state.user_id,
+        cancel_event=cancel_event,
+    ):
+        if event.type == StreamEventType.DONE:
+            result = event.data.get("result")
+            if result and result.success:
+                state.append_turn(user_input, result)
+        yield event
 
 
 async def run_classic_repl(fw: AgentFramework, mock_model: InteractiveMockModel | None) -> None:

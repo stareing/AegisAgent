@@ -39,6 +39,8 @@ class ModelAdapterProtocol(Protocol):
         self,
         messages: list[Message],
         tools: list[dict] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
     ) -> AsyncIterator[ModelChunk]: ...
 
     def count_tokens(self, messages: list[Message]) -> int: ...

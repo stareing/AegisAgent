@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import time
 import uuid
+from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING
 
 from agent_framework.infra.logger import get_logger
@@ -393,6 +394,223 @@ class RunCoordinator:
                 except Exception:
                     pass
             # Always deactivate skill — run-scoped, must not leak
+            self._state_ctrl.deactivate_skill(agent_state)
+            deps.context_engineer.set_skill_context(None)
+
+    async def run_stream(
+        self,
+        agent: BaseAgent,
+        deps: AgentRuntimeDeps,
+        task: str,
+        initial_session_messages: list[Message] | None = None,
+        user_id: str | None = None,
+        run_timeout_ms: int | None = None,
+        cancel_event: asyncio.Event | None = None,
+    ) -> AsyncGenerator[StreamEvent, None]:
+        """Streaming variant of run(). Yields StreamEvents in real-time.
+
+        The final event is always StreamEventType.DONE carrying the AgentRunResult,
+        or StreamEventType.ERROR on failure.
+        All other lifecycle logic (memory, context, policies) is identical to run().
+        """
+        from agent_framework.models.stream import StreamEvent, StreamEventType
+
+        run_id = str(uuid.uuid4())
+        agent_state = self._state_ctrl.initialize_state(task, run_id)
+        session_state = SessionState(session_id=str(uuid.uuid4()), run_id=run_id)
+        if initial_session_messages:
+            self._state_ctrl.append_projected_messages(
+                session_state, initial_session_messages
+            )
+        self._state_ctrl.append_user_message(
+            session_state, Message(role="user", content=task)
+        )
+
+        timeout_ms = run_timeout_ms or DEFAULT_RUN_TIMEOUT_MS
+        run_start = time.monotonic()
+
+        if hasattr(deps.tool_executor, "set_current_run_id"):
+            maybe = deps.tool_executor.set_current_run_id(run_id)
+            if inspect.isawaitable(maybe):
+                await maybe
+
+        logger.info(
+            "run_stream.started",
+            run_id=run_id,
+            agent_id=agent.agent_id,
+            model=agent.agent_config.model_name,
+            task=task[:200],
+        )
+
+        self._cached_tools_schema = None
+        if hasattr(deps.context_engineer, "reset_compressor"):
+            deps.context_engineer.reset_compressor()
+
+        adapter = deps.model_adapter
+        adapter_stateful = False
+        conversation_session_active = (
+            hasattr(adapter, "_session") and adapter._session.active
+        )
+        if not conversation_session_active and hasattr(adapter, "begin_session"):
+            maybe = adapter.begin_session(session_id=run_id)
+            if inspect.isawaitable(maybe):
+                await maybe
+        sfn = getattr(adapter, "supports_stateful_session", None)
+        if sfn:
+            try:
+                val = sfn()
+                if inspect.isawaitable(val):
+                    val = await val
+                adapter_stateful = bool(val)
+            except Exception:
+                pass
+
+        session_started = False
+        final_answer: str | None = None
+        last_stop_signal: StopSignal | None = None
+
+        try:
+            self._state_ctrl.deactivate_skill()
+            deps.context_engineer.set_skill_context(None)
+            deps.memory_manager.begin_run_session(run_id, agent.agent_id, user_id)
+            session_started = True
+
+            self._detect_and_activate_skill(deps, agent_state)
+            active_skill = self._state_ctrl.active_skill
+
+            policy_bundle = self._policy_resolver.resolve_run_policy_bundle(
+                agent, active_skill, agent_state
+            )
+            effective_config = policy_bundle.effective_run_config
+            deps.memory_manager.apply_memory_policy(policy_bundle.memory_policy)
+            deps.context_engineer.apply_context_policy(policy_bundle.context_policy)
+
+            await agent.on_before_run(task, agent_state)
+
+            while True:
+                elapsed_ms = int((time.monotonic() - run_start) * 1000)
+                if elapsed_ms >= timeout_ms:
+                    last_stop_signal = StopSignal(
+                        reason=StopReason.MAX_ITERATIONS,
+                        message=f"Run timed out after {elapsed_ms}ms",
+                    )
+                    break
+
+                if cancel_event and cancel_event.is_set():
+                    last_stop_signal = StopSignal(
+                        reason=StopReason.USER_CANCEL,
+                        message="Run cancelled by external signal",
+                    )
+                    break
+
+                if hasattr(deps.tool_executor, "set_current_session_messages"):
+                    maybe = deps.tool_executor.set_current_session_messages(
+                        session_state.get_messages()
+                    )
+                    if inspect.isawaitable(maybe):
+                        await maybe
+
+                llm_request = await self._prepare_llm_request(
+                    agent, deps, agent_state,
+                    session_state=session_state,
+                    effective_config=effective_config,
+                    active_skill=active_skill,
+                    task=task,
+                )
+
+                self._state_ctrl.set_status(agent_state, AgentStatus.RUNNING)
+                loop_deps = AgentLoopDeps(
+                    model_adapter=deps.model_adapter,
+                    tool_executor=deps.tool_executor,
+                )
+
+                iteration_result: IterationResult | None = None
+                async for item in self._loop.execute_iteration_stream(
+                    agent, loop_deps,
+                    agent_state, llm_request, effective_config,
+                ):
+                    if isinstance(item, IterationResult):
+                        iteration_result = item
+                    else:
+                        yield item  # StreamEvent — forward to consumer
+
+                assert iteration_result is not None
+                self._state_ctrl.apply_iteration_result(agent_state, iteration_result)
+                self._state_ctrl.project_iteration_to_session(
+                    session_state, iteration_result
+                )
+
+                stop_decision = agent.should_stop(iteration_result, agent_state)
+                if stop_decision.should_stop:
+                    if iteration_result.model_response and iteration_result.model_response.content:
+                        final_answer = iteration_result.model_response.content
+                    last_stop_signal = stop_decision.stop_signal or iteration_result.stop_signal
+                    break
+
+            # Post-run
+            self._state_ctrl.mark_finished(agent_state)
+            deps.memory_manager.record_turn(
+                task, final_answer, agent_state.iteration_history
+            )
+            await agent.on_final_answer(final_answer, agent_state)
+
+            result = self._finalize_run(
+                agent, agent_state, final_answer, last_stop_signal
+            )
+            yield StreamEvent(
+                type=StreamEventType.DONE,
+                data={"result": result},
+            )
+
+        except Exception as e:
+            logger.error(
+                "run_stream.failed",
+                run_id=run_id,
+                error_type=type(e).__name__,
+                error=str(e),
+            )
+            try:
+                deps.memory_manager.record_turn(
+                    task, final_answer, agent_state.iteration_history
+                )
+            except Exception:
+                pass
+            yield StreamEvent(
+                type=StreamEventType.ERROR,
+                data={"error": str(e), "error_type": type(e).__name__},
+            )
+        finally:
+            if session_started:
+                try:
+                    outcome = RunSessionOutcome(
+                        status=(
+                            "completed" if agent_state.status == AgentStatus.FINISHED
+                            else "aborted"
+                        ),
+                        termination_kind=(
+                            last_stop_signal.termination_kind.value
+                            if last_stop_signal else "NORMAL"
+                        ),
+                        termination_reason=str(
+                            last_stop_signal.message if last_stop_signal else ""
+                        ),
+                        audit_ref=run_id,
+                    )
+                    deps.memory_manager.end_run_session(outcome)
+                except Exception:
+                    pass
+            if deps.sub_agent_runtime:
+                try:
+                    await deps.sub_agent_runtime.cancel_all(run_id)
+                except Exception:
+                    pass
+            if not conversation_session_active and hasattr(deps.model_adapter, "end_session"):
+                try:
+                    maybe = deps.model_adapter.end_session()
+                    if inspect.isawaitable(maybe):
+                        await maybe
+                except Exception:
+                    pass
             self._state_ctrl.deactivate_skill(agent_state)
             deps.context_engineer.set_skill_context(None)
 

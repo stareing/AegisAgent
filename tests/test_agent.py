@@ -42,6 +42,7 @@ from agent_framework.models.agent import (
 )
 from agent_framework.models.context import LLMRequest
 from agent_framework.models.message import Message, ModelResponse, TokenUsage, ToolCallRequest
+from agent_framework.models.stream import StreamEvent, StreamEventType
 from agent_framework.models.tool import ToolExecutionMeta, ToolResult
 
 
@@ -2034,3 +2035,211 @@ class TestV265RedLines:
         # Both exist independently — original not overwritten
         assert original.attempt.attempt_id != retry.attempt.attempt_id
         assert retry.attempt.parent_attempt_id == original.attempt.attempt_id
+
+
+# =====================================================================
+# Streaming Pipeline
+# =====================================================================
+
+
+class TestStreamingPipeline:
+    """Tests for run_stream() and execute_iteration_stream()."""
+
+    def _make_deps(self):
+        from agent_framework.agent.runtime_deps import AgentRuntimeDeps
+
+        mock_mm = MagicMock()
+        mock_mm.select_for_context.return_value = []
+        mock_mm.begin_run_session = MagicMock()
+        mock_mm.end_run_session = MagicMock()
+        mock_mm.begin_session = MagicMock()
+        mock_mm.end_session = MagicMock()
+        mock_mm.record_turn = MagicMock()
+
+        mock_ce = MagicMock()
+        mock_ce.prepare_context_for_llm = AsyncMock(return_value=[
+            Message(role="system", content="sys"),
+            Message(role="user", content="task"),
+        ])
+        mock_ce.set_skill_context = MagicMock()
+
+        mock_tr = MagicMock()
+        mock_tr.list_tools.return_value = []
+        mock_tr.export_schemas.return_value = []
+
+        mock_adapter = AsyncMock()
+        mock_executor = AsyncMock()
+        mock_sr = MagicMock()
+        mock_sr.detect_skill.return_value = None
+
+        return AgentRuntimeDeps(
+            tool_registry=mock_tr,
+            tool_executor=mock_executor,
+            memory_manager=mock_mm,
+            context_engineer=mock_ce,
+            model_adapter=mock_adapter,
+            skill_router=mock_sr,
+        )
+
+    @pytest.mark.asyncio
+    async def test_run_stream_yields_token_and_done(self):
+        """run_stream yields TOKEN events and a final DONE event."""
+        from agent_framework.adapters.model.base_adapter import ModelChunk
+        from agent_framework.models.stream import StreamEventType
+
+        deps = self._make_deps()
+        agent = DefaultAgent()
+        coordinator = RunCoordinator()
+
+        # Mock stream_complete to yield tokens
+        async def mock_stream(*args, **kwargs):
+            yield ModelChunk(delta_content="Hello ")
+            yield ModelChunk(delta_content="world")
+            yield ModelChunk(finish_reason="stop")
+
+        deps.model_adapter.stream_complete = mock_stream
+
+        events = []
+        async for event in coordinator.run_stream(agent, deps, "Hi"):
+            events.append(event)
+
+        types = [e.type for e in events]
+        assert StreamEventType.TOKEN in types
+        assert StreamEventType.DONE in types
+        assert types[-1] == StreamEventType.DONE
+
+        token_texts = [e.data["text"] for e in events if e.type == StreamEventType.TOKEN]
+        assert "".join(token_texts) == "Hello world"
+
+        result = events[-1].data["result"]
+        assert result.success is True
+        assert result.final_answer == "Hello world"
+
+    @pytest.mark.asyncio
+    async def test_run_stream_with_tool_calls(self):
+        """run_stream yields TOOL_CALL_START and TOOL_CALL_DONE events."""
+        from agent_framework.adapters.model.base_adapter import ModelChunk
+        from agent_framework.models.stream import StreamEventType
+        import json
+
+        deps = self._make_deps()
+        agent = DefaultAgent()
+        coordinator = RunCoordinator()
+
+        call_count = 0
+
+        async def mock_stream(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # First call: tool call
+                yield ModelChunk(delta_tool_calls=[{
+                    "index": 0,
+                    "id": "tc_1",
+                    "function": {"name": "read_file", "arguments": json.dumps({"path": "/tmp"})},
+                }])
+                yield ModelChunk(finish_reason="tool_calls")
+            else:
+                # Second call: final answer
+                yield ModelChunk(delta_content="Done!")
+                yield ModelChunk(finish_reason="stop")
+
+        deps.model_adapter.stream_complete = mock_stream
+        deps.tool_executor.batch_execute = AsyncMock(return_value=[
+            (ToolResult(tool_call_id="tc_1", tool_name="read_file", success=True, output="file content"),
+             ToolExecutionMeta(execution_time_ms=10, source="local")),
+        ])
+
+        events = []
+        async for event in coordinator.run_stream(agent, deps, "Read file"):
+            events.append(event)
+
+        types = [e.type for e in events]
+        assert StreamEventType.TOOL_CALL_START in types
+        assert StreamEventType.TOOL_CALL_DONE in types
+        assert StreamEventType.DONE in types
+
+    @pytest.mark.asyncio
+    async def test_run_stream_cancel(self):
+        """run_stream respects cancel_event."""
+        import asyncio
+        from agent_framework.adapters.model.base_adapter import ModelChunk
+        from agent_framework.models.stream import StreamEventType
+
+        deps = self._make_deps()
+        agent = DefaultAgent()
+        coordinator = RunCoordinator()
+
+        cancel = asyncio.Event()
+        cancel.set()  # Pre-cancelled
+
+        events = []
+        async for event in coordinator.run_stream(
+            agent, deps, "Hi", cancel_event=cancel,
+        ):
+            events.append(event)
+
+        # Should get DONE with USER_CANCEL, no TOKEN events
+        assert len(events) == 1
+        assert events[0].type == StreamEventType.DONE
+        result = events[0].data["result"]
+        assert result.stop_signal.reason == StopReason.USER_CANCEL
+
+    @pytest.mark.asyncio
+    async def test_execute_iteration_stream_yields_tokens(self):
+        """AgentLoop.execute_iteration_stream yields TOKEN events."""
+        from agent_framework.adapters.model.base_adapter import ModelChunk
+        from agent_framework.models.stream import StreamEventType
+
+        loop = AgentLoop()
+        agent = DefaultAgent()
+
+        async def mock_stream(*args, **kwargs):
+            yield ModelChunk(delta_content="tok1")
+            yield ModelChunk(delta_content="tok2")
+            yield ModelChunk(finish_reason="stop")
+
+        mock_adapter = AsyncMock()
+        mock_adapter.stream_complete = mock_stream
+        mock_executor = AsyncMock()
+
+        loop_deps = AgentLoopDeps(
+            model_adapter=mock_adapter,
+            tool_executor=mock_executor,
+        )
+        state = AgentState(task="test", run_id="r1")
+        request = LLMRequest(
+            messages=[Message(role="user", content="test")],
+            tools_schema=[],
+        )
+        config = EffectiveRunConfig()
+
+        events = []
+        async for item in loop.execute_iteration_stream(
+            agent, loop_deps, state, request, config,
+        ):
+            events.append(item)
+
+        # Should have: ITERATION_START, TOKEN, TOKEN, IterationResult
+        stream_events = [e for e in events if isinstance(e, StreamEvent)]
+        assert any(e.type == StreamEventType.ITERATION_START for e in stream_events)
+        assert any(e.type == StreamEventType.TOKEN for e in stream_events)
+
+        # Last item is IterationResult
+        assert isinstance(events[-1], IterationResult)
+        assert events[-1].model_response.content == "tok1tok2"
+
+    @pytest.mark.asyncio
+    async def test_stream_event_model(self):
+        """StreamEvent model basic construction."""
+        from agent_framework.models.stream import StreamEvent, StreamEventType
+
+        event = StreamEvent(
+            type=StreamEventType.TOKEN,
+            data={"text": "hello"},
+        )
+        assert event.type == StreamEventType.TOKEN
+        assert event.data["text"] == "hello"
+
+        done = StreamEvent(type=StreamEventType.DONE, data={"result": None})
+        assert done.type == StreamEventType.DONE

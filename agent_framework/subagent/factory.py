@@ -103,7 +103,7 @@ class SubAgentFactory:
             agent_id=sub_agent_id,
             model_name=(override.model_name if override and override.model_name else parent_model),
             system_prompt=system_prompt,
-            temperature=(override.temperature if override and override.temperature is not None else 0.7),
+            temperature=(override.temperature if override and override.temperature is not None else 1.0),
             max_iterations=spec.max_iterations,
             # Section 14.2 & 20.2: SubAgentFactory MUST force allow_spawn_children=False
             allow_spawn_children=False,

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json as _json
 import traceback
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -15,7 +17,8 @@ from agent_framework.models.agent import (
     StopSignal,
 )
 from agent_framework.models.context import LLMRequest
-from agent_framework.models.message import ModelResponse, ToolCallRequest
+from agent_framework.models.message import ModelResponse, TokenUsage, ToolCallRequest
+from agent_framework.models.stream import StreamEvent, StreamEventType
 from agent_framework.models.tool import ToolExecutionMeta, ToolResult
 
 if TYPE_CHECKING:
@@ -229,6 +232,210 @@ class AgentLoop:
             response_preview=(response.content or "")[:100],
         )
         return response
+
+    async def _call_llm_stream(
+        self,
+        model_adapter: ModelAdapterProtocol,
+        messages: list,
+        tools_schema: list[dict],
+        effective_config: EffectiveRunConfig,
+    ) -> AsyncGenerator[StreamEvent | ModelResponse, None]:
+        """Stream LLM response, yielding TOKEN events and finally the merged ModelResponse.
+
+        The last yielded item is always a ModelResponse (not a StreamEvent).
+        All prior items are StreamEvent(type=TOKEN).
+        """
+        actual_messages = messages
+        is_delta = False
+        if hasattr(model_adapter, "get_delta_messages") and hasattr(model_adapter, "_session"):
+            try:
+                import inspect as _inspect
+                delta = model_adapter.get_delta_messages(messages)
+                if _inspect.isawaitable(delta):
+                    delta.close()
+                    delta = messages
+                if isinstance(delta, list) and len(delta) < len(messages):
+                    is_delta = True
+                    actual_messages = delta
+            except Exception:
+                pass
+
+        logger.info(
+            "llm.calling_stream",
+            model=effective_config.model_name,
+            temperature=effective_config.temperature,
+            max_output_tokens=effective_config.max_output_tokens,
+            message_count=len(actual_messages),
+            full_message_count=len(messages),
+            is_delta=is_delta,
+            tools_count=len(tools_schema) if tools_schema else 0,
+        )
+
+        # Accumulate streamed chunks into a full response
+        content_parts: list[str] = []
+        tool_call_accum: dict[int, dict] = {}  # index -> {id, name, arguments_parts}
+        finish_reason: str | None = None
+
+        async for chunk in model_adapter.stream_complete(
+            messages=actual_messages,
+            tools=tools_schema if tools_schema else None,
+            temperature=effective_config.temperature,
+            max_tokens=effective_config.max_output_tokens,
+        ):
+            if chunk.delta_content:
+                content_parts.append(chunk.delta_content)
+                yield StreamEvent(
+                    type=StreamEventType.TOKEN,
+                    data={"text": chunk.delta_content},
+                )
+
+            if chunk.delta_tool_calls:
+                for tc_delta in chunk.delta_tool_calls:
+                    idx = tc_delta.get("index", 0)
+                    if idx not in tool_call_accum:
+                        tool_call_accum[idx] = {
+                            "id": tc_delta.get("id", ""),
+                            "name": "",
+                            "arguments_parts": [],
+                        }
+                    accum = tool_call_accum[idx]
+                    if tc_delta.get("id"):
+                        accum["id"] = tc_delta["id"]
+                    func = tc_delta.get("function", {})
+                    if func.get("name"):
+                        accum["name"] = func["name"]
+                    if func.get("arguments"):
+                        accum["arguments_parts"].append(func["arguments"])
+
+            if chunk.finish_reason:
+                finish_reason = chunk.finish_reason
+
+        # Merge accumulated chunks into ModelResponse
+        content = "".join(content_parts) or None
+        tool_calls: list[ToolCallRequest] = []
+        for _idx in sorted(tool_call_accum):
+            accum = tool_call_accum[_idx]
+            args_str = "".join(accum["arguments_parts"]) or "{}"
+            try:
+                arguments = _json.loads(args_str)
+            except (ValueError, _json.JSONDecodeError):
+                arguments = {}
+            tool_calls.append(ToolCallRequest(
+                id=accum["id"],
+                function_name=accum["name"],
+                arguments=arguments,
+            ))
+
+        if not finish_reason:
+            finish_reason = "tool_calls" if tool_calls else "stop"
+        if finish_reason not in ("stop", "tool_calls", "length", "error"):
+            finish_reason = "stop"
+
+        response = ModelResponse(
+            content=content,
+            tool_calls=tool_calls,
+            finish_reason=finish_reason,
+            usage=TokenUsage(),
+        )
+        logger.info(
+            "llm.stream_completed",
+            finish_reason=finish_reason,
+            tool_calls_count=len(tool_calls),
+            content_length=len(content) if content else 0,
+        )
+        yield response
+
+    async def execute_iteration_stream(
+        self,
+        agent: BaseAgent,
+        loop_deps: AgentLoopDeps,
+        agent_state: AgentState,
+        llm_request: LLMRequest,
+        effective_config: EffectiveRunConfig,
+    ) -> AsyncGenerator[StreamEvent | IterationResult, None]:
+        """Streaming variant of execute_iteration.
+
+        Yields StreamEvents during LLM call and tool execution.
+        The last yielded item is always the IterationResult.
+        """
+        idx = agent_state.iteration_count
+        llm_input_preview = self._summarize_llm_input(llm_request.messages)
+        await agent.on_iteration_started(idx, agent_state)
+
+        yield StreamEvent(
+            type=StreamEventType.ITERATION_START,
+            data={"iteration_index": idx},
+        )
+
+        # 1. Call LLM with streaming
+        model_response: ModelResponse | None = None
+        try:
+            async for item in self._call_llm_stream(
+                loop_deps.model_adapter,
+                llm_request.messages,
+                llm_request.tools_schema,
+                effective_config,
+            ):
+                if isinstance(item, ModelResponse):
+                    model_response = item
+                else:
+                    yield item  # StreamEvent(TOKEN)
+        except Exception as e:
+            yield self._handle_iteration_error(agent, e, agent_state, idx)
+            return
+
+        assert model_response is not None
+        self._enforce_tool_call_parallel_policy(model_response, effective_config, idx)
+
+        # 2. Check stop conditions
+        stop_signal = self._check_stop_conditions(agent, model_response, agent_state)
+        if stop_signal:
+            yield IterationResult(
+                iteration_index=idx,
+                llm_input_preview=llm_input_preview,
+                model_response=model_response,
+                stop_signal=stop_signal,
+            )
+            return
+
+        # 3. Dispatch tool calls
+        tool_results: list[ToolResult] = []
+        tool_metas: list[ToolExecutionMeta] = []
+
+        if model_response.tool_calls:
+            for tc in model_response.tool_calls:
+                yield StreamEvent(
+                    type=StreamEventType.TOOL_CALL_START,
+                    data={
+                        "tool_name": tc.function_name,
+                        "tool_call_id": tc.id,
+                        "arguments": tc.arguments,
+                    },
+                )
+
+            tool_results, tool_metas = await self._dispatch_tool_calls(
+                agent, loop_deps.tool_executor, model_response.tool_calls, agent_state
+            )
+
+            for tr, tm in zip(tool_results, tool_metas):
+                output_str = str(tr.output)[:500] if tr.output else ""
+                yield StreamEvent(
+                    type=StreamEventType.TOOL_CALL_DONE,
+                    data={
+                        "tool_name": tr.tool_name,
+                        "tool_call_id": tr.tool_call_id,
+                        "success": tr.success,
+                        "output": output_str,
+                    },
+                )
+
+        yield IterationResult(
+            iteration_index=idx,
+            llm_input_preview=llm_input_preview,
+            model_response=model_response,
+            tool_results=tool_results,
+            tool_execution_meta=tool_metas,
+        )
 
     def _check_stop_conditions(
         self,

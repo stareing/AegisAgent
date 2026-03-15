@@ -267,8 +267,8 @@ class SmartMockModel(BaseModelAdapter):
             usage=TokenUsage(prompt_tokens=50, completion_tokens=30, total_tokens=80),
         )
 
-    async def stream_complete(self, messages, tools=None) -> AsyncIterator[ModelChunk]:
-        resp = await self.complete(messages, tools)
+    async def stream_complete(self, messages, tools=None, temperature=None, max_tokens=None) -> AsyncIterator[ModelChunk]:
+        resp = await self.complete(messages, tools, temperature, max_tokens)
         yield ModelChunk(delta_content=resp.content, finish_reason=resp.finish_reason)
 
     def count_tokens(self, messages: list[Message]) -> int:

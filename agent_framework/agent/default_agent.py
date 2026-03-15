@@ -18,7 +18,7 @@ class DefaultAgent(BaseAgent):
         system_prompt: str = "",
         model_name: str = "gpt-3.5-turbo",
         max_iterations: int = 20,
-        temperature: float = 0.7,
+        temperature: float = 1.0,
         max_output_tokens: int = 4096,
         allow_spawn_children: bool = False,
         max_concurrent_tool_calls: int = 5,
