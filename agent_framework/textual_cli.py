@@ -464,6 +464,7 @@ class AegisAgentApp(App[None]):
             # Streaming output — tokens appear incrementally
             self._append_chat(_AGENT_PREFIX)
             in_tool_block = False
+            subagent_tool_call_ids: set[str] = set()
 
             async for event in execute_user_input_stream(
                 self._fw, self._mock, self._state, text,
@@ -484,9 +485,8 @@ class AegisAgentApp(App[None]):
                     self._append_chat(f"\n  {_TOOL_PREFIX}{tool_name}")
 
                 elif event.type == StreamEventType.TOOL_CALL_DONE:
-                    tool_name = event.data.get("tool_name", "?")
-                    # In progressive mode, spawn_agent done is shown via SUBAGENT_DONE
-                    if tool_name == "spawn_agent" and in_tool_block:
+                    tool_call_id = str(event.data.get("tool_call_id", ""))
+                    if tool_call_id in subagent_tool_call_ids and in_tool_block:
                         pass  # Suppress duplicate — SUBAGENT_DONE handles display
                     else:
                         success = event.data.get("success", False)
@@ -512,6 +512,9 @@ class AegisAgentApp(App[None]):
                     hdr.total_tokens = self._state.total_tokens_estimate
 
                 elif event.type == StreamEventType.SUBAGENT_START:
+                    tool_call_id = str(event.data.get("tool_call_id", ""))
+                    if tool_call_id:
+                        subagent_tool_call_ids.add(tool_call_id)
                     idx = event.data.get("index", 0)
                     total = event.data.get("total", 0)
                     task_input = event.data.get("task_input", "")[:50]

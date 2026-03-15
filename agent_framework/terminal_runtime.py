@@ -1318,6 +1318,7 @@ async def _execute_with_progressive(
 
     result = None
     has_progressive = False
+    subagent_tool_call_ids: set[str] = set()
 
     async for event in fw.run_stream(
         user_input,
@@ -1332,8 +1333,8 @@ async def _execute_with_progressive(
             print(f"\n  {_dim('[tool]')} {_cyan(tool_name)}", end="", flush=True)
 
         elif event.type == StreamEventType.TOOL_CALL_DONE:
-            tool_name = event.data.get("tool_name", "")
-            if tool_name == "spawn_agent":
+            tool_call_id = str(event.data.get("tool_call_id", ""))
+            if tool_call_id in subagent_tool_call_ids:
                 pass  # Suppress — SUBAGENT_DONE handles display
             else:
                 success = event.data.get("success", False)
@@ -1346,6 +1347,9 @@ async def _execute_with_progressive(
                 print(f"\n  {_dim(f'--- iter #{idx + 1}')}")
 
         elif event.type == StreamEventType.SUBAGENT_START:
+            tool_call_id = str(event.data.get("tool_call_id", ""))
+            if tool_call_id:
+                subagent_tool_call_ids.add(tool_call_id)
             idx = event.data.get("index", 0)
             total = event.data.get("total", 0)
             task_input = event.data.get("task_input", "")[:60]

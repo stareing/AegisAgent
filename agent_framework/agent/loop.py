@@ -405,6 +405,15 @@ class AgentLoop:
             )
             return
 
+        if model_response.tool_calls:
+            yield StreamEvent(
+                type=StreamEventType.ASSISTANT_TOOL_CALLS,
+                data={
+                    "content": model_response.content,
+                    "tool_calls": model_response.tool_calls,
+                },
+            )
+
         # 3. Dispatch tool calls
         tool_results: list[ToolResult] = []
         tool_metas: list[ToolExecutionMeta] = []
@@ -467,7 +476,8 @@ class AgentLoop:
                                 break
                         yield StreamEvent(
                             type=StreamEventType.SUBAGENT_DONE,
-                            data={"tool_call_id": result.tool_call_id, "task_input": task_input,
+                            data={"tool_call_id": result.tool_call_id, "tool_name": result.tool_name,
+                                  "task_input": task_input,
                                   "success": result.success, "output": output_str[:200],
                                   "index": completed, "total": total_tools},
                         )

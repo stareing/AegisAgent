@@ -27,6 +27,7 @@ class StreamEventType(str, Enum):
     ITERATION_START = "iteration_start"
     DONE = "done"
     ERROR = "error"
+    ASSISTANT_TOOL_CALLS = "assistant_tool_calls"
     # Progressive sub-agent events (transient UI — never enter SessionState)
     SUBAGENT_START = "subagent_start"
     SUBAGENT_DONE = "subagent_done"
@@ -45,8 +46,9 @@ class StreamEvent(BaseModel):
             ITERATION_START:      {"iteration_index": int}
             DONE:                 {"result": AgentRunResult}
             ERROR:                {"error": str, "error_type": str}
+            ASSISTANT_TOOL_CALLS: {"content": str | None, "tool_calls": list[ToolCallRequest]}
             SUBAGENT_START:       {"tool_call_id": str, "task_input": str, "index": int, "total": int}
-            SUBAGENT_DONE:        {"tool_call_id": str, "task_input": str, "success": bool, "output": str, "index": int, "total": int}
+            SUBAGENT_DONE:        {"tool_call_id": str, "tool_name": str, "task_input": str, "success": bool, "output": str, "index": int, "total": int}
             PROGRESSIVE_RESPONSE: {"text": str, "index": int, "total": int}
     """
 
