@@ -421,22 +421,44 @@ class AgentLoop:
                 )
 
             progressive = getattr(effective_config, "progressive_tool_results", False)
-            tool_results, tool_metas = await self._dispatch_tool_calls(
-                agent, loop_deps.tool_executor, model_response.tool_calls, agent_state,
-                progressive=progressive,
-            )
 
-            for tr, tm in zip(tool_results, tool_metas):
-                output_str = str(tr.output)[:500] if tr.output else ""
-                yield StreamEvent(
-                    type=StreamEventType.TOOL_CALL_DONE,
-                    data={
-                        "tool_name": tr.tool_name,
-                        "tool_call_id": tr.tool_call_id,
-                        "success": tr.success,
-                        "output": output_str,
-                    },
+            if (
+                progressive
+                and len(model_response.tool_calls) > 1
+                and hasattr(type(loop_deps.tool_executor), "batch_execute_progressive")
+            ):
+                # Progressive streaming: yield TOOL_CALL_DONE as each completes
+                async for result, meta in self._dispatch_progressive_stream(
+                    agent, loop_deps.tool_executor, model_response.tool_calls, agent_state,
+                ):
+                    tool_results.append(result)
+                    tool_metas.append(meta)
+                    output_str = str(result.output)[:500] if result.output else ""
+                    yield StreamEvent(
+                        type=StreamEventType.TOOL_CALL_DONE,
+                        data={
+                            "tool_name": result.tool_name,
+                            "tool_call_id": result.tool_call_id,
+                            "success": result.success,
+                            "output": output_str,
+                        },
+                    )
+            else:
+                # Non-progressive: batch execute, then emit all DONE events
+                tool_results, tool_metas = await self._dispatch_tool_calls(
+                    agent, loop_deps.tool_executor, model_response.tool_calls, agent_state,
                 )
+                for tr, tm in zip(tool_results, tool_metas):
+                    output_str = str(tr.output)[:500] if tr.output else ""
+                    yield StreamEvent(
+                        type=StreamEventType.TOOL_CALL_DONE,
+                        data={
+                            "tool_name": tr.tool_name,
+                            "tool_call_id": tr.tool_call_id,
+                            "success": tr.success,
+                            "output": output_str,
+                        },
+                    )
 
         yield IterationResult(
             iteration_index=idx,
@@ -858,6 +880,68 @@ class AgentLoop:
                 )
 
         return results, metas
+
+    async def _dispatch_progressive_stream(
+        self,
+        agent: BaseAgent,
+        tool_executor: ToolExecutorProtocol,
+        tool_calls: list[ToolCallRequest],
+        agent_state: AgentState,
+    ) -> AsyncGenerator[tuple[ToolResult, ToolExecutionMeta], None]:
+        """Progressive tool dispatch — yields (result, meta) as each completes.
+
+        Runs pre-dispatch guards (dedup, policy, hooks) identically to
+        _dispatch_tool_calls, then uses batch_execute_progressive to yield
+        results in completion order. Each yield triggers an immediate
+        TOOL_CALL_DONE event in the caller.
+        """
+        succeeded_sigs = self._collect_succeeded_signatures(agent_state)
+        capability_policy = agent.get_capability_policy()
+        approved: list[ToolCallRequest] = []
+
+        for tc in tool_calls:
+            sig = self._single_tool_signature(tc)
+            if sig in succeeded_sigs:
+                yield (
+                    ToolResult(
+                        tool_call_id=tc.id, tool_name=tc.function_name,
+                        success=True, output=succeeded_sigs[sig],
+                    ),
+                    ToolExecutionMeta(execution_time_ms=0, source="local"),
+                )
+                continue
+            if hasattr(tool_executor, "is_tool_allowed"):
+                if not tool_executor.is_tool_allowed(tc.function_name, capability_policy):
+                    yield (
+                        ToolResult(
+                            tool_call_id=tc.id, tool_name=tc.function_name,
+                            success=False, output=f"Tool '{tc.function_name}' blocked by policy.",
+                        ),
+                        ToolExecutionMeta(execution_time_ms=0, source="local"),
+                    )
+                    continue
+            decision = await agent.on_tool_call_requested(tc)
+            if decision.allowed:
+                approved.append(tc)
+            else:
+                yield (
+                    ToolResult(
+                        tool_call_id=tc.id, tool_name=tc.function_name,
+                        success=False, output=f"Tool denied: {decision.reason or 'policy'}",
+                    ),
+                    ToolExecutionMeta(execution_time_ms=0, source="local"),
+                )
+
+        if approved:
+            async for result, meta in tool_executor.batch_execute_progressive(approved):
+                await agent.on_tool_call_completed(result)
+                logger.info(
+                    "tool.progressive_done",
+                    tool_name=result.tool_name,
+                    success=result.success,
+                    execution_time_ms=meta.execution_time_ms,
+                )
+                yield result, meta
 
     def _handle_iteration_error(
         self,

@@ -1324,7 +1324,24 @@ async def _execute_with_progressive(
         initial_session_messages=state.history,
         user_id=state.user_id,
     ):
-        if event.type == StreamEventType.SUBAGENT_START:
+        if event.type == StreamEventType.TOKEN:
+            print(event.data.get("text", ""), end="", flush=True)
+
+        elif event.type == StreamEventType.TOOL_CALL_START:
+            tool_name = event.data.get("tool_name", "?")
+            print(f"\n  {_dim('[tool]')} {_cyan(tool_name)}", end="", flush=True)
+
+        elif event.type == StreamEventType.TOOL_CALL_DONE:
+            success = event.data.get("success", False)
+            marker = _green(" [ok]") if success else _red(" [fail]")
+            print(marker, flush=True)
+
+        elif event.type == StreamEventType.ITERATION_START:
+            idx = event.data.get("iteration_index", 0)
+            if idx > 0:
+                print(f"\n  {_dim(f'--- iter #{idx + 1}')}")
+
+        elif event.type == StreamEventType.SUBAGENT_START:
             idx = event.data.get("index", 0)
             total = event.data.get("total", 0)
             task_input = event.data.get("task_input", "")[:60]
