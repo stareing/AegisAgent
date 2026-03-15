@@ -5,7 +5,7 @@ import inspect
 import time
 import uuid
 from collections.abc import AsyncGenerator
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from agent_framework.infra.logger import get_logger
 from agent_framework.agent.capability_policy import apply_capability_policy
@@ -285,6 +285,27 @@ class RunCoordinator:
                     agent_state, llm_request, effective_config,
                 )
 
+                # Progressive mode: tools already executed in parallel,
+                # but results are streamed to LLM one by one.
+                # Each tool result gets its own session projection + LLM round-trip.
+                progressive = getattr(effective_config, "progressive_tool_results", False)
+                if (
+                    progressive
+                    and len(iteration_result.tool_results) > 1
+                    and not iteration_result.stop_signal
+                ):
+                    should_break, prog_answer, prog_stop = await self._progressive_stream(
+                        agent, deps, agent_state, session_state,
+                        iteration_result, effective_config, active_skill, task,
+                    )
+                    if prog_answer:
+                        final_answer = prog_answer
+                    if prog_stop:
+                        last_stop_signal = prog_stop
+                    if should_break:
+                        break
+                    continue
+
                 # Apply iteration result: token counting + history append
                 # (RunStateController — sole write-port, v2.5.3 §必修1)
                 self._state_ctrl.apply_iteration_result(agent_state, iteration_result)
@@ -543,6 +564,25 @@ class RunCoordinator:
                         yield item  # StreamEvent — forward to consumer
 
                 assert iteration_result is not None
+
+                progressive = getattr(effective_config, "progressive_tool_results", False)
+                if (
+                    progressive
+                    and len(iteration_result.tool_results) > 1
+                    and not iteration_result.stop_signal
+                ):
+                    should_break, prog_answer, prog_stop = await self._progressive_stream(
+                        agent, deps, agent_state, session_state,
+                        iteration_result, effective_config, active_skill, task,
+                    )
+                    if prog_answer:
+                        final_answer = prog_answer
+                    if prog_stop:
+                        last_stop_signal = prog_stop
+                    if should_break:
+                        break
+                    continue
+
                 self._state_ctrl.apply_iteration_result(agent_state, iteration_result)
                 self._state_ctrl.project_iteration_to_session(
                     session_state, iteration_result
@@ -815,6 +855,111 @@ class RunCoordinator:
             tools_schema=self._cached_tools_schema,
             tools_schema_tokens=tools_token_est,
         )
+
+    async def _progressive_stream(
+        self,
+        agent: BaseAgent,
+        deps: AgentRuntimeDeps,
+        agent_state: AgentState,
+        session_state: SessionState,
+        iteration_result: IterationResult,
+        effective_config: EffectiveRunConfig,
+        active_skill: Any,
+        task: str,
+    ) -> tuple[bool, str | None, StopSignal | None]:
+        """Stream tool results to LLM one by one.
+
+        Tools have already been executed in parallel by execute_iteration.
+        This method projects each result individually and calls LLM after each,
+        giving LLM a real-time progressive view.
+
+        Returns (should_break, final_answer, stop_signal).
+        """
+        tool_results = iteration_result.tool_results
+        tool_metas = iteration_result.tool_execution_meta
+        model_response = iteration_result.model_response
+
+        # Step 1: Project the assistant message (with all tool_calls) ONCE
+        if model_response:
+            assistant_msg = Message(
+                role="assistant",
+                content=model_response.content,
+                tool_calls=model_response.tool_calls if model_response.tool_calls else None,
+            )
+            self._state_ctrl.append_projected_messages(session_state, [assistant_msg])
+
+        # Step 2: Feed tool results one by one via RunStateController
+        for i, (tr, tm) in enumerate(zip(tool_results, tool_metas)):
+            output_str = str(tr.output) if tr.success else str(tr.error)
+            self._state_ctrl.append_projected_messages(session_state, [Message(
+                role="tool",
+                content=output_str,
+                tool_call_id=tr.tool_call_id,
+                name=tr.tool_name,
+            )])
+
+            is_last = (i == len(tool_results) - 1)
+
+            logger.info(
+                "progressive.tool_streamed",
+                tool_name=tr.tool_name,
+                success=tr.success,
+                index=i + 1,
+                total=len(tool_results),
+                execution_time_ms=tm.execution_time_ms,
+            )
+
+            if not is_last:
+                # Mid-stream: call LLM so it can process this partial result
+                # and provide incremental feedback to the user
+                if hasattr(deps.tool_executor, "set_current_session_messages"):
+                    deps.tool_executor.set_current_session_messages(
+                        session_state.get_messages()
+                    )
+                mid_request = await self._prepare_llm_request(
+                    agent, deps, agent_state,
+                    session_state=session_state,
+                    effective_config=effective_config,
+                    active_skill=active_skill,
+                    task=task,
+                )
+                loop_deps = AgentLoopDeps(
+                    model_adapter=deps.model_adapter,
+                    tool_executor=deps.tool_executor,
+                )
+                try:
+                    mid_response = await self._loop._call_llm(
+                        loop_deps.model_adapter,
+                        mid_request.messages,
+                        mid_request.tools_schema,
+                        effective_config,
+                    )
+                    # Project LLM's intermediate response to session
+                    if mid_response.content:
+                        self._state_ctrl.append_projected_messages(session_state, [Message(
+                            role="assistant",
+                            content=mid_response.content,
+                        )])
+                        logger.info(
+                            "progressive.llm_intermediate",
+                            index=i + 1,
+                            response_preview=mid_response.content[:100],
+                        )
+                except Exception as e:
+                    logger.warning("progressive.llm_intermediate_failed", error=str(e))
+
+        # Record the full iteration in agent_state history
+        self._state_ctrl.apply_iteration_result(agent_state, iteration_result)
+
+        # Check stop
+        stop_decision = agent.should_stop(iteration_result, agent_state)
+        if stop_decision.should_stop:
+            answer = None
+            if iteration_result.model_response and iteration_result.model_response.content:
+                answer = iteration_result.model_response.content
+            return True, answer, stop_decision.stop_signal or iteration_result.stop_signal
+
+        return False, None, None
 
     def _finalize_run(
         self,
