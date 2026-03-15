@@ -117,9 +117,14 @@ class AgentFramework:
         if hasattr(model_adapter, "_session_mode_config"):
             model_adapter._session_mode_config = self.config.model.session_mode
 
-        # Register built-in tools (filesystem, system, spawn_agent)
+        # Register built-in tools (filesystem, system, spawn_agent, memory_admin)
         from agent_framework.tools.builtin import register_all_builtins
         register_all_builtins(self._catalog)
+
+        # Bind memory context for memory_admin tools
+        from agent_framework.tools.builtin.memory_admin import set_memory_context
+        agent_id = agent.agent_config.agent_id if agent else "default"
+        set_memory_context(memory_manager, agent_id)
 
         # Tool registry
         self._registry = ToolRegistry()
@@ -396,8 +401,21 @@ class AgentFramework:
             return []
         return await self._mcp_manager.list_resource_templates(server_id)
 
+    # ── Admin Plane API ────────────────────────────────────────
+    #
+    # These methods are ADMIN-PLANE interfaces for the host application.
+    # They bypass ToolExecutor intentionally — they are NOT part of the
+    # Agent capability plane.
+    #
+    # Agent/LLM capability MUST go through ToolExecutor.execute() which
+    # enforces: capability policy, confirmation, error envelope, audit.
+    #
+    # Do NOT add new Agent-facing capabilities here. Register them as
+    # @tool functions in tools/builtin/ instead.
+    # ──────────────────────────────────────────────────────────
+
     def list_memories(self, user_id: str | None = None) -> list:
-        """List saved memories for the current agent."""
+        """[Admin] List saved memories for the current agent."""
         if not self._setup_done:
             self.setup()
         return self._deps.memory_manager.list_memories(self._agent.agent_id, user_id)

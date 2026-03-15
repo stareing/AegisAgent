@@ -31,6 +31,9 @@ def register_all_builtins(catalog: GlobalToolCatalog) -> int:
     from agent_framework.tools.builtin.web import web_fetch
     from agent_framework.tools.builtin.task_manager import todo_write, todo_read
     from agent_framework.tools.builtin.think import think
+    from agent_framework.tools.builtin.memory_admin import (
+        list_memories, forget_memory, clear_memories,
+    )
     from agent_framework.tools.builtin_skills import invoke_skill
 
     builtins = [
@@ -53,6 +56,8 @@ def register_all_builtins(catalog: GlobalToolCatalog) -> int:
         spawn_agent, check_spawn_result,
         # Skills
         invoke_skill,
+        # Memory admin (not exposed to Agent by default — requires capability policy)
+        list_memories, forget_memory, clear_memories,
     ]
     count = 0
     for func in builtins:

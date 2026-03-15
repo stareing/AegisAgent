@@ -34,11 +34,25 @@ logger = get_logger(__name__)
 class ToolExecutor:
     """Executes tool calls with validation, routing, and error handling.
 
-    Routing rules (section 10.5):
-    - local -> local function call
-    - mcp -> MCPClientManager.call_mcp_tool()
-    - a2a -> DelegationExecutor.delegate_to_a2a()
-    - subagent -> DelegationExecutor.delegate_to_subagent()
+    CAPABILITY PLANE — sole execution entry point for Agent-facing tools.
+
+    All external capabilities (local, MCP, A2A, subagent, memory_admin)
+    MUST be invoked through execute() or batch_execute(). This ensures:
+    - Capability policy enforcement (is_tool_allowed)
+    - Confirmation handler (require_confirm)
+    - Unified error envelope (ToolResult + ToolExecutionError)
+    - Execution metadata (ToolExecutionMeta with timing/source)
+    - Audit trail (structlog events)
+
+    Direct calls to DelegationExecutor, MCPClientManager, or MemoryManager
+    from the Agent run chain are PROHIBITED — they bypass security and audit.
+    Admin-plane methods on AgentFramework (entry.py) are the only exception.
+
+    Routing rules:
+    - local    -> _route_local (direct function call)
+    - mcp      -> _route_mcp (MCPClientManager.call_mcp_tool)
+    - a2a      -> _route_a2a (DelegationExecutor.delegate_to_a2a)
+    - subagent -> _route_subagent (_subagent_spawn / _subagent_collect)
     """
 
     def __init__(

@@ -501,6 +501,18 @@ async def _cmd_help(fw: AgentFramework, mock: InteractiveMockModel | None, state
     print(f"  {_dim('直接输入文本与 Agent 对话。所有命令均以 / 开头。')}")
 
 
+async def _execute_tool(fw: AgentFramework, tool_name: str, arguments: dict) -> Any:
+    """Route a CLI command through ToolExecutor.execute() for unified execution."""
+    from agent_framework.models.tool import ToolResult
+    if not fw._deps or not fw._deps.tool_executor:
+        return ToolResult(tool_call_id="cli", tool_name=tool_name, success=False,
+                          output="Framework not initialized")
+    import uuid
+    req = ToolCallRequest(id=f"cli_{uuid.uuid4().hex[:8]}", function_name=tool_name, arguments=arguments)
+    result, _meta = await fw._deps.tool_executor.execute(req)
+    return result
+
+
 @_register_cmd("exit", "退出程序", category="通用")
 async def _cmd_exit(fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str) -> None:
     return
@@ -557,20 +569,20 @@ async def _cmd_skills(fw: AgentFramework, mock: InteractiveMockModel | None, sta
 
 @_register_cmd("memories", "查看已保存的记忆", category="查看")
 async def _cmd_memories(fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str) -> None:
-    memory_manager = fw._deps.memory_manager if fw._deps else None
-    if not memory_manager:
+    result = await _execute_tool(fw, "list_memories", {"user_id": state.user_id})
+    if not result.success:
         print(f"    {_dim('(记忆系统未初始化)')}")
         return
-    agent_id = fw._agent.agent_id if fw._agent else ""
-    records = memory_manager.list_memories(agent_id, state.user_id)
+    records = result.output if isinstance(result.output, list) else []
     print(f"\n  {_bold('已保存记忆')} ({len(records)}):\n")
     for index, record in enumerate(records):
-        kind = _cyan(f"[{record.kind.value}]")
-        pinned = _yellow(" [pinned]") if record.pinned else ""
-        active = "" if record.active else _dim(" (inactive)")
-        print(f"    {_dim(f'#{index}')} {kind} {record.title}{pinned}{active}")
-        if record.content:
-            print(f"       {_dim(record.content[:80])}")
+        kind = _cyan(f"[{record.get('kind', '')}]")
+        pinned = _yellow(" [pinned]") if record.get("pinned") else ""
+        active = "" if record.get("active", True) else _dim(" (inactive)")
+        print(f"    {_dim(f'#{index}')} {kind} {record.get('title', '')}{pinned}{active}")
+        content = record.get("content", "")
+        if content:
+            print(f"       {_dim(content[:80])}")
     if not records:
         print(f"    {_dim('(无记忆)')}")
 
@@ -892,7 +904,8 @@ async def _cmd_skill_rm(fw: AgentFramework, mock: InteractiveMockModel | None, s
 
 @_register_cmd("memory-clear", "清空所有记忆", category="记忆")
 async def _cmd_memory_clear(fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str) -> None:
-    print(f"  {_green(f'已清除 {fw.clear_memories()} 条记忆')}")
+    result = await _execute_tool(fw, "clear_memories", {"user_id": state.user_id})
+    print(f"  {_green(result.output if result.success else '清除失败')}")
 
 
 @_register_cmd("memory-toggle", "开关记忆系统", usage="/memory-toggle on|off", category="记忆")
