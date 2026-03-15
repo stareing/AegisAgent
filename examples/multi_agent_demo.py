@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from agent_framework.entry import AgentFramework
 from agent_framework.infra.config import load_config
-from agent_framework.models.message import Message, ToolCallRequest
+from agent_framework.models.message import ToolCallRequest
 
 
 async def demo_subagent_sync(fw: AgentFramework) -> None:
@@ -160,8 +160,8 @@ async def main() -> None:
 
     # Use mock model if no config provided
     if args.config is None:
-        from agent_framework.adapters.model.mock import MockModelAdapter
-        fw._deps.model_adapter = MockModelAdapter()
+        from agent_framework.terminal_runtime import InteractiveMockModel
+        fw._deps.model_adapter = InteractiveMockModel()
 
     print("Aegis Multi-Agent Demo")
     print(f"Tools: {len(fw._registry.list_tools())}")
