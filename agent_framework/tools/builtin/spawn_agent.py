@@ -33,7 +33,7 @@ async def spawn_agent(
     memory_scope: str = "ISOLATED",
     token_budget: int = 4096,
     max_iterations: int = 10,
-    deadline_ms: int = 60000,
+    deadline_ms: int = 0,
     wait: bool = True,
 ) -> dict:
     """Spawn a sub-agent to handle a specific sub-task.

@@ -318,7 +318,7 @@ class ToolExecutor:
             memory_scope=MemoryScope(scope_str) if scope_str in MemoryScope.__members__ else MemoryScope.ISOLATED,
             token_budget=int(args.get("token_budget", 4096)),
             max_iterations=int(args.get("max_iterations", 10)),
-            deadline_ms=int(args.get("deadline_ms", 60000)),
+            deadline_ms=int(args.get("deadline_ms", 0)),
         )
         if spec.context_seed is None:
             spec.context_seed = ContextBuilder().build_spawn_seed(

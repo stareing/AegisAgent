@@ -158,8 +158,9 @@ class SubAgentScheduler:
             inner = asyncio.ensure_future(coro)
             try:
                 async with self._semaphore:
+                    timeout = deadline_ms / 1000.0 if deadline_ms > 0 else None
                     done, _ = await asyncio.wait(
-                        {inner}, timeout=deadline_ms / 1000.0
+                        {inner}, timeout=timeout
                     )
                     if inner in done:
                         if inner.cancelled():
