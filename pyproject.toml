@@ -3,6 +3,7 @@ name = "agent-framework"
 version = "0.1.0"
 description = "AI Agent Framework - offline-first, extensible agent runtime"
 requires-python = ">=3.11"
+license = {file = "LICENSE"}
 dependencies = [
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
