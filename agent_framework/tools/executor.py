@@ -277,7 +277,9 @@ class ToolExecutor:
             task_input=str(args.get("task_input", "")),
             skill_id=args.get("skill_id"),
         )
-        return result.final_answer if result.success else result.error
+        # Unified delegation summary — same protocol as local subagent
+        from agent_framework.tools.delegation import DelegationExecutor
+        return DelegationExecutor.summarize_result(result).model_dump()
 
     async def _route_subagent(self, entry: ToolEntry, args: dict) -> Any:
         if self._delegation is None:

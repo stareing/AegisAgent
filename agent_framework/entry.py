@@ -219,6 +219,7 @@ class AgentFramework:
                 parent_deps=self._deps,
                 max_concurrent=self.config.subagent.max_concurrent_sub_agents,
                 max_per_run=self.config.subagent.max_sub_agents_per_run,
+                max_spawn_depth=self.config.subagent.max_spawn_depth,
             )
             self._deps.sub_agent_runtime = sub_runtime
             delegation_executor._sub_agent_runtime = sub_runtime

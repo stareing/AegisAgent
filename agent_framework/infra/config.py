@@ -95,6 +95,7 @@ class SubAgentConfig(BaseModel):
     default_deadline_ms: int = 60000
     default_max_iterations: int = 10
     allow_recursive_spawn: bool = False
+    max_spawn_depth: int = 1
     execution_mode: str = "progressive"  # "parallel" | "progressive"
 
 

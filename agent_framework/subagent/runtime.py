@@ -48,6 +48,7 @@ class SubAgentRuntime:
         coordinator: RunCoordinator | None = None,
         max_concurrent: int = 3,
         max_per_run: int = 5,
+        max_spawn_depth: int = 1,
     ) -> None:
         self._factory = SubAgentFactory(parent_deps)
         self._scheduler = SubAgentScheduler(
@@ -56,6 +57,8 @@ class SubAgentRuntime:
         )
         self._coordinator = coordinator
         self._parent_deps = parent_deps
+        self._max_spawn_depth = max_spawn_depth
+        self._current_depth: int = 0
         # active_children truth source — only SubAgentRuntime maintains this
         self._active: dict[str, SubAgentHandle] = {}  # spawn_id -> handle
 
@@ -78,6 +81,13 @@ class SubAgentRuntime:
             memory_scope=spec.memory_scope.value if hasattr(spec.memory_scope, "value") else str(spec.memory_scope),
             deadline_ms=spec.deadline_ms,
         )
+
+        # Depth guard: enforce max_spawn_depth
+        if self._max_spawn_depth > 0 and self._current_depth >= self._max_spawn_depth:
+            raise RuntimeError(
+                f"Spawn depth limit reached ({self._current_depth}/{self._max_spawn_depth}). "
+                "Cannot spawn further sub-agents."
+            )
 
         # Allocate task record via scheduler (task_id from scheduler only)
         task_record = self._scheduler.allocate_task_id(
