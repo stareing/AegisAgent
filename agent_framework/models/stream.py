@@ -28,10 +28,14 @@ class StreamEventType(str, Enum):
     DONE = "done"
     ERROR = "error"
     ASSISTANT_TOOL_CALLS = "assistant_tool_calls"
-    # Progressive sub-agent events (transient UI — never enter SessionState)
-    SUBAGENT_START = "subagent_start"
-    SUBAGENT_DONE = "subagent_done"
+    # Progressive tool-completion events (transient UI — never enter SessionState)
+    # Fired for every tool in progressive mode, not just spawn_agent.
+    PROGRESSIVE_START = "progressive_start"
+    PROGRESSIVE_DONE = "progressive_done"
     PROGRESSIVE_RESPONSE = "progressive_response"
+    # Backward-compatible aliases — existing consumers that check SUBAGENT_* still work
+    SUBAGENT_START = "progressive_start"
+    SUBAGENT_DONE = "progressive_done"
 
 
 class StreamEvent(BaseModel):
@@ -47,8 +51,8 @@ class StreamEvent(BaseModel):
             DONE:                 {"result": AgentRunResult}
             ERROR:                {"error": str, "error_type": str}
             ASSISTANT_TOOL_CALLS: {"content": str | None, "tool_calls": list[ToolCallRequest]}
-            SUBAGENT_START:       {"tool_call_id": str, "task_input": str, "index": int, "total": int}
-            SUBAGENT_DONE:        {"tool_call_id": str, "tool_name": str, "task_input": str, "success": bool, "output": str, "index": int, "total": int}
+            PROGRESSIVE_START:    {"tool_call_id": str, "tool_name": str, "description": str, "index": int, "total": int}
+            PROGRESSIVE_DONE:     {"tool_call_id": str, "tool_name": str, "description": str, "success": bool, "output": str, "index": int, "total": int}
             PROGRESSIVE_RESPONSE: {"text": str, "index": int, "total": int}
     """
 

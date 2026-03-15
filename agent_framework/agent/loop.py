@@ -427,7 +427,7 @@ class AgentLoop:
                 and hasattr(type(loop_deps.tool_executor), "batch_execute_progressive")
             )
 
-            # Emit start events — SUBAGENT_START for spawn_agent in progressive mode
+            # Emit start events — PROGRESSIVE_START for all tools in progressive mode
             for ti, tc in enumerate(model_response.tool_calls):
                 yield StreamEvent(
                     type=StreamEventType.TOOL_CALL_START,
@@ -437,11 +437,12 @@ class AgentLoop:
                         "arguments": tc.arguments,
                     },
                 )
-                if is_progressive and tc.function_name == "spawn_agent":
-                    task_input = str(tc.arguments.get("task_input", ""))[:100]
+                if is_progressive:
+                    description = self._progressive_tool_description(tc)
                     yield StreamEvent(
-                        type=StreamEventType.SUBAGENT_START,
-                        data={"tool_call_id": tc.id, "task_input": task_input,
+                        type=StreamEventType.PROGRESSIVE_START,
+                        data={"tool_call_id": tc.id, "tool_name": tc.function_name,
+                              "description": description,
                               "index": ti + 1, "total": total_tools},
                     )
 
@@ -467,20 +468,19 @@ class AgentLoop:
                         },
                     )
 
-                    # SUBAGENT_DONE — immediate, same moment as tool done
-                    if result.tool_name == "spawn_agent":
-                        task_input = ""
-                        for tc in model_response.tool_calls:
-                            if tc.id == result.tool_call_id:
-                                task_input = str(tc.arguments.get("task_input", ""))[:100]
-                                break
-                        yield StreamEvent(
-                            type=StreamEventType.SUBAGENT_DONE,
-                            data={"tool_call_id": result.tool_call_id, "tool_name": result.tool_name,
-                                  "task_input": task_input,
-                                  "success": result.success, "output": output_str[:200],
-                                  "index": completed, "total": total_tools},
-                        )
+                    # PROGRESSIVE_DONE — immediate, same moment as tool done
+                    description = ""
+                    for tc in model_response.tool_calls:
+                        if tc.id == result.tool_call_id:
+                            description = self._progressive_tool_description(tc)
+                            break
+                    yield StreamEvent(
+                        type=StreamEventType.PROGRESSIVE_DONE,
+                        data={"tool_call_id": result.tool_call_id, "tool_name": result.tool_name,
+                              "description": description,
+                              "success": result.success, "output": output_str[:200],
+                              "index": completed, "total": total_tools},
+                    )
             else:
                 # Non-progressive: batch execute, then emit all DONE events
                 tool_results, tool_metas = await self._dispatch_tool_calls(
@@ -980,6 +980,23 @@ class AgentLoop:
                     execution_time_ms=meta.execution_time_ms,
                 )
                 yield result, meta
+
+    @staticmethod
+    def _progressive_tool_description(tc: ToolCallRequest) -> str:
+        """Extract a human-readable description for progressive UI display."""
+        if tc.function_name == "spawn_agent":
+            return str(tc.arguments.get("task_input", ""))[:100]
+        # For other tools: tool_name + key argument summary
+        args = tc.arguments or {}
+        if not args:
+            return tc.function_name
+        # Pick the first string-valued argument as summary
+        for key in ("query", "input", "text", "command", "path", "url", "name", "task"):
+            if key in args:
+                return f"{tc.function_name}({str(args[key])[:60]})"
+        # Fallback: first arg value
+        first_key = next(iter(args))
+        return f"{tc.function_name}({first_key}={str(args[first_key])[:40]})"
 
     def _handle_iteration_error(
         self,

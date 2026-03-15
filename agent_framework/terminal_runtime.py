@@ -1318,7 +1318,7 @@ async def _execute_with_progressive(
 
     result = None
     has_progressive = False
-    subagent_tool_call_ids: set[str] = set()
+    progressive_tool_call_ids: set[str] = set()
 
     async for event in fw.run_stream(
         user_input,
@@ -1334,8 +1334,8 @@ async def _execute_with_progressive(
 
         elif event.type == StreamEventType.TOOL_CALL_DONE:
             tool_call_id = str(event.data.get("tool_call_id", ""))
-            if tool_call_id in subagent_tool_call_ids:
-                pass  # Suppress — SUBAGENT_DONE handles display
+            if tool_call_id in progressive_tool_call_ids:
+                pass  # Suppress — PROGRESSIVE_DONE handles display
             else:
                 success = event.data.get("success", False)
                 marker = _green(" [ok]") if success else _red(" [fail]")
@@ -1346,23 +1346,27 @@ async def _execute_with_progressive(
             if idx > 0:
                 print(f"\n  {_dim(f'--- iter #{idx + 1}')}")
 
-        elif event.type == StreamEventType.SUBAGENT_START:
+        elif event.type == StreamEventType.PROGRESSIVE_START:
             tool_call_id = str(event.data.get("tool_call_id", ""))
             if tool_call_id:
-                subagent_tool_call_ids.add(tool_call_id)
+                progressive_tool_call_ids.add(tool_call_id)
             idx = event.data.get("index", 0)
             total = event.data.get("total", 0)
-            task_input = event.data.get("task_input", "")[:60]
-            print(f"  {_dim(f'[subagent {idx}/{total}]')} {_yellow('启动:')} {task_input}")
+            tool_name = event.data.get("tool_name", "")
+            description = event.data.get("description", "")[:60]
+            tag = "subagent" if tool_name == "spawn_agent" else "tool"
+            print(f"  {_dim(f'[{tag} {idx}/{total}]')} {_yellow('启动:')} {description}")
             has_progressive = True
 
-        elif event.type == StreamEventType.SUBAGENT_DONE:
+        elif event.type == StreamEventType.PROGRESSIVE_DONE:
             idx = event.data.get("index", 0)
             total = event.data.get("total", 0)
+            tool_name = event.data.get("tool_name", "")
             success = event.data.get("success", False)
             output = event.data.get("output", "")[:80]
             status = _green("完成") if success else _red("失败")
-            print(f"  {_dim(f'[subagent {idx}/{total}]')} {status}: {output}")
+            tag = "subagent" if tool_name == "spawn_agent" else "tool"
+            print(f"  {_dim(f'[{tag} {idx}/{total}]')} {status}: {output}")
 
         elif event.type == StreamEventType.PROGRESSIVE_RESPONSE:
             text = event.data.get("text", "")

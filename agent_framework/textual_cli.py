@@ -33,8 +33,8 @@ from textual.widgets import (
     Label,
     ListItem,
     ListView,
+    RichLog,
     Static,
-    TextArea,
 )
 from textual.worker import Worker, WorkerState
 
@@ -245,11 +245,12 @@ class CommandPaletteScreen(ModalScreen[str | None]):
         if command_keys == self._last_commands:
             return
         self._last_commands = command_keys
-        lv.clear()
-        for e in filtered:
-            lv.append(_CmdItem(e))
-        if filtered:
-            lv.index = 0
+        with self.app.batch_update():
+            lv.clear()
+            for e in filtered:
+                lv.append(_CmdItem(e))
+            if filtered:
+                lv.index = 0
 
 
 class _CmdItem(ListItem):
@@ -294,6 +295,7 @@ class AegisAgentApp(App[None]):
         Binding("pagedown", "scroll_chat_down_page", show=False, priority=True),
         Binding("ctrl+up", "scroll_chat_up", show=False, priority=True),
         Binding("ctrl+down", "scroll_chat_down", show=False, priority=True),
+        Binding("ctrl+c", "copy_chat", show=False, priority=True),
     ]
 
     DEFAULT_CSS = f"""
@@ -350,28 +352,24 @@ class AegisAgentApp(App[None]):
         self._cancel_event: asyncio.Event | None = None
         self._status_timer: Any = None
         self._header: AegisHeader | None = None
-        self._chat: TextArea | None = None
+        self._chat: RichLog | None = None
         self._prompt: Input | None = None
         self._busy_line: Static | None = None
         self._follow_output = True
-        self._chat_end_location: tuple[int, int] = (0, 0)
-        self._chat_has_content = False
-        self._chat_line_count = 0
+        self._line_buffer: str = ""
+        self._text_buffer: list[str] = []
         self._pending_updates: list[tuple[str, bool]] = []
         self._flush_pending = False
 
     def compose(self) -> ComposeResult:
         yield AegisHeader(id="hdr")
-        yield TextArea(
-            "",
+        yield RichLog(
             id="chat",
-            read_only=True,
-            show_line_numbers=False,
-            show_cursor=False,
-            soft_wrap=True,
-            compact=True,
-            highlight_cursor_line=False,
-            max_checkpoints=0,
+            wrap=True,
+            markup=False,
+            highlight=False,
+            auto_scroll=True,
+            max_lines=_MAX_CHAT_LINES,
         )
         yield Static("", id="busy-line")
         with Horizontal(id="input-bar"):
@@ -385,27 +383,14 @@ class AegisAgentApp(App[None]):
         from pathlib import Path
         self._project_id = Path.cwd().name
         self._header = self.query_one("#hdr", AegisHeader)
-        self._chat = self.query_one("#chat", TextArea)
+        self._chat = self.query_one("#chat", RichLog)
         self._prompt = self.query_one("#prompt", Input)
         self._busy_line = self.query_one("#busy-line", Static)
         self._prompt.focus()
-        # 从 DB 恢复最近一次会话历史
-        if self._fw._memory_store:
-            loaded = self._state.load_from_db(self._fw._memory_store, self._project_id)
-            if loaded:
-                self._append_chat(f"[已恢复 {loaded} 条历史消息 (conv: {self._state.conversation_id[:8]}...)]")
-                summary = self._state.render_history_summary()
-                if summary:
-                    self._append_chat(_strip_ansi(summary))
-        else:
-            self._state.conversation_id = str(uuid.uuid4())
-        # 异步连接 MCP/A2A
-        self.call_later(self._setup_protocols)
+        self._state.conversation_id = str(uuid.uuid4()) # Placeholder
 
         hdr = self._header
         hdr.model_name = "Mock" if self._mock else self._fw.config.model.default_model_name
-        hdr.tool_count = len(self._fw._registry.list_tools()) if self._fw._registry else 0
-        hdr.skill_count = len(self._fw.list_skills())
         hdr.config_path = self._config_path or "-"
         hdr.focus_mode = "input"
 
@@ -416,6 +401,26 @@ class AegisAgentApp(App[None]):
                 "",
             ]
         )
+        self._set_busy(True)
+        self.run_worker(self._initialize(), group="init")
+
+    async def _initialize(self) -> None:
+        """Background worker for loading history and connecting protocols."""
+        import uuid
+        # 1. Load history from DB (IO bound)
+        if self._fw._memory_store:
+            loaded = self._state.load_from_db(self._fw._memory_store, self._project_id)
+            if loaded:
+                self._append_chat(f"[已恢复 {loaded} 条历史消息 (conv: {self._state.conversation_id[:8]}...)]")
+                summary = self._state.render_history_summary()
+                if summary:
+                    self._append_chat(_strip_ansi(summary))
+        else:
+            self._state.conversation_id = str(uuid.uuid4())
+
+        # 2. Connect protocols (MCP/A2A) (Network/IO bound)
+        from agent_framework.terminal_runtime import _setup_protocols
+        await _setup_protocols(self._fw)
 
     # ── Input ──────────────────────────────────────────
 
@@ -444,7 +449,7 @@ class AegisAgentApp(App[None]):
         prompt.value = ""
         if not text or self._busy:
             return
-        self._follow_output = True
+        self._set_follow_output(True)
         self._append_chat_block(["", _USER_PREFIX + text])
         self._set_busy(True)
         self.run_worker(self._dispatch(text), exclusive=True, group="agent")
@@ -471,7 +476,7 @@ class AegisAgentApp(App[None]):
             # Streaming output — tokens appear incrementally
             self._append_chat(_AGENT_PREFIX)
             in_tool_block = False
-            subagent_tool_call_ids: set[str] = set()
+            progressive_tool_call_ids: set[str] = set()
 
             async for event in execute_user_input_stream(
                 self._fw, self._mock, self._state, text,
@@ -493,8 +498,8 @@ class AegisAgentApp(App[None]):
 
                 elif event.type == StreamEventType.TOOL_CALL_DONE:
                     tool_call_id = str(event.data.get("tool_call_id", ""))
-                    if tool_call_id in subagent_tool_call_ids and in_tool_block:
-                        pass  # Suppress duplicate — SUBAGENT_DONE handles display
+                    if tool_call_id in progressive_tool_call_ids and in_tool_block:
+                        pass  # Suppress duplicate — PROGRESSIVE_DONE handles display
                     else:
                         success = event.data.get("success", False)
                         marker = _TOOL_OK if success else _TOOL_FAIL
@@ -518,22 +523,27 @@ class AegisAgentApp(App[None]):
                     hdr.turn_count = self._state.turn_count
                     hdr.total_tokens = self._state.total_tokens_estimate
 
-                elif event.type == StreamEventType.SUBAGENT_START:
+                elif event.type == StreamEventType.PROGRESSIVE_START:
                     tool_call_id = str(event.data.get("tool_call_id", ""))
                     if tool_call_id:
-                        subagent_tool_call_ids.add(tool_call_id)
+                        progressive_tool_call_ids.add(tool_call_id)
                     idx = event.data.get("index", 0)
                     total = event.data.get("total", 0)
-                    task_input = event.data.get("task_input", "")[:50]
-                    self._append_chat(f"\n  [subagent {idx}/{total}] 启动: {task_input}")
+                    tool_name = event.data.get("tool_name", "")
+                    description = event.data.get("description", "")[:50]
+                    # spawn_agent keeps [subagent] prefix for clarity
+                    tag = "subagent" if tool_name == "spawn_agent" else "tool"
+                    self._append_chat(f"\n  [{tag} {idx}/{total}] 启动: {description}")
 
-                elif event.type == StreamEventType.SUBAGENT_DONE:
+                elif event.type == StreamEventType.PROGRESSIVE_DONE:
                     idx = event.data.get("index", 0)
                     total = event.data.get("total", 0)
+                    tool_name = event.data.get("tool_name", "")
                     success = event.data.get("success", False)
                     output = event.data.get("output", "")[:60]
                     status = "✓" if success else "✗"
-                    self._append_chat(f"\n  [subagent {idx}/{total}] {status} {output}")
+                    tag = "subagent" if tool_name == "spawn_agent" else "tool"
+                    self._append_chat(f"\n  [{tag} {idx}/{total}] {status} {output}")
 
                 elif event.type == StreamEventType.PROGRESSIVE_RESPONSE:
                     text_resp = event.data.get("text", "")
@@ -548,6 +558,9 @@ class AegisAgentApp(App[None]):
         except Exception as exc:
             self._append_chat(f"\n{_ERR_PREFIX}{exc}")
         finally:
+            # Force-flush any remaining buffered content before turn ends
+            self._flush_updates()
+            self._flush_line_buffer()
             self._cancel_event = None
             self._set_busy(False)
 
@@ -607,9 +620,9 @@ class AegisAgentApp(App[None]):
     def action_focus_chat(self) -> None:
         assert self._chat is not None and self._header is not None
         self._chat.focus()
-        self._follow_output = False
+        self._set_follow_output(False)
         self._header.focus_mode = "chat"
-        self._show_status("Chat focused: Ctrl+C copy, mouse or PageUp/PageDown scroll")
+        self._show_status("Chat focused: Ctrl+C copy all, PageUp/PageDown scroll, Esc return")
 
     def action_scroll_chat_up_page(self) -> None:
         assert self._chat is not None
@@ -627,6 +640,19 @@ class AegisAgentApp(App[None]):
         assert self._chat is not None
         self._chat.scroll_down(animate=False)
 
+    def action_copy_chat(self) -> None:
+        """Copy chat content to system clipboard (Ctrl+C)."""
+        if not self._text_buffer:
+            self._show_status("Nothing to copy")
+            return
+        full_text = "\n".join(self._text_buffer)
+        # Append any in-progress line buffer
+        if self._line_buffer:
+            full_text += "\n" + self._line_buffer
+        self.copy_to_clipboard(full_text)
+        line_count = full_text.count("\n") + 1
+        self._show_status(f"Copied {line_count} lines to clipboard")
+
     def action_focus_prompt(self) -> None:
         if self._busy and self._cancel_event:
             self._cancel_event.set()
@@ -634,34 +660,45 @@ class AegisAgentApp(App[None]):
             self._append_chat(f"\n{_META_PREFIX}[Cancelled]")
             self._set_busy(False)
         assert self._prompt is not None and self._header is not None
-        self._follow_output = True
+        self._set_follow_output(True)
         self._prompt.focus()
         self._header.focus_mode = "input"
 
     async def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
-        if event.worker.group != "agent":
-            return
-        if event.state in (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED):
-            self._flush_updates()
-            self._set_busy(False)
-            assert self._prompt is not None and self._header is not None
-            self._prompt.focus()
-            self._header.focus_mode = "input"
-
-    async def _setup_protocols(self) -> None:
-        from agent_framework.terminal_runtime import _setup_protocols
-        await _setup_protocols(self._fw)
+        if event.worker.group == "agent":
+            if event.state in (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED):
+                self._flush_updates()
+                self._set_busy(False)
+                assert self._prompt is not None and self._header is not None
+                self._prompt.focus()
+                self._header.focus_mode = "input"
+        elif event.worker.group == "init":
+            if event.state in (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED):
+                self._set_busy(False)
+                assert self._header is not None
+                self._header.tool_count = len(self._fw._registry.list_tools()) if self._fw._registry else 0
+                self._header.skill_count = len(self._fw.list_skills())
+                if event.state == WorkerState.ERROR:
+                    self._append_chat(f"\n{_ERR_PREFIX}初始化失败: {event.worker.error}")
 
     async def on_unmount(self) -> None:
         self._flush_updates()
+        self._flush_line_buffer()
         if self._fw._memory_store:
             self._state.save_to_db(self._fw._memory_store, self._project_id)
         await self._fw.shutdown()
 
+    def _set_follow_output(self, follow: bool) -> None:
+        self._follow_output = follow
+        if self._chat is not None:
+            self._chat.auto_scroll = follow
+
     def _append_chat(self, text: str) -> None:
+        """Append text with newline semantics (each call starts a new visual segment)."""
         self._push_update(text, is_raw=False)
 
     def _append_chat_raw(self, text: str) -> None:
+        """Append text inline (tokens, markers) — no leading newline."""
         self._push_update(text, is_raw=True)
 
     def _push_update(self, text: str, is_raw: bool) -> None:
@@ -674,7 +711,7 @@ class AegisAgentApp(App[None]):
             self.set_timer(0.04, self._flush_updates)
 
     def _flush_updates(self) -> None:
-        """Process buffered chat updates in a single batch to avoid UI lag."""
+        """Batch-write buffered updates to RichLog — O(1) per write, no document rebuild."""
         self._flush_pending = False
         if not self._pending_updates or self._chat is None:
             return
@@ -682,57 +719,37 @@ class AegisAgentApp(App[None]):
         updates = self._pending_updates[:]
         self._pending_updates.clear()
 
-        full_insertion = ""
-        had_initial_content = self._chat_has_content
+        # Merge pending updates into the line buffer
         for text, is_raw in updates:
-            if not is_raw and (had_initial_content or full_insertion):
-                full_insertion += "\n" + text
+            if is_raw:
+                self._line_buffer += text
             else:
-                full_insertion += text
+                self._line_buffer += "\n" + text
 
-        if not full_insertion:
+        # Split completed lines and flush them
+        if "\n" not in self._line_buffer:
+            return  # All content is still partial — wait for next flush
+
+        parts = self._line_buffer.split("\n")
+        # Last segment is the incomplete line — keep in buffer
+        self._line_buffer = parts[-1]
+        completed_lines = parts[:-1]
+
+        if not completed_lines:
             return
 
-        with self.app.batch_update():
-            self._chat.insert(
-                full_insertion,
-                location=self._chat_end_location,
-                maintain_selection_offset=False,
-            )
-            self._chat_end_location = self._advance_location(
-                self._chat_end_location, full_insertion
-            )
-            
-            added_lines = full_insertion.count("\n")
-            if not self._chat_has_content and full_insertion:
-                added_lines += 1
-            
-            self._chat_has_content = True
-            self._chat_line_count += added_lines
-            
-            self._trim_chat_if_needed()
-            self._schedule_scroll()
+        # Write completed lines as a single block (one RichLog.write = one render)
+        block = "\n".join(completed_lines)
+        if block:
+            self._text_buffer.append(block)
+            self._chat.write(block, scroll_end=self._follow_output)
 
-    def _schedule_scroll(self) -> None:
-        """Throttle scroll_end to at most once per 50ms to avoid UI lag."""
-        if not self._follow_output:
-            return
-        now = time.monotonic()
-        last = getattr(self, "_last_scroll_time", 0.0)
-        if now - last < 0.05:
-            if not getattr(self, "_scroll_pending", False):
-                self._scroll_pending = True
-                self.set_timer(0.05, self._do_deferred_scroll)
-            return
-        self._last_scroll_time = now
-        assert self._chat is not None
-        self._chat.scroll_end(animate=False)
-
-    def _do_deferred_scroll(self) -> None:
-        self._scroll_pending = False
-        if self._follow_output and self._chat is not None:
-            self._last_scroll_time = time.monotonic()
-            self._chat.scroll_end(animate=False)
+    def _flush_line_buffer(self) -> None:
+        """Force-flush any remaining partial line (call at end of agent turn)."""
+        if self._line_buffer and self._chat is not None:
+            self._text_buffer.append(self._line_buffer)
+            self._chat.write(self._line_buffer, scroll_end=self._follow_output)
+            self._line_buffer = ""
 
     def _append_chat_block(self, lines: list[str]) -> None:
         normalized_lines = [line.replace("\r\n", "\n").replace("\r", "\n") for line in lines]
@@ -740,25 +757,10 @@ class AegisAgentApp(App[None]):
 
     def _clear_chat_view(self) -> None:
         assert self._chat is not None
-        self._chat.load_text("")
-        self._follow_output = True
-        self._chat_end_location = (0, 0)
-        self._chat_has_content = False
-        self._chat_line_count = 0
-
-    def _trim_chat_if_needed(self) -> None:
-        if self._chat_line_count <= _MAX_CHAT_LINES:
-            return
-        assert self._chat is not None
-        # Use batch_update to prevent multiple repaints during trim
-        with self.app.batch_update():
-            lines = self._chat.text.splitlines()
-            trimmed_lines = lines[-_MAX_CHAT_LINES:]
-            trimmed_text = "\n".join(trimmed_lines)
-            self._chat.load_text(trimmed_text)
-            self._chat_line_count = len(trimmed_lines)
-            self._chat_has_content = bool(trimmed_text)
-            self._chat_end_location = self._advance_location((0, 0), trimmed_text)
+        self._chat.clear()
+        self._line_buffer = ""
+        self._text_buffer.clear()
+        self._set_follow_output(True)
 
     def _show_status(self, message: str, timeout: float = 2.0) -> None:
         if self._busy:
@@ -774,17 +776,6 @@ class AegisAgentApp(App[None]):
             return
         assert self._busy_line is not None
         self._busy_line.update("")
-
-    @staticmethod
-    def _advance_location(
-        location: tuple[int, int],
-        inserted_text: str,
-    ) -> tuple[int, int]:
-        row, column = location
-        parts = inserted_text.split("\n")
-        if len(parts) == 1:
-            return row, column + len(parts[0])
-        return row + len(parts) - 1, len(parts[-1])
 
 
 def run_textual_cli(framework: Any, mock_model: Any, config_path: str | None) -> None:

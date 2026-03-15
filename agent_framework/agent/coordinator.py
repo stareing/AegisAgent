@@ -586,7 +586,7 @@ class RunCoordinator:
 
                         if (
                             progressive
-                            and item.type == StreamEventType.SUBAGENT_DONE
+                            and item.type == StreamEventType.PROGRESSIVE_DONE
                             and iteration_result is None
                         ):
                             progressive_done += 1
@@ -924,7 +924,7 @@ class RunCoordinator:
 
         Tools have already been executed in parallel by execute_iteration.
         This method projects each result individually, calls LLM after each,
-        and yields SUBAGENT_DONE / PROGRESSIVE_RESPONSE events for real-time UI.
+        and yields PROGRESSIVE_DONE / PROGRESSIVE_RESPONSE events for real-time UI.
 
         Final yield is a _ProgressiveOutcome with stop decision info.
         """
@@ -942,17 +942,19 @@ class RunCoordinator:
                 model_response.tool_calls if model_response.tool_calls else None,
             )
 
-        # Emit SUBAGENT_START for each tool
+        # Emit PROGRESSIVE_START for each tool
         for i, tr in enumerate(tool_results):
-            task_input = ""
+            description = ""
+            tool_name = tr.tool_name
             if model_response and model_response.tool_calls:
                 for tc in model_response.tool_calls:
                     if tc.id == tr.tool_call_id:
-                        task_input = str(tc.arguments.get("task_input", ""))[:100]
+                        description = self._loop._progressive_tool_description(tc)
                         break
             yield StreamEvent(
-                type=StreamEventType.SUBAGENT_START,
-                data={"tool_call_id": tr.tool_call_id, "task_input": task_input,
+                type=StreamEventType.PROGRESSIVE_START,
+                data={"tool_call_id": tr.tool_call_id, "tool_name": tool_name,
+                      "description": description,
                       "index": i + 1, "total": total},
             )
 
@@ -974,17 +976,17 @@ class RunCoordinator:
                 total=total,
             )
 
-            # Yield SUBAGENT_DONE
-            task_input = ""
+            # Yield PROGRESSIVE_DONE
+            description = ""
             if model_response and model_response.tool_calls:
                 for tc in model_response.tool_calls:
                     if tc.id == tr.tool_call_id:
-                        task_input = str(tc.arguments.get("task_input", ""))[:100]
+                        description = self._loop._progressive_tool_description(tc)
                         break
             yield StreamEvent(
-                type=StreamEventType.SUBAGENT_DONE,
+                type=StreamEventType.PROGRESSIVE_DONE,
                 data={"tool_call_id": tr.tool_call_id, "tool_name": tr.tool_name,
-                      "task_input": task_input,
+                      "description": description,
                       "success": tr.success, "output": output_str[:200],
                       "index": i + 1, "total": total},
             )

@@ -252,10 +252,18 @@ async def test_textual_dispatch_suppresses_duplicate_tool_done(monkeypatch: pyte
     app._cancel_event = None
     app._header = SimpleNamespace(turn_count=0, total_tokens=0)
     app._set_busy = lambda busy: None
+    app._chat = None
+    app._follow_output = True
+    app._line_buffer = ""
+    app._text_buffer = []
+    app._pending_updates = []
+    app._flush_pending = False
 
     captured: list[str] = []
     app._append_chat = lambda text: captured.append(text)
     app._append_chat_raw = lambda text: captured.append(text)
+    app._flush_updates = lambda: None
+    app._flush_line_buffer = lambda: None
 
     await app._dispatch("task")
 
