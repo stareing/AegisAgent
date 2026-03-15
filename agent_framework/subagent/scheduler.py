@@ -152,11 +152,23 @@ class SubAgentScheduler:
                 deadline_ms=deadline_ms,
                 parent_run_id=parent_run_id,
             )
+            # Wrap coro as a managed task for clean cancellation.
+            # Using ensure_future + wait (not wait_for) avoids Python's
+            # "coroutine was never awaited" warning on cancel/timeout.
+            inner = asyncio.ensure_future(coro)
             try:
                 async with self._semaphore:
-                    result = await asyncio.wait_for(
-                        coro, timeout=deadline_ms / 1000.0
+                    done, _ = await asyncio.wait(
+                        {inner}, timeout=deadline_ms / 1000.0
                     )
+                    if inner in done:
+                        if inner.cancelled():
+                            raise asyncio.CancelledError()
+                        if inner.exception():
+                            raise inner.exception()
+                        result = inner.result()
+                    else:
+                        raise asyncio.TimeoutError()
                 duration = int((time.monotonic() - start) * 1000)
                 result.duration_ms = duration
                 handle.status = "COMPLETED" if result.success else "FAILED"
@@ -169,6 +181,11 @@ class SubAgentScheduler:
                 )
                 return result
             except asyncio.TimeoutError:
+                inner.cancel()
+                try:
+                    await inner
+                except (asyncio.CancelledError, Exception):
+                    pass
                 duration = int((time.monotonic() - start) * 1000)
                 handle.status = "TIMEOUT"
                 if task_record:
@@ -187,6 +204,11 @@ class SubAgentScheduler:
                     duration_ms=duration,
                 )
             except asyncio.CancelledError:
+                inner.cancel()
+                try:
+                    await inner
+                except (asyncio.CancelledError, Exception):
+                    pass
                 duration = int((time.monotonic() - start) * 1000)
                 handle.status = "CANCELLED"
                 if task_record:
@@ -224,6 +246,13 @@ class SubAgentScheduler:
                 )
             finally:
                 self._tasks.pop(spawn_id, None)
+                # Ensure inner task is fully cleaned up
+                if not inner.done():
+                    inner.cancel()
+                    try:
+                        await inner
+                    except (asyncio.CancelledError, Exception):
+                        pass
 
         task = asyncio.create_task(_wrapped())
         self._tasks[spawn_id] = task

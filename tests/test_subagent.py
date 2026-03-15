@@ -382,16 +382,17 @@ class TestAsyncSpawn:
             spawn_id="s1", parent_run_id="r1", status="PENDING",
         )
 
-        async def _slow_task():
-            await asyncio.sleep(10)  # would block if awaited
+        async def _fast_task():
+            await asyncio.sleep(0.05)
             return SubAgentResult(spawn_id="s1", success=True, final_answer="done")
 
-        returned_handle = sched.submit(handle, _slow_task(), deadline_ms=60000)
-        # Must return immediately without waiting for _slow_task
+        returned_handle = sched.submit(handle, _fast_task(), deadline_ms=5000)
+        # Must return immediately without waiting for _fast_task
         assert returned_handle.spawn_id == "s1"
         assert "s1" in sched._tasks
-        # Clean up
-        await sched.cancel("s1")
+        # Clean up: await result normally (task is fast)
+        result = await sched.await_result(handle)
+        assert result.success is True
 
     @pytest.mark.asyncio
     async def test_submit_then_await_result(self):
@@ -477,7 +478,7 @@ class TestAsyncSpawn:
         runtime = SubAgentRuntime(parent_deps=mock_deps, max_concurrent=3, max_per_run=5)
 
         async def _slow_run(*args, **kwargs):
-            await asyncio.sleep(5)
+            await asyncio.sleep(2)
             return AgentRunResult(
                 run_id="child", success=True, final_answer="slow",
                 stop_signal=StopSignal(reason=StopReason.LLM_STOP),
@@ -497,7 +498,8 @@ class TestAsyncSpawn:
         )
 
         spec = SubAgentSpec(
-            parent_run_id="r1", task_input="slow task", deadline_ms=10000,
+            parent_run_id="r1", task_input="slow task",
+            deadline_ms=500,  # Short deadline — will timeout naturally
         )
 
         spawn_id = await runtime.spawn_async(spec, parent_agent=None)
@@ -506,8 +508,10 @@ class TestAsyncSpawn:
         poll = await runtime.collect_result(spawn_id, wait=False)
         assert poll is None
 
-        # Clean up
-        await runtime._scheduler.cancel(spawn_id)
+        # Wait for natural timeout (deadline_ms=500)
+        result = await runtime.collect_result(spawn_id, wait=True)
+        assert result is not None
+        assert result.success is False  # timed out
 
     @pytest.mark.asyncio
     async def test_delegation_executor_async_flow(self):
