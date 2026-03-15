@@ -187,7 +187,13 @@ async def test_execute_with_progressive_preserves_event_text_order(capsys: pytes
             )
             yield StreamEvent(type=StreamEventType.DONE, data={"result": result})
 
-    output = await _execute_with_progressive(FakeFramework(), None, ReplState(), "task")
+    import agent_framework.terminal_runtime as _rt
+    orig = _rt._NO_COLOR
+    _rt._NO_COLOR = True
+    try:
+        output = await _execute_with_progressive(FakeFramework(), None, ReplState(), "task")
+    finally:
+        _rt._NO_COLOR = orig
     captured = capsys.readouterr().out
 
     tool_pos = captured.index("[tool]")
