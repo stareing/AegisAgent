@@ -34,17 +34,22 @@ class ContextSourceProvider:
     """
 
     def collect_system_core(
-        self, agent_config: AgentConfig, runtime_info: dict | None = None
+        self,
+        agent_config: AgentConfig,
+        runtime_info: dict | None = None,
+        tool_entries: list | None = None,
     ) -> str:
         """Build the core system prompt with XML structure.
 
         Output format:
-        <system-identity>
-          Agent's base system prompt
-        </system-identity>
-        <runtime-environment>
-          OS, working directory, etc.
-        </runtime-environment>
+        <system-identity>...</system-identity>
+        <runtime-environment>...</runtime-environment>
+        <agent-capabilities>...</agent-capabilities>
+        <available-tools>
+          <local-tools>...</local-tools>
+          <mcp-tools>...</mcp-tools>
+          <a2a-tools>...</a2a-tools>
+        </available-tools>
         """
         parts = [f"<system-identity>\n{agent_config.system_prompt}\n</system-identity>"]
         if runtime_info:
@@ -97,7 +102,49 @@ class ContextSourceProvider:
                     "  </rules>\n"
                     "</investigation-protocol>"
                 )
+        # Tool catalog with source-based XML grouping
+        if tool_entries:
+            parts.append(self._format_tool_catalog(tool_entries))
+
         return "\n\n".join(parts)
+
+    @staticmethod
+    def _format_tool_catalog(tool_entries: list) -> str:
+        """Format tool entries grouped by source (local/mcp/a2a) with XML tags."""
+        groups: dict[str, list] = {}
+        for entry in tool_entries:
+            source = getattr(entry.meta, "source", "local") or "local"
+            groups.setdefault(source, []).append(entry)
+
+        lines = ["<available-tools>"]
+        source_order = ["local", "mcp", "a2a", "subagent"]
+        for source in source_order:
+            entries = groups.pop(source, [])
+            if not entries:
+                continue
+            tag = f"{source}-tools"
+            server_attr = ""
+            if source == "mcp" and entries:
+                servers = sorted({getattr(e.meta, "mcp_server_id", "") for e in entries})
+                server_attr = f' servers="{_xml_escape(",".join(servers))}"'
+            elif source == "a2a" and entries:
+                urls = sorted({getattr(e.meta, "a2a_agent_url", "") for e in entries})
+                server_attr = f' agents="{_xml_escape(",".join(urls))}"'
+            lines.append(f"  <{tag}{server_attr}>")
+            for entry in sorted(entries, key=lambda e: e.meta.name):
+                desc = _xml_escape((entry.meta.description or "")[:80])
+                lines.append(f"    <tool name=\"{_xml_escape(entry.meta.name)}\">{desc}</tool>")
+            lines.append(f"  </{tag}>")
+        # Any remaining sources
+        for source, entries in sorted(groups.items()):
+            tag = f"{source}-tools"
+            lines.append(f"  <{tag}>")
+            for entry in sorted(entries, key=lambda e: e.meta.name):
+                desc = _xml_escape((entry.meta.description or "")[:80])
+                lines.append(f"    <tool name=\"{_xml_escape(entry.meta.name)}\">{desc}</tool>")
+            lines.append(f"  </{tag}>")
+        lines.append("</available-tools>")
+        return "\n".join(lines)
 
     def collect_skill_addon(self, active_skill: Skill | None) -> str | None:
         """Get skill-specific system prompt addon, wrapped in XML."""

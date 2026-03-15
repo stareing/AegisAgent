@@ -74,7 +74,8 @@ class ContextEngineer:
         runtime_info: dict | None = context_materials.get("runtime_info")
 
         # Collect from each source
-        system_core = self._source.collect_system_core(agent_config, runtime_info)
+        tool_entries: list = context_materials.get("tool_entries", [])
+        system_core = self._source.collect_system_core(agent_config, runtime_info, tool_entries)
         skill_addon = self._skill_prompt or self._source.collect_skill_addon(active_skill)
 
         # Inject skill catalog so LLM knows which skills are available

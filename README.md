@@ -224,10 +224,71 @@ python -m agent_framework.main --config config/deepseek.json
 python -m agent_framework.main --config config/anthropic.json
 ```
 
-### Protocol Integration
-- **MCP**: Client manager for stdio/SSE/HTTP transports, auto tool discovery
-- **A2A**: Cross-machine agent RPC with unified error codes
-- **Skills**: Declarative skill definitions, trigger keywords, per-skill model overrides
+### Protocol Integration — MCP
+
+Full [Model Context Protocol](https://modelcontextprotocol.io/) client support:
+
+| Capability | API |
+|-----------|-----|
+| Tools | `call_mcp_tool()` — discover & call remote tools |
+| Resources | `list_resources()` / `read_resource(uri)` |
+| Resource Templates | `list_resource_templates()` |
+| Prompts | `list_prompts()` / `get_prompt(name, args)` |
+| Sampling | `set_sampling_callback()` — LLM requests from server |
+| Transports | stdio / SSE / streamable HTTP |
+
+Config (`config/*.json`):
+```json
+{
+  "mcp": {
+    "servers": [
+      {
+        "server_id": "my-tools",
+        "transport": "stdio",
+        "command": "python",
+        "args": ["tests/mcp_test_server.py"]
+      },
+      {
+        "server_id": "remote",
+        "transport": "sse",
+        "url": "http://localhost:8080/sse"
+      }
+    ]
+  }
+}
+```
+
+### Protocol Integration — A2A
+
+Full [Agent-to-Agent](https://google.github.io/A2A/) protocol support:
+
+| Capability | API |
+|-----------|-----|
+| Discovery | `discover_agent(url, alias)` — fetch agent card |
+| Delegation | `delegate_task(alias, input)` — send task, get result |
+| Streaming | `delegate_task_streaming(alias, input)` — stream events |
+| Task Mgmt | `get_task()` / `cancel_task()` / `resubscribe()` |
+| Server | `build_a2a_server()` — expose local agent as A2A server |
+
+Config (`config/*.json`):
+```json
+{
+  "a2a": {
+    "known_agents": [
+      {"url": "http://localhost:9100", "alias": "echo"}
+    ]
+  }
+}
+```
+
+Expose local agent as A2A server:
+```python
+app = framework.build_a2a_server(name="my-agent", port=9000)
+uvicorn.run(app, host="0.0.0.0", port=9000)
+```
+
+### Skills
+- Declarative skill definitions, trigger keywords, per-skill model overrides
 
 ---
 

@@ -1286,19 +1286,24 @@ async def run_classic_repl(fw: AgentFramework, mock_model: InteractiveMockModel 
     from pathlib import Path
     project_id = Path.cwd().name
     state = ReplState()
-    # 从 DB 恢复最近一次会话历史，或新建 conversation_id
+
+    # 1) 连接 MCP/A2A（在 banner 之前，工具数需要反映在 banner 中）
+    await _setup_protocols(fw)
+
+    # 2) Banner
+    print(render_banner(mock_model is not None, None, fw))
+
+    # 3) 恢复历史（banner 之后显示，避免与 banner 重叠）
     if fw._memory_store:
         loaded = state.load_from_db(fw._memory_store, project_id)
         if loaded:
-            print(f"  {_dim(f'已恢复 {loaded} 条历史消息 (project: {project_id}, conv: {state.conversation_id[:8]}...)')}")
+            print(f"  {_dim(f'已恢复 {loaded} 条历史消息 (conv: {state.conversation_id[:8]}...)')}")
             summary = state.render_history_summary()
             if summary:
                 print(summary)
+            print()
     else:
         state.conversation_id = str(uuid.uuid4())
-    # 连接 MCP/A2A（如果配置了）
-    await _setup_protocols(fw)
-    print(render_banner(mock_model is not None, None, fw))
     while True:
         try:
             user_input = input(f"{_bold(_green('> '))}").strip()

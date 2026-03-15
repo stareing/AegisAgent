@@ -773,6 +773,7 @@ class RunCoordinator:
             "skill_descriptions": skill_descriptions,
             "stateful_session": adapter_stateful,
             "model_adapter": deps.model_adapter,
+            "tool_entries": deps.tool_registry.list_tools() if deps.tool_registry else [],
         }
 
         # Build LLM context

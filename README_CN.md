@@ -239,10 +239,68 @@ skills/
 - **硬退出守卫**：spawn 后 3 轮无新 spawn 则强制停止（防 LLM 空转）
 - **子 agent 清理**：run 退出时自动 cancel 所有活跃子 agent
 
-### 协议集成
+### 协议集成 — MCP
 
-- **MCP**：客户端管理器，支持 stdio/SSE/HTTP 传输，自动发现工具
-- **A2A**：跨机器 Agent RPC，统一错误码
+完整 [Model Context Protocol](https://modelcontextprotocol.io/) 客户端支持：
+
+| 能力 | API |
+|------|-----|
+| 工具 | `call_mcp_tool()` — 发现并调用远程工具 |
+| 资源 | `list_resources()` / `read_resource(uri)` |
+| 资源模板 | `list_resource_templates()` |
+| 提示词 | `list_prompts()` / `get_prompt(name, args)` |
+| 采样 | `set_sampling_callback()` — server 向 client 请求 LLM |
+| 传输 | stdio / SSE / streamable HTTP |
+
+配置（`config/*.json`）：
+```json
+{
+  "mcp": {
+    "servers": [
+      {
+        "server_id": "my-tools",
+        "transport": "stdio",
+        "command": "python",
+        "args": ["tests/mcp_test_server.py"]
+      },
+      {
+        "server_id": "remote",
+        "transport": "sse",
+        "url": "http://localhost:8080/sse"
+      }
+    ]
+  }
+}
+```
+
+### 协议集成 — A2A
+
+完整 [Agent-to-Agent](https://google.github.io/A2A/) 协议支持：
+
+| 能力 | API |
+|------|-----|
+| 发现 | `discover_agent(url, alias)` — 获取 agent card |
+| 委派 | `delegate_task(alias, input)` — 发送任务，获取结果 |
+| 流式 | `delegate_task_streaming(alias, input)` — 流式事件 |
+| 任务管理 | `get_task()` / `cancel_task()` / `resubscribe()` |
+| 服务端 | `build_a2a_server()` — 将本地 agent 暴露为 A2A server |
+
+配置（`config/*.json`）：
+```json
+{
+  "a2a": {
+    "known_agents": [
+      {"url": "http://localhost:9100", "alias": "echo"}
+    ]
+  }
+}
+```
+
+将本地 agent 暴露为 A2A server：
+```python
+app = framework.build_a2a_server(name="my-agent", port=9000)
+uvicorn.run(app, host="0.0.0.0", port=9000)
+```
 
 ---
 
