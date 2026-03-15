@@ -662,9 +662,11 @@ class AegisAgentApp(App[None]):
         self._chat_has_content = True
         added_lines = max(1, len(normalized.splitlines())) if normalized else 1
         self._chat_line_count = added_lines if not had_content else self._chat_line_count + added_lines
-        self._trim_chat_if_needed()
-        if self._follow_output:
-            self._chat.scroll_end(animate=False)
+        # Defer trimming — only trim every 50 appends to avoid O(n) on every insert
+        self._append_count = getattr(self, "_append_count", 0) + 1
+        if self._append_count % 50 == 0:
+            self._trim_chat_if_needed()
+        self._schedule_scroll()
 
     def _append_chat_raw(self, text: str) -> None:
         """Append raw text without adding a leading newline.
@@ -683,9 +685,29 @@ class AegisAgentApp(App[None]):
         )
         self._chat_end_location = self._advance_location(self._chat_end_location, normalized)
         self._chat_has_content = True
-        added_lines = normalized.count("\n")
-        self._chat_line_count += added_lines
-        if self._follow_output:
+        self._chat_line_count += normalized.count("\n")
+        self._schedule_scroll()
+
+    def _schedule_scroll(self) -> None:
+        """Throttle scroll_end to at most once per 50ms to avoid UI lag."""
+        if not self._follow_output:
+            return
+        now = time.monotonic()
+        last = getattr(self, "_last_scroll_time", 0.0)
+        if now - last < 0.05:
+            # Schedule a deferred scroll if not already pending
+            if not getattr(self, "_scroll_pending", False):
+                self._scroll_pending = True
+                self.set_timer(0.05, self._do_deferred_scroll)
+            return
+        self._last_scroll_time = now
+        assert self._chat is not None
+        self._chat.scroll_end(animate=False)
+
+    def _do_deferred_scroll(self) -> None:
+        self._scroll_pending = False
+        if self._follow_output and self._chat is not None:
+            self._last_scroll_time = time.monotonic()
             self._chat.scroll_end(animate=False)
 
     def _append_chat_block(self, lines: list[str]) -> None:
@@ -704,13 +726,15 @@ class AegisAgentApp(App[None]):
         if self._chat_line_count <= _MAX_CHAT_LINES:
             return
         assert self._chat is not None
-        lines = self._chat.text.splitlines()
-        trimmed_lines = lines[-_MAX_CHAT_LINES:]
-        trimmed_text = "\n".join(trimmed_lines)
-        self._chat.load_text(trimmed_text)
-        self._chat_line_count = len(trimmed_lines)
-        self._chat_has_content = bool(trimmed_text)
-        self._chat_end_location = self._advance_location((0, 0), trimmed_text)
+        # Use batch_update to prevent multiple repaints during trim
+        with self.app.batch_update():
+            lines = self._chat.text.splitlines()
+            trimmed_lines = lines[-_MAX_CHAT_LINES:]
+            trimmed_text = "\n".join(trimmed_lines)
+            self._chat.load_text(trimmed_text)
+            self._chat_line_count = len(trimmed_lines)
+            self._chat_has_content = bool(trimmed_text)
+            self._chat_end_location = self._advance_location((0, 0), trimmed_text)
 
     def _show_status(self, message: str, timeout: float = 2.0) -> None:
         if self._busy:
