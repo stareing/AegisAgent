@@ -224,9 +224,36 @@ Features (all backends):
 ### Multi-Agent Orchestration
 - **SubAgentFactory** spawns children with 3 memory scopes: `ISOLATED` / `INHERIT_READ` / `SHARED_WRITE`
 - **Scheduler/Runtime separation**: Scheduler handles quota/queuing, Runtime handles execution/lifecycle
-- Task state machine: `QUEUED → SCHEDULED → RUNNING → COMPLETED / FAILED / CANCELLED`
+- Task state machine: `QUEUED → SCHEDULED → RUNNING → COMPLETED / FAILED / CANCELLED / TIMEOUT`
 - Recursive spawn protection (`allow_spawn_children=False` enforced)
 - Unified `SubAgentStatus` for both local and A2A delegation
+
+#### Execution Modes
+
+| Mode | Config | Behavior |
+|------|--------|----------|
+| **parallel** (default) | `"execution_mode": "parallel"` | Wait for all tools to complete, return results together |
+| **progressive** | `"execution_mode": "progressive"` | Return each result as it completes (fastest first) |
+
+```json
+{
+  "subagent": {
+    "execution_mode": "progressive"
+  }
+}
+```
+
+Progressive mode: LLM spawns 3 sub-agents → all run in parallel → as each finishes, its result is immediately returned to the LLM → LLM processes incrementally → final summary after all complete.
+
+#### Capability Plane Architecture
+
+All Agent-facing tools (local, MCP, A2A, subagent, memory_admin) route through `ToolExecutor.execute()`, which enforces:
+- **Capability policy** (`CapabilityPolicy` whitelist/blacklist)
+- **Confirmation handler** (auto-approve or CLI prompt)
+- **Error envelope** (structured `ToolResult` + `ToolExecutionError`)
+- **Audit trail** (structlog events with timing/source)
+
+Admin-plane methods on `AgentFramework` (list_memories, clear_memories, etc.) are separate — they bypass ToolExecutor intentionally for host application use.
 
 ### Model Adapters (11)
 

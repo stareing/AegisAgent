@@ -126,9 +126,36 @@ python -m agent_framework.main --config config/deepseek.json
 
 - **SubAgentFactory** 派生子 Agent，支持 3 种记忆模式：`ISOLATED`（隔离）/ `INHERIT_READ`（继承只读）/ `SHARED_WRITE`（共享写入）
 - **调度/执行分离**：Scheduler 负责配额与排队，Runtime 负责执行与生命周期
-- 任务状态机：`QUEUED → SCHEDULED → RUNNING → COMPLETED / FAILED / CANCELLED`
+- 任务状态机：`QUEUED → SCHEDULED → RUNNING → COMPLETED / FAILED / CANCELLED / TIMEOUT`
 - 递归派生保护（强制 `allow_spawn_children=False`）
 - 统一委派状态机（`SubAgentStatus`）：本地子 Agent 与 A2A 远程使用同一状态枚举
+
+#### 执行模式
+
+| 模式 | 配置 | 行为 |
+|------|------|------|
+| **parallel**（默认） | `"execution_mode": "parallel"` | 等所有工具完成后一次性返回 |
+| **progressive** | `"execution_mode": "progressive"` | 谁先完成谁先返回，LLM 逐个处理 |
+
+```json
+{
+  "subagent": {
+    "execution_mode": "progressive"
+  }
+}
+```
+
+Progressive 模式：LLM 同时派发 3 个子 Agent → 并行执行 → 每完成一个立即返回结果给 LLM → LLM 逐个汇报 → 全部完成后总结。
+
+#### 能力平面架构
+
+所有 Agent 可调用的外部能力（local / MCP / A2A / subagent / memory_admin）统一经过 `ToolExecutor.execute()`，保证：
+- **能力策略**（`CapabilityPolicy` 白名单/黑名单）
+- **确认处理**（自动放行或 CLI 确认）
+- **错误封装**（结构化 `ToolResult` + `ToolExecutionError`）
+- **审计链路**（structlog 事件含耗时/来源）
+
+`AgentFramework` 上的管理方法（list_memories、clear_memories 等）属于 Admin 平面——为宿主应用直接使用，不经过 ToolExecutor。
 
 ### 模型适配器（11 个）
 
