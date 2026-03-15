@@ -5,6 +5,7 @@ import inspect
 import time
 import uuid
 from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
 
 from agent_framework.infra.logger import get_logger
@@ -294,15 +295,19 @@ class RunCoordinator:
                     and len(iteration_result.tool_results) > 1
                     and not iteration_result.stop_signal
                 ):
-                    should_break, prog_answer, prog_stop = await self._progressive_stream(
+                    prog_should_break = False
+                    async for item in self._progressive_stream(
                         agent, deps, agent_state, session_state,
                         iteration_result, effective_config, active_skill, task,
-                    )
-                    if prog_answer:
-                        final_answer = prog_answer
-                    if prog_stop:
-                        last_stop_signal = prog_stop
-                    if should_break:
+                    ):
+                        # StreamEvents are consumed silently in non-streaming run()
+                        if isinstance(item, dict) and item.get("_progressive_outcome"):
+                            if item["final_answer"]:
+                                final_answer = item["final_answer"]
+                            if item["stop_signal"]:
+                                last_stop_signal = item["stop_signal"]
+                            prog_should_break = item["should_break"]
+                    if prog_should_break:
                         break
                     continue
 
@@ -571,15 +576,20 @@ class RunCoordinator:
                     and len(iteration_result.tool_results) > 1
                     and not iteration_result.stop_signal
                 ):
-                    should_break, prog_answer, prog_stop = await self._progressive_stream(
+                    prog_should_break = False
+                    async for item in self._progressive_stream(
                         agent, deps, agent_state, session_state,
                         iteration_result, effective_config, active_skill, task,
-                    )
-                    if prog_answer:
-                        final_answer = prog_answer
-                    if prog_stop:
-                        last_stop_signal = prog_stop
-                    if should_break:
+                    ):
+                        if isinstance(item, dict) and item.get("_progressive_outcome"):
+                            if item["final_answer"]:
+                                final_answer = item["final_answer"]
+                            if item["stop_signal"]:
+                                last_stop_signal = item["stop_signal"]
+                            prog_should_break = item["should_break"]
+                        else:
+                            yield item  # Forward StreamEvent to consumer
+                    if prog_should_break:
                         break
                     continue
 
@@ -866,18 +876,21 @@ class RunCoordinator:
         effective_config: EffectiveRunConfig,
         active_skill: Any,
         task: str,
-    ) -> tuple[bool, str | None, StopSignal | None]:
-        """Stream tool results to LLM one by one.
+    ) -> AsyncGenerator[Any, None]:
+        """Stream tool results to LLM one by one, yielding StreamEvents.
 
         Tools have already been executed in parallel by execute_iteration.
-        This method projects each result individually and calls LLM after each,
-        giving LLM a real-time progressive view.
+        This method projects each result individually, calls LLM after each,
+        and yields SUBAGENT_DONE / PROGRESSIVE_RESPONSE events for real-time UI.
 
-        Returns (should_break, final_answer, stop_signal).
+        Final yield is a _ProgressiveOutcome with stop decision info.
         """
+        from agent_framework.models.stream import StreamEvent, StreamEventType
+
         tool_results = iteration_result.tool_results
         tool_metas = iteration_result.tool_execution_meta
         model_response = iteration_result.model_response
+        total = len(tool_results)
 
         # Step 1: Project the assistant message (with all tool_calls) ONCE
         if model_response:
@@ -888,30 +901,44 @@ class RunCoordinator:
             )
             self._state_ctrl.append_projected_messages(session_state, [assistant_msg])
 
-        # Step 2: Feed tool results one by one via RunStateController
+        # Emit SUBAGENT_START for each tool
+        for i, tr in enumerate(tool_results):
+            task_input = ""
+            if model_response and model_response.tool_calls:
+                for tc in model_response.tool_calls:
+                    if tc.id == tr.tool_call_id:
+                        task_input = str(tc.arguments.get("task_input", ""))[:100]
+                        break
+            yield StreamEvent(
+                type=StreamEventType.SUBAGENT_START,
+                data={"tool_call_id": tr.tool_call_id, "task_input": task_input,
+                      "index": i + 1, "total": total},
+            )
+
+        # Step 2: Feed tool results one by one
         for i, (tr, tm) in enumerate(zip(tool_results, tool_metas)):
             output_str = str(tr.output) if tr.success else str(tr.error)
             self._state_ctrl.append_projected_messages(session_state, [Message(
-                role="tool",
-                content=output_str,
-                tool_call_id=tr.tool_call_id,
-                name=tr.tool_name,
+                role="tool", content=output_str,
+                tool_call_id=tr.tool_call_id, name=tr.tool_name,
             )])
 
-            is_last = (i == len(tool_results) - 1)
-
-            logger.info(
-                "progressive.tool_streamed",
-                tool_name=tr.tool_name,
-                success=tr.success,
-                index=i + 1,
-                total=len(tool_results),
-                execution_time_ms=tm.execution_time_ms,
+            # Yield SUBAGENT_DONE
+            task_input = ""
+            if model_response and model_response.tool_calls:
+                for tc in model_response.tool_calls:
+                    if tc.id == tr.tool_call_id:
+                        task_input = str(tc.arguments.get("task_input", ""))[:100]
+                        break
+            yield StreamEvent(
+                type=StreamEventType.SUBAGENT_DONE,
+                data={"tool_call_id": tr.tool_call_id, "task_input": task_input,
+                      "success": tr.success, "output": output_str[:200],
+                      "index": i + 1, "total": total},
             )
 
+            is_last = (i == total - 1)
             if not is_last:
-                # Mid-stream: call LLM so it can process this partial result
-                # and provide incremental feedback to the user
                 if hasattr(deps.tool_executor, "set_current_session_messages"):
                     deps.tool_executor.set_current_session_messages(
                         session_state.get_messages()
@@ -923,47 +950,43 @@ class RunCoordinator:
                     active_skill=active_skill,
                     task=task,
                 )
-                loop_deps = AgentLoopDeps(
-                    model_adapter=deps.model_adapter,
-                    tool_executor=deps.tool_executor,
-                )
                 try:
                     mid_response = await self._loop._call_llm(
-                        loop_deps.model_adapter,
+                        deps.model_adapter,
                         mid_request.messages,
                         mid_request.tools_schema,
                         effective_config,
                     )
-                    # Project LLM's intermediate response to session
                     if mid_response.content:
                         self._state_ctrl.append_projected_messages(session_state, [Message(
-                            role="assistant",
-                            content=mid_response.content,
+                            role="assistant", content=mid_response.content,
                         )])
-                        # Store for terminal display
                         if not hasattr(agent_state, "_progressive_responses"):
                             agent_state._progressive_responses = []
                         agent_state._progressive_responses.append(mid_response.content)
-                        logger.info(
-                            "progressive.llm_intermediate",
-                            index=i + 1,
-                            response_preview=mid_response.content[:100],
+                        yield StreamEvent(
+                            type=StreamEventType.PROGRESSIVE_RESPONSE,
+                            data={"text": mid_response.content, "index": i + 1, "total": total},
                         )
                 except Exception as e:
                     logger.warning("progressive.llm_intermediate_failed", error=str(e))
 
-        # Record the full iteration in agent_state history
+        # Record the full iteration
         self._state_ctrl.apply_iteration_result(agent_state, iteration_result)
 
-        # Check stop
+        # Yield outcome for caller
         stop_decision = agent.should_stop(iteration_result, agent_state)
+        outcome = {
+            "_progressive_outcome": True,
+            "should_break": stop_decision.should_stop,
+            "final_answer": None,
+            "stop_signal": None,
+        }
         if stop_decision.should_stop:
-            answer = None
-            if iteration_result.model_response and iteration_result.model_response.content:
-                answer = iteration_result.model_response.content
-            return True, answer, stop_decision.stop_signal or iteration_result.stop_signal
-
-        return False, None, None
+            if model_response and model_response.content:
+                outcome["final_answer"] = model_response.content
+            outcome["stop_signal"] = stop_decision.stop_signal or iteration_result.stop_signal
+        yield outcome
 
     def _finalize_run(
         self,

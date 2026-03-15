@@ -27,6 +27,10 @@ class StreamEventType(str, Enum):
     ITERATION_START = "iteration_start"
     DONE = "done"
     ERROR = "error"
+    # Progressive sub-agent events (transient UI — never enter SessionState)
+    SUBAGENT_START = "subagent_start"
+    SUBAGENT_DONE = "subagent_done"
+    PROGRESSIVE_RESPONSE = "progressive_response"
 
 
 class StreamEvent(BaseModel):
@@ -35,12 +39,15 @@ class StreamEvent(BaseModel):
     Attributes:
         type: Event classification.
         data: Payload — structure depends on type:
-            TOKEN:            {"text": str}
-            TOOL_CALL_START:  {"tool_name": str, "tool_call_id": str, "arguments": dict}
-            TOOL_CALL_DONE:   {"tool_name": str, "tool_call_id": str, "success": bool, "output": str}
-            ITERATION_START:  {"iteration_index": int}
-            DONE:             {"result": AgentRunResult}
-            ERROR:            {"error": str, "error_type": str}
+            TOKEN:                {"text": str}
+            TOOL_CALL_START:      {"tool_name": str, "tool_call_id": str, "arguments": dict}
+            TOOL_CALL_DONE:       {"tool_name": str, "tool_call_id": str, "success": bool, "output": str}
+            ITERATION_START:      {"iteration_index": int}
+            DONE:                 {"result": AgentRunResult}
+            ERROR:                {"error": str, "error_type": str}
+            SUBAGENT_START:       {"tool_call_id": str, "task_input": str, "index": int, "total": int}
+            SUBAGENT_DONE:        {"tool_call_id": str, "task_input": str, "success": bool, "output": str, "index": int, "total": int}
+            PROGRESSIVE_RESPONSE: {"text": str, "index": int, "total": int}
     """
 
     type: StreamEventType

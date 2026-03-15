@@ -507,6 +507,26 @@ class AegisAgentApp(App[None]):
                     hdr.turn_count = self._state.turn_count
                     hdr.total_tokens = self._state.total_tokens_estimate
 
+                elif event.type == StreamEventType.SUBAGENT_START:
+                    idx = event.data.get("index", 0)
+                    total = event.data.get("total", 0)
+                    task_input = event.data.get("task_input", "")[:50]
+                    self._append_chat(f"\n  [subagent {idx}/{total}] 启动: {task_input}")
+
+                elif event.type == StreamEventType.SUBAGENT_DONE:
+                    idx = event.data.get("index", 0)
+                    total = event.data.get("total", 0)
+                    success = event.data.get("success", False)
+                    output = event.data.get("output", "")[:60]
+                    status = "✓" if success else "✗"
+                    self._append_chat(f"\n  [subagent {idx}/{total}] {status} {output}")
+
+                elif event.type == StreamEventType.PROGRESSIVE_RESPONSE:
+                    text_resp = event.data.get("text", "")
+                    idx = event.data.get("index", 0)
+                    total = event.data.get("total", 0)
+                    self._append_chat(f"\n  Agent [{idx}/{total}]: {text_resp}")
+
                 elif event.type == StreamEventType.ERROR:
                     error_msg = event.data.get("error", "unknown error")
                     self._append_chat(f"\n{_ERR_PREFIX}{error_msg}")
