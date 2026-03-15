@@ -137,13 +137,14 @@ class AgentLoop:
 
         if model_response.tool_calls:
             tool_names = [tc.function_name for tc in model_response.tool_calls]
+            progressive = getattr(effective_config, "progressive_tool_results", False)
             logger.info(
                 "iteration.dispatching_tools",
                 iteration_index=idx,
                 tool_count=len(model_response.tool_calls),
                 tool_names=tool_names,
+                mode="progressive" if progressive else "parallel",
             )
-            progressive = getattr(effective_config, "progressive_tool_results", False)
             tool_results, tool_metas = await self._dispatch_tool_calls(
                 agent, loop_deps.tool_executor, model_response.tool_calls, agent_state,
                 progressive=progressive,
@@ -159,8 +160,6 @@ class AgentLoop:
                 total_time_ms=total_time,
             )
         else:
-            # Model responded with text but no stop signal and no tool calls
-            # — potential no-progress scenario
             logger.warning(
                 "iteration.no_tool_no_stop",
                 iteration_index=idx,
@@ -814,8 +813,10 @@ class AgentLoop:
             mode="progressive" if progressive else "parallel",
         )
 
-        if progressive and hasattr(type(tool_executor), "batch_execute_progressive"):
-            # Progressive: yield results as each tool completes (fastest first)
+        if progressive and len(approved) > 1 and hasattr(type(tool_executor), "batch_execute_progressive"):
+            # Progressive: all tools run in parallel, results stream back
+            # as each completes. The LLM sees tool_result messages arriving
+            # one by one in completion order within a single iteration.
             async for result, meta in tool_executor.batch_execute_progressive(approved):
                 results.append(result)
                 metas.append(meta)
@@ -826,10 +827,10 @@ class AgentLoop:
                     success=result.success,
                     execution_time_ms=meta.execution_time_ms,
                     completed_so_far=len(results),
-                    total_expected=len(approved) + len(pre_results),
+                    total=len(approved) + len(pre_results),
                 )
         else:
-            # Parallel: wait for all, return together
+            # Parallel (default) or single tool: execute all together
             results_with_meta = await tool_executor.batch_execute(approved)
             for result, meta in results_with_meta:
                 results.append(result)
