@@ -1332,9 +1332,13 @@ async def _execute_with_progressive(
             print(f"\n  {_dim('[tool]')} {_cyan(tool_name)}", end="", flush=True)
 
         elif event.type == StreamEventType.TOOL_CALL_DONE:
-            success = event.data.get("success", False)
-            marker = _green(" [ok]") if success else _red(" [fail]")
-            print(marker, flush=True)
+            tool_name = event.data.get("tool_name", "")
+            if tool_name == "spawn_agent":
+                pass  # Suppress — SUBAGENT_DONE handles display
+            else:
+                success = event.data.get("success", False)
+                marker = _green(" [ok]") if success else _red(" [fail]")
+                print(marker, flush=True)
 
         elif event.type == StreamEventType.ITERATION_START:
             idx = event.data.get("iteration_index", 0)

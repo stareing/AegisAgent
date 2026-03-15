@@ -485,9 +485,13 @@ class AegisAgentApp(App[None]):
 
                 elif event.type == StreamEventType.TOOL_CALL_DONE:
                     tool_name = event.data.get("tool_name", "?")
-                    success = event.data.get("success", False)
-                    marker = _TOOL_OK if success else _TOOL_FAIL
-                    self._append_chat_raw(f" {marker}")
+                    # In progressive mode, spawn_agent done is shown via SUBAGENT_DONE
+                    if tool_name == "spawn_agent" and in_tool_block:
+                        pass  # Suppress duplicate — SUBAGENT_DONE handles display
+                    else:
+                        success = event.data.get("success", False)
+                        marker = _TOOL_OK if success else _TOOL_FAIL
+                        self._append_chat_raw(f" {marker}")
 
                 elif event.type == StreamEventType.ITERATION_START:
                     iteration_index = event.data.get("iteration_index", 0)

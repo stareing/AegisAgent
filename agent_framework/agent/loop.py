@@ -410,7 +410,16 @@ class AgentLoop:
         tool_metas: list[ToolExecutionMeta] = []
 
         if model_response.tool_calls:
-            for tc in model_response.tool_calls:
+            progressive = getattr(effective_config, "progressive_tool_results", False)
+            total_tools = len(model_response.tool_calls)
+            is_progressive = (
+                progressive
+                and total_tools > 1
+                and hasattr(type(loop_deps.tool_executor), "batch_execute_progressive")
+            )
+
+            # Emit start events — SUBAGENT_START for spawn_agent in progressive mode
+            for ti, tc in enumerate(model_response.tool_calls):
                 yield StreamEvent(
                     type=StreamEventType.TOOL_CALL_START,
                     data={
@@ -419,21 +428,26 @@ class AgentLoop:
                         "arguments": tc.arguments,
                     },
                 )
+                if is_progressive and tc.function_name == "spawn_agent":
+                    task_input = str(tc.arguments.get("task_input", ""))[:100]
+                    yield StreamEvent(
+                        type=StreamEventType.SUBAGENT_START,
+                        data={"tool_call_id": tc.id, "task_input": task_input,
+                              "index": ti + 1, "total": total_tools},
+                    )
 
-            progressive = getattr(effective_config, "progressive_tool_results", False)
-
-            if (
-                progressive
-                and len(model_response.tool_calls) > 1
-                and hasattr(type(loop_deps.tool_executor), "batch_execute_progressive")
-            ):
-                # Progressive streaming: yield TOOL_CALL_DONE as each completes
+            if is_progressive:
+                # Progressive: yield events AS EACH TOOL COMPLETES — true real-time
+                completed = 0
                 async for result, meta in self._dispatch_progressive_stream(
                     agent, loop_deps.tool_executor, model_response.tool_calls, agent_state,
                 ):
+                    completed += 1
                     tool_results.append(result)
                     tool_metas.append(meta)
                     output_str = str(result.output)[:500] if result.output else ""
+
+                    # TOOL_CALL_DONE — immediate
                     yield StreamEvent(
                         type=StreamEventType.TOOL_CALL_DONE,
                         data={
@@ -443,6 +457,20 @@ class AgentLoop:
                             "output": output_str,
                         },
                     )
+
+                    # SUBAGENT_DONE — immediate, same moment as tool done
+                    if result.tool_name == "spawn_agent":
+                        task_input = ""
+                        for tc in model_response.tool_calls:
+                            if tc.id == result.tool_call_id:
+                                task_input = str(tc.arguments.get("task_input", ""))[:100]
+                                break
+                        yield StreamEvent(
+                            type=StreamEventType.SUBAGENT_DONE,
+                            data={"tool_call_id": result.tool_call_id, "task_input": task_input,
+                                  "success": result.success, "output": output_str[:200],
+                                  "index": completed, "total": total_tools},
+                        )
             else:
                 # Non-progressive: batch execute, then emit all DONE events
                 tool_results, tool_metas = await self._dispatch_tool_calls(
