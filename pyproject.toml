@@ -37,6 +37,11 @@ mcp = [
 a2a = [
     "a2a-python>=0.2",
 ]
+otel = [
+    "opentelemetry-api>=1.20.0",
+    "opentelemetry-sdk>=1.20.0",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.20.0",
+]
 all = [
     "litellm>=1.0",
     "openai>=1.0",

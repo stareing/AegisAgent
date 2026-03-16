@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
 
@@ -17,6 +19,10 @@ class ModelConfig(BaseModel):
     timeout_ms: int = 30000
     max_retries: int = 3
     session_mode: str = "stateless"  # "stateless" | "stateful"
+    fallback_models: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Fallback model configs tried in order when primary fails. Each dict has same fields as ModelConfig.",
+    )
 
 
 class ContextConfig(BaseModel):
@@ -71,6 +77,7 @@ class ToolConfig(BaseModel):
     confirmation_handler_type: str = "cli"
     max_concurrent_tool_calls: int = 5
     allow_parallel_tool_calls: bool = True
+    shell_enabled: bool = False  # High-risk: must be explicitly enabled
 
 
 class SubAgentConfig(BaseModel):
@@ -131,6 +138,15 @@ class LoggingConfig(BaseModel):
     level: str = "INFO"
 
 
+class TracingConfig(BaseModel):
+    """OpenTelemetry tracing configuration. Noop when disabled or SDK absent."""
+
+    enabled: bool = False
+    exporter_type: str = "otlp"  # "otlp" | "console"
+    otlp_endpoint: str = "http://localhost:4317"
+    service_name: str = "aegis-agent"
+
+
 class FrameworkConfig(BaseSettings):
     """Root framework configuration.
 
@@ -168,6 +184,7 @@ class FrameworkConfig(BaseSettings):
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     a2a: A2AConfig = Field(default_factory=A2AConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    tracing: TracingConfig = Field(default_factory=TracingConfig)
 
     model_config = {"env_prefix": "AGENT_", "env_nested_delimiter": "__"}
 

@@ -21,7 +21,7 @@ python -m agent_framework.main --config config/openai.json
 # Run demo
 python run_demo.py
 
-# Run tests (757 passing)
+# Run tests (939 passing)
 pytest tests/
 
 # Run with Textual TUI (if installed)
@@ -243,7 +243,7 @@ Features (all backends):
 }
 ```
 
-Progressive mode: LLM spawns 3 sub-agents → all run in parallel → as each finishes, its result is immediately returned to the LLM → LLM processes incrementally → final summary after all complete.
+Progressive mode works for **all parallel tool calls** (not just spawn_agent): LLM dispatches multiple tools → all run in parallel → as each finishes, its result is immediately returned to the LLM → LLM responds incrementally → final summary after all complete. In TUI, spawn_agent shows as `[subagent N/M]`, other tools as `[tool N/M]`.
 
 #### Capability Plane Architecture
 
@@ -259,7 +259,7 @@ This unified tool execution plane enforces:
 
 Admin-plane methods on `AgentFramework` (list_memories, clear_memories, etc.) are separate — they bypass ToolExecutor intentionally for host application use.
 
-### Model Adapters (11)
+### Model Adapters (11) + Fallback Chain
 
 | Adapter | Type |
 |---------|------|
@@ -273,6 +273,21 @@ Admin-plane methods on `AgentFramework` (list_memories, clear_memories, etc.) ar
 | Zhipu (智谱) | OpenAI-compatible |
 | MiniMax | OpenAI-compatible |
 | Custom | OpenAI-compatible template |
+
+All adapters have built-in exponential backoff retry (`2^attempt + random`, capped at 30s). **Fallback chain** support: when primary model retries are exhausted, automatically tries backup models in order.
+
+```json
+{
+  "model": {
+    "adapter_type": "doubao",
+    "default_model_name": "doubao-seed-2-0-pro",
+    "fallback_models": [
+      {"adapter_type": "deepseek", "default_model_name": "deepseek-chat", "api_key": "..."},
+      {"adapter_type": "openai", "default_model_name": "gpt-4o", "api_key": "..."}
+    ]
+  }
+}
+```
 
 ```bash
 # Use different models via config
@@ -346,6 +361,109 @@ uvicorn.run(app, host="0.0.0.0", port=9000)
 ### Skills
 - Declarative skill definitions, trigger keywords, per-skill model overrides
 
+### Security Sandbox
+
+- **Shell tools disabled by default**: `tools.shell_enabled: false`, must be explicitly enabled
+- **Environment variable whitelist**: child processes inherit only safe vars (`PATH`, `HOME`, `PYTHONPATH`, etc.), API keys and secrets are filtered out
+- **Command blocklist**: 26 high-risk commands (`sudo`, `curl`, `wget`, `iptables`, etc.) blocked
+- **Filesystem sandbox**: `AGENT_FS_SANDBOX_ROOTS` restricts file access scope; sensitive paths (`.env`, `.pem`, `.ssh`) auto-blocked
+- **`get_env` requires confirmation**: reading environment variables needs user approval
+
+### Observability (OpenTelemetry)
+
+Native OpenTelemetry distributed tracing. Automatically falls back to zero-cost noop when SDK is absent.
+
+```
+agent.run (run_id, agent_id, model, task)
+├── agent.iteration (iteration_index, context_messages)
+│   ├── agent.llm.call (message_count)
+│   └── agent.tool (tool_name, source, success)
+└── [success, iterations_used, total_tokens, elapsed_ms]
+```
+
+```json
+{
+  "tracing": {
+    "enabled": true,
+    "exporter_type": "console",
+    "service_name": "my-agent"
+  }
+}
+```
+
+Supports OTLP export to Jaeger / Grafana Tempo. Install optional deps: `pip install -e ".[otel]"`
+
+### Hooks & Plugins Extension System
+
+Governed extension points for the framework — hooks can observe, gate, or advise at 19 predefined lifecycle points. Plugins package hooks, tools, and agents as installable units.
+
+#### Hook Points
+
+| Category | Points | DENY allowed |
+|----------|--------|--------------|
+| **Run** | `run.start`, `run.finish`, `run.error` | No |
+| **Iteration** | `iteration.start`, `iteration.finish`, `iteration.error` | No |
+| **Tool** | `tool.pre_use`, `tool.post_use`, `tool.error` | Pre only |
+| **Delegation** | `delegation.pre`, `delegation.post`, `delegation.error` | Pre only |
+| **Memory** | `memory.pre_record`, `memory.post_record` | Pre only |
+| **Context** | `context.pre_build`, `context.post_build` | Pre only |
+| **Artifact** | `artifact.produced`, `artifact.finalize` | No |
+| **Config** | `config.loaded` | No |
+
+#### Three Hook Categories
+
+- **Command Hook**: Deterministic gate/audit (sync, serial, stable order)
+- **Prompt Hook**: Advisory via LLM-assisted suggestions (read-only)
+- **Agent Hook**: Complex logic via controlled sub-agent
+
+#### Hook Execution
+
+- Stable execution order: `priority` → `plugin_id` → `hook_id`
+- Failure policies: `ignore` / `warn` / `fail_closed`
+- Per-hook timeout enforcement (default 3s)
+- DENY only valid at deniable hook points (pre-use hooks)
+- Hooks consume DTO snapshots only — never mutable state objects
+
+#### Built-in Hooks
+
+| Hook | Point | Purpose |
+|------|-------|---------|
+| `ToolGuardHook` | `tool.pre_use` | Argument size limit, dangerous tag filtering |
+| `AuditNotifyHook` | `run.finish` / `run.error` | Structured audit records + notification callback |
+| `MemoryReviewHook` | `memory.pre_record` | Content policy (size, tags, sensitive data detection) |
+
+#### Plugin System
+
+Plugins are installable extension packages with manifest-declared capabilities:
+
+```python
+from agent_framework.plugins import PluginManifest
+
+manifest = PluginManifest(
+    plugin_id="my-plugin",
+    name="My Plugin",
+    version="1.0.0",
+    provides_hooks=True,
+    required_permissions=["register_hooks"],
+)
+```
+
+- **Lifecycle**: `DISCOVERED → VALIDATED → LOADED → ENABLED ⇄ DISABLED → UNLOADED`
+- **Permission model**: 10 declarative permissions, high-risk ones require explicit grant
+- **Conflict detection**: bidirectional conflict checking between plugins
+- **Rollback guarantee**: `enable()` failure reverts all partial registrations
+- **Dependency resolution**: validates plugin dependencies before loading
+
+```python
+# Register and use hooks
+framework.register_hook(ToolGuardHook())
+framework.register_hook(AuditNotifyHook(notify_callback=my_webhook))
+
+# Load and enable plugins
+framework.load_plugin(my_plugin)
+framework.enable_plugin("my-plugin")
+```
+
 ---
 
 ## Architecture
@@ -374,7 +492,10 @@ uvicorn.run(app, host="0.0.0.0", port=9000)
 ├─────────────────────────────────────────────────┤
 │  Protocols (MCP Client, A2A Client)             │
 ├─────────────────────────────────────────────────┤
-│  Infra (Config, Logger, EventBus, DiskStore)    │
+│  Hooks (Registry, Executor, Builtin Hooks)      │
+│  Plugins (Manifest, Loader, Lifecycle, Perms)   │
+├─────────────────────────────────────────────────┤
+│  Infra (Config, Logger, EventBus, Telemetry)    │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -392,6 +513,7 @@ uvicorn.run(app, host="0.0.0.0", port=9000)
 - **Sole write-port**: Only `RunStateController` modifies `AgentState` / `SessionState`
 - **Policy interpretation uniqueness**: ContextPolicy → ContextEngineer only, MemoryPolicy → MemoryManager only
 - **Observation-only events**: EventBus subscribers must not mutate state
+- **Hook governance**: Hooks consume DTO snapshots only, cannot bypass CommitSequencer or write core state
 - **No resume**: Interrupted runs are terminal; continuation = new run
 
 ---
@@ -405,15 +527,17 @@ agent_framework/
 ├── memory/          # Saved memory manager, SQLite store
 ├── context/         # Context engineering, compression, 5-slot builder
 ├── subagent/        # Sub-agent factory, scheduler, runtime
-├── models/          # Pydantic v2 data models
+├── hooks/           # Hook registry, executor, builtin hooks
+├── plugins/         # Plugin manifest, loader, lifecycle, permissions
+├── models/          # Pydantic v2 data models (incl. hook & plugin)
 ├── protocols/       # MCP client, A2A client
 ├── adapters/model/  # LLM adapters (11 providers)
-├── infra/           # Config, logging, event bus
+├── infra/           # Config, logging, event bus, tracing
 ├── entry.py         # Framework facade
 ├── cli.py           # CLI entry point
 └── main.py          # Interactive terminal
 config/              # Model configuration files (JSON)
-tests/               # 757 tests across 10+ files
+tests/               # 939 tests across 26 files
 ```
 
 ---
@@ -607,7 +731,7 @@ async def chat(message: str, session_id: str | None = None):
 ## Testing
 
 ```bash
-# Full suite (757 tests)
+# Full suite (866 tests)
 pytest tests/
 
 # Architecture guard tests only
@@ -620,10 +744,11 @@ pytest tests/test_subagent.py -v
 ```
 
 Test categories:
-- **Unit tests**: Agent, tools, memory, context, subagent modules
+- **Unit tests**: Agent, tools, memory, context, subagent modules (~350)
 - **Red-line tests**: 106 architectural boundary assertions (v2.5.2 – v2.6.5)
 - **Architecture guard**: 43 anti-bypass scans + fault injection + data flow invariants
-- **Integration tests**: Full run lifecycle, model adapter smoke tests
+- **Security tests**: Sandbox whitelist, env filtering, concurrency locks (~20)
+- **Integration tests**: Full run lifecycle, adapters, fallback, OTel (~350)
 
 ---
 
@@ -637,7 +762,8 @@ Test categories:
 | Logging | structlog |
 | Events | blinker |
 | LLM routing | litellm |
-| Persistence | SQLite |
+| Persistence | SQLite (WAL mode) |
+| Distributed tracing | OpenTelemetry (optional) |
 | Protocols | MCP SDK, A2A SDK |
 | Testing | pytest, pytest-asyncio |
 
@@ -654,6 +780,9 @@ pip install -e ".[dev]"
 
 # With specific adapters
 pip install -e ".[openai,anthropic,mcp]"
+
+# OpenTelemetry tracing
+pip install -e ".[otel]"
 
 # Everything
 pip install -e ".[all]"

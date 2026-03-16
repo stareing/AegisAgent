@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+from agent_framework.models.hook import HookContext, HookPoint
+from agent_framework.hooks.errors import HookDeniedError
 from agent_framework.models.memory import (
     CommitDecision,
     MemoryCandidate,
@@ -40,7 +42,7 @@ class BaseMemoryManager(ABC):
     - Tool execution
     """
 
-    def __init__(self, store: MemoryStoreProtocol) -> None:
+    def __init__(self, store: MemoryStoreProtocol, hook_executor: Any = None) -> None:
         self._store = store
         self._enabled = True
         self._auto_extract = True
@@ -51,6 +53,7 @@ class BaseMemoryManager(ABC):
         self._agent_id: str | None = None
         self._user_id: str | None = None
         self._session_active = False
+        self._hook_executor = hook_executor
 
     # ------------------------------------------------------------------
     # Session lifecycle (v2.6.3 §41)
@@ -186,6 +189,14 @@ class BaseMemoryManager(ABC):
                 confidence=candidate.confidence,
             )
 
+        # MEMORY_PRE_RECORD hook
+        if not self._fire_memory_hook_sync(
+            HookPoint.MEMORY_PRE_RECORD,
+            {"content": candidate.content, "title": candidate.title,
+             "tags": list(candidate.tags), "kind": str(candidate.kind)},
+        ):
+            return None
+
         existing = self._store.list_by_user(
             self._agent_id, self._user_id, active_only=False
         )
@@ -224,6 +235,10 @@ class BaseMemoryManager(ABC):
             match.source = source_str
             match.version += 1
             self._store.update(match)
+            self._fire_memory_hook_sync(
+                HookPoint.MEMORY_POST_RECORD,
+                {"memory_id": match.memory_id, "action": "update"},
+            )
             return match.memory_id
         else:
             # Quota: max items per user check (only on INSERT, not UPDATE)
@@ -241,7 +256,12 @@ class BaseMemoryManager(ABC):
                 tags=candidate.tags,
                 source=source_str,
             )
-            return self._store.save(record)
+            memory_id = self._store.save(record)
+            self._fire_memory_hook_sync(
+                HookPoint.MEMORY_POST_RECORD,
+                {"memory_id": memory_id, "action": "insert"},
+            )
+            return memory_id
 
     def forget(self, memory_id: str) -> None:
         self._store.delete(memory_id)
@@ -283,6 +303,33 @@ class BaseMemoryManager(ABC):
 
     def set_enabled(self, enabled: bool) -> None:
         self._enabled = enabled
+
+    def _fire_memory_hook_sync(self, hook_point: HookPoint, payload: dict) -> bool:
+        """Fire a memory hook synchronously. Returns False if DENY."""
+        if self._hook_executor is None:
+            return True
+        import asyncio
+        ctx = HookContext(
+            run_id=self._run_id,
+            agent_id=self._agent_id,
+            payload=payload,
+        )
+        try:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop is not None and loop.is_running():
+                # Already in async context — cannot block here, hook is best-effort
+                return True
+            else:
+                asyncio.run(self._hook_executor.execute_chain(hook_point, ctx))
+                return True
+        except HookDeniedError:
+            return False
+        except Exception:
+            return True  # Hook failure doesn't block memory
 
     @staticmethod
     def _normalize(text: str) -> str:

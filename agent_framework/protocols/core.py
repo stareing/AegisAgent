@@ -19,6 +19,8 @@ if TYPE_CHECKING:
         AgentState, ContextPolicy, IterationResult, MemoryPolicy, MemoryQuota, Skill,
     )
     from agent_framework.models.context import ContextStats
+    from agent_framework.models.hook import HookContext, HookMeta, HookPoint, HookResult
+    from agent_framework.models.plugin import PluginManifest
     from agent_framework.models.subagent import SubAgentHandle, SubAgentResult, SubAgentSpec
 
 
@@ -243,3 +245,54 @@ class SkillRouterProtocol(Protocol):
     def get_skill(self, skill_id: str) -> Skill | None: ...
     def list_skills(self) -> list[Skill]: ...
     def get_skill_descriptions(self) -> list[dict[str, str]]: ...
+
+
+# ---------------------------------------------------------------------------
+# Hook Registry
+# ---------------------------------------------------------------------------
+@runtime_checkable
+class HookRegistryProtocol(Protocol):
+    """Central hook registration and lookup.
+
+    Hooks are framework-predefined extension points (not arbitrary callbacks).
+    Hook execution order is stable: priority → plugin_id → hook_id.
+    """
+
+    def register(self, hook: Any) -> None: ...
+    def unregister(self, hook_id: str) -> None: ...
+    def list_hooks(
+        self,
+        hook_point: HookPoint | None = None,
+        plugin_id: str | None = None,
+        enabled_only: bool = True,
+    ) -> list[HookMeta]: ...
+    def resolve_chain(self, hook_point: HookPoint) -> list[Any]: ...
+
+
+# ---------------------------------------------------------------------------
+# Hook Executor
+# ---------------------------------------------------------------------------
+@runtime_checkable
+class HookExecutorProtocol(Protocol):
+    """Executes hook chains at framework-defined extension points.
+
+    The sole entry point for running hooks. Framework components
+    call execute_chain() — they never invoke hooks directly.
+    """
+
+    async def execute_chain(
+        self,
+        hook_point: HookPoint,
+        context: HookContext,
+    ) -> list[HookResult]: ...
+
+
+# ---------------------------------------------------------------------------
+# Plugin Loader
+# ---------------------------------------------------------------------------
+@runtime_checkable
+class PluginLoaderProtocol(Protocol):
+    """Discovers and loads plugins into the registry."""
+
+    def load_plugin(self, plugin: Any) -> PluginManifest: ...
+    def discover_directory(self, plugin_dir: str) -> list[PluginManifest]: ...

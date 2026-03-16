@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from agent_framework.infra.logger import get_logger
+from agent_framework.models.hook import HookContext, HookPoint
+from agent_framework.hooks.errors import HookDeniedError
 from agent_framework.models.subagent import (
     ArtifactRef,
     DelegationErrorCode,
@@ -36,9 +38,11 @@ class DelegationExecutor:
     def __init__(
         self,
         sub_agent_runtime: SubAgentRuntimeProtocol | None = None,
+        hook_executor: Any = None,
     ) -> None:
         self._sub_agent_runtime = sub_agent_runtime
         self._a2a_adapter: Any = None
+        self._hook_executor = hook_executor
 
     async def delegate_to_subagent(
         self, spec: SubAgentSpec, parent_agent: Any
@@ -102,7 +106,48 @@ class DelegationExecutor:
             parent_agent_id=parent_id,
             task_input=spec.task_input[:80],
         )
-        return await self._sub_agent_runtime.spawn(spec, parent_agent)
+
+        # PRE_DELEGATION hook
+        if self._hook_executor is not None:
+            try:
+                await self._hook_executor.execute_chain(
+                    HookPoint.PRE_DELEGATION,
+                    HookContext(
+                        run_id=spec.parent_run_id,
+                        payload={
+                            "task_input": spec.task_input[:500],
+                            "mode": str(spec.mode.value),
+                            "memory_scope": str(spec.memory_scope.value),
+                        },
+                    ),
+                )
+            except HookDeniedError as hde:
+                return SubAgentResult(
+                    spawn_id=spec.spawn_id,
+                    success=False,
+                    error=f"PERMISSION_DENIED: Hook denied delegation: {hde}",
+                )
+
+        result = await self._sub_agent_runtime.spawn(spec, parent_agent)
+
+        # POST_DELEGATION hook
+        if self._hook_executor is not None:
+            try:
+                await self._hook_executor.execute_chain(
+                    HookPoint.POST_DELEGATION,
+                    HookContext(
+                        run_id=spec.parent_run_id,
+                        payload={
+                            "spawn_id": result.spawn_id,
+                            "success": result.success,
+                            "iterations_used": result.iterations_used,
+                        },
+                    ),
+                )
+            except Exception:
+                pass
+
+        return result
 
     async def delegate_to_subagent_async(
         self, spec: SubAgentSpec, parent_agent: Any
@@ -202,14 +247,52 @@ class DelegationExecutor:
             )
 
         try:
-            return await self._a2a_adapter.delegate_task(alias, task_input, skill_id)
+            result = await self._a2a_adapter.delegate_task(alias, task_input, skill_id)
+            # POST_DELEGATION hook for A2A
+            if self._hook_executor is not None:
+                try:
+                    await self._hook_executor.execute_chain(
+                        HookPoint.POST_DELEGATION,
+                        HookContext(
+                            payload={
+                                "spawn_id": result.spawn_id,
+                                "success": result.success,
+                                "agent_url": agent_url,
+                            },
+                        ),
+                    )
+                except Exception:
+                    pass
+            return result
         except TimeoutError:
+            # DELEGATION_ERROR hook
+            if self._hook_executor is not None:
+                try:
+                    await self._hook_executor.execute_chain(
+                        HookPoint.DELEGATION_ERROR,
+                        HookContext(
+                            payload={"agent_url": agent_url, "error": "timeout"},
+                        ),
+                    )
+                except Exception:
+                    pass
             return SubAgentResult(
                 spawn_id="",
                 success=False,
                 error=f"{DelegationErrorCode.TIMEOUT}: A2A delegation timed out for {agent_url}",
             )
         except Exception as e:
+            # DELEGATION_ERROR hook
+            if self._hook_executor is not None:
+                try:
+                    await self._hook_executor.execute_chain(
+                        HookPoint.DELEGATION_ERROR,
+                        HookContext(
+                            payload={"agent_url": agent_url, "error": str(e)},
+                        ),
+                    )
+                except Exception:
+                    pass
             return SubAgentResult(
                 spawn_id="",
                 success=False,

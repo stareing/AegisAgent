@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from agent_framework.protocols.core import (
@@ -66,3 +66,4 @@ class AgentRuntimeDeps:
     confirmation_handler: ConfirmationHandlerProtocol | None = None
     sub_agent_runtime: SubAgentRuntimeProtocol | None = None
     delegation_executor: DelegationExecutorProtocol | None = None
+    hook_executor: Any = None

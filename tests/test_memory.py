@@ -9,6 +9,8 @@ Covers:
 
 from __future__ import annotations
 
+import tempfile
+import threading
 import uuid
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
@@ -640,3 +642,53 @@ class TestMemoryQuota:
         assert mid is not None
         record = self.store.get(mid)
         assert len(record.tags) <= 2
+
+
+# =====================================================================
+# SQLite Concurrency (WAL + busy_timeout)
+# =====================================================================
+
+
+class TestSQLiteConcurrency:
+    """Verify that concurrent save + list_by_user across threads does not raise."""
+
+    THREADS = 5
+    ITERATIONS = 10
+
+    def test_concurrent_save_and_list(self):
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+            db_path = tmp.name
+
+        errors: list[Exception] = []
+
+        def worker(thread_id: int) -> None:
+            try:
+                store = SQLiteMemoryStore(db_path=db_path)
+                for i in range(self.ITERATIONS):
+                    rec = _make_record(
+                        memory_id=f"t{thread_id}_i{i}",
+                        agent_id="agent_1",
+                        user_id="user_1",
+                    )
+                    store.save(rec)
+                    store.list_by_user("agent_1", "user_1")
+                store.close()
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=worker, args=(t,))
+            for t in range(self.THREADS)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert errors == [], f"Concurrent access errors: {errors}"
+
+        # Verify all records were persisted
+        store = SQLiteMemoryStore(db_path=db_path)
+        total = store.count("agent_1", "user_1")
+        store.close()
+        assert total == self.THREADS * self.ITERATIONS

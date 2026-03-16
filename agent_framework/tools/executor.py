@@ -8,6 +8,9 @@ from typing import TYPE_CHECKING, Any, Callable
 from pydantic import ValidationError
 
 from agent_framework.infra.logger import get_logger
+from agent_framework.infra.telemetry import get_tracing_manager
+from agent_framework.models.hook import HookContext, HookPoint, HookResultAction
+from agent_framework.hooks.errors import HookDeniedError
 from agent_framework.agent.capability_policy import apply_capability_policy
 from agent_framework.models.agent import CapabilityPolicy
 from agent_framework.models.message import ToolCallRequest
@@ -63,6 +66,7 @@ class ToolExecutor:
         mcp_client_manager: Any = None,
         parent_agent_getter: Callable[[], Any | None] | None = None,
         max_concurrent: int = 5,
+        hook_executor: Any = None,
     ) -> None:
         self._registry = registry
         self._confirmation = confirmation_handler
@@ -70,6 +74,7 @@ class ToolExecutor:
         self._mcp = mcp_client_manager
         self._parent_agent_getter = parent_agent_getter
         self._max_concurrent = max_concurrent
+        self._hook_executor = hook_executor
         # Set by RunCoordinator at run start — used for parent_run_id in spawn
         self._current_run_id: str = ""
         # Set by RunCoordinator each iteration — used for child context seed.
@@ -88,6 +93,7 @@ class ToolExecutor:
     async def execute(
         self, tool_call_request: ToolCallRequest, policy: CapabilityPolicy | None = None
     ) -> tuple[ToolResult, ToolExecutionMeta]:
+        _tm = get_tracing_manager()
         start = time.monotonic()
         tool_name = tool_call_request.function_name
 
@@ -122,21 +128,106 @@ class ToolExecutor:
                 self._meta(entry, start),
             )
 
+        # PRE_TOOL_USE hook
+        _hook_exec = self._hook_executor
+        if _hook_exec is not None:
+            pre_hook_ctx = HookContext(
+                run_id=self._current_run_id or None,
+                payload={
+                    "tool_name": tool_name,
+                    "tool_call_id": tool_call_request.id or "",
+                    "arguments": dict(validated),  # copy, not reference
+                    "tool_tags": list(entry.meta.tags),
+                    "source": entry.meta.source,
+                },
+            )
+            try:
+                pre_results = await _hook_exec.execute_chain(
+                    HookPoint.PRE_TOOL_USE, pre_hook_ctx
+                )
+                # Interpret results for MODIFY / REQUEST_CONFIRMATION / EMIT_ARTIFACT
+                from agent_framework.hooks.interpreter import interpret_hook_results
+                outcome = interpret_hook_results(HookPoint.PRE_TOOL_USE, pre_results)
+
+                if outcome.needs_confirmation and self._confirmation:
+                    approved = await self._confirmation.request_confirmation(
+                        tool_name, validated,
+                        outcome.confirmation_reason,
+                    )
+                    if not approved:
+                        return self._permission_denied(tool_call_request, start)
+
+                # Apply sanitized arguments if modified
+                if "sanitized_arguments" in outcome.modifications:
+                    validated = outcome.modifications["sanitized_arguments"]
+
+            except HookDeniedError as hde:
+                logger.info("tool.hook_denied", tool_name=tool_name, reason=str(hde))
+                return self._permission_denied(tool_call_request, start)
+
         # Execute
-        try:
-            output = await self._route_execution(entry, validated)
-            output = self._sanitize_output(output, tool_name)
-            return (
-                ToolResult(
+        with _tm.span("agent.tool", attributes={
+            "tool_name": tool_name,
+            "tool_call_id": tool_call_request.id or "",
+            "source": entry.meta.source if hasattr(entry.meta, "source") else "local",
+        }) as _tool_span:
+            try:
+                output = await self._route_execution(entry, validated)
+                output = self._sanitize_output(output, tool_name)
+                _tool_span.set_attribute("success", True)
+                result = ToolResult(
                     tool_call_id=tool_call_request.id,
                     tool_name=tool_name,
                     success=True,
                     output=output,
-                ),
-                self._meta(entry, start),
-            )
-        except Exception as e:
-            return self._handle_tool_error(tool_name, e, entry, start, tool_call_id=tool_call_request.id)
+                )
+                meta = self._meta(entry, start)
+                # POST_TOOL_USE hook (best-effort, never blocks result)
+                if _hook_exec is not None:
+                    try:
+                        post_ctx = HookContext(
+                            run_id=self._current_run_id or None,
+                            payload={
+                                "tool_name": tool_name,
+                                "tool_call_id": tool_call_request.id or "",
+                                "success": True,
+                                "output_preview": str(output)[:500],
+                            },
+                        )
+                        post_results = await _hook_exec.execute_chain(
+                            HookPoint.POST_TOOL_USE, post_ctx
+                        )
+                        from agent_framework.hooks.interpreter import interpret_hook_results
+                        post_outcome = interpret_hook_results(
+                            HookPoint.POST_TOOL_USE, post_results
+                        )
+                        if post_outcome.emitted_artifacts:
+                            logger.info(
+                                "tool.post_hook_artifacts",
+                                tool_name=tool_name,
+                                artifact_count=len(post_outcome.emitted_artifacts),
+                            )
+                    except Exception:
+                        pass  # POST hooks never block
+                return result, meta
+            except Exception as e:
+                _tool_span.set_attribute("success", False)
+                _tool_span.record_exception(e)
+                # TOOL_ERROR hook (best-effort)
+                if _hook_exec is not None:
+                    try:
+                        err_ctx = HookContext(
+                            run_id=self._current_run_id or None,
+                            payload={
+                                "tool_name": tool_name,
+                                "error_type": type(e).__name__,
+                                "error_message": str(e)[:500],
+                            },
+                        )
+                        await _hook_exec.execute_chain(HookPoint.TOOL_ERROR, err_ctx)
+                    except Exception:
+                        pass
+                return self._handle_tool_error(tool_name, e, entry, start, tool_call_id=tool_call_request.id)
 
     async def batch_execute(
         self, tool_call_requests: list[ToolCallRequest], policy: CapabilityPolicy | None = None

@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from agent_framework.infra.logger import get_logger
+from agent_framework.infra.telemetry import get_tracing_manager
+from agent_framework.models.hook import HookContext, HookPoint
 from agent_framework.models.agent import (
     AgentState,
     EffectiveRunConfig,
@@ -52,6 +54,7 @@ class AgentLoopDeps:
 
     model_adapter: ModelAdapterProtocol
     tool_executor: ToolExecutorProtocol
+    hook_executor: Any = None
 
 
 class AgentLoop:
@@ -79,10 +82,33 @@ class AgentLoop:
         llm_request: LLMRequest,
         effective_config: EffectiveRunConfig,
     ) -> IterationResult:
+        _tm = get_tracing_manager()
         idx = agent_state.iteration_count
         llm_input_preview = self._summarize_llm_input(llm_request.messages)
 
+        _iter_span = _tm.start_span("agent.iteration", attributes={
+            "iteration_index": idx,
+            "run_id": agent_state.run_id,
+            "context_messages": len(llm_request.messages),
+        })
+
         await agent.on_iteration_started(idx, agent_state)
+
+        # ITERATION_START hook
+        _hook_exec = getattr(loop_deps, 'hook_executor', None)
+        if _hook_exec is not None:
+            try:
+                await _hook_exec.execute_chain(
+                    HookPoint.ITERATION_START,
+                    HookContext(
+                        run_id=agent_state.run_id,
+                        iteration_id=str(idx),
+                        payload={"iteration_index": idx, "context_messages": len(llm_request.messages)},
+                    ),
+                )
+            except Exception:
+                pass
+
         logger.info(
             "iteration.started",
             iteration_index=idx,
@@ -99,14 +125,20 @@ class AgentLoop:
 
         # 1. Call LLM
         try:
-            model_response = await self._call_llm(
-                loop_deps.model_adapter,
-                llm_request.messages,
-                llm_request.tools_schema,
-                effective_config,
-            )
+            with _tm.span("agent.llm.call", attributes={
+                "iteration_index": idx,
+                "message_count": len(llm_request.messages),
+            }):
+                model_response = await self._call_llm(
+                    loop_deps.model_adapter,
+                    llm_request.messages,
+                    llm_request.tools_schema,
+                    effective_config,
+                )
         except Exception as e:
-            return self._handle_iteration_error(agent, e, agent_state, idx)
+            _iter_span.record_exception(e)
+            _iter_span.end()
+            return self._handle_iteration_error(agent, e, agent_state, idx, hook_executor=_hook_exec)
 
         self._enforce_tool_call_parallel_policy(model_response, effective_config, idx)
 
@@ -167,11 +199,36 @@ class AgentLoop:
                 response_preview=(model_response.content or "")[:120],
             )
 
+        _iter_span.set_attributes({
+            "tokens_total": model_response.usage.total_tokens,
+            "tool_count": len(tool_results),
+            "finish_reason": model_response.finish_reason or "",
+        })
+        _iter_span.end()
+
         logger.info(
             "iteration.completed",
             iteration_index=idx,
             iteration_tokens=model_response.usage.total_tokens,
         )
+
+        # ITERATION_FINISH hook
+        if _hook_exec is not None:
+            try:
+                await _hook_exec.execute_chain(
+                    HookPoint.ITERATION_FINISH,
+                    HookContext(
+                        run_id=agent_state.run_id,
+                        iteration_id=str(idx),
+                        payload={
+                            "iteration_index": idx,
+                            "tool_count": len(tool_results),
+                            "tokens": model_response.usage.total_tokens,
+                        },
+                    ),
+                )
+            except Exception:
+                pass
 
         return IterationResult(
             iteration_index=idx,
@@ -369,6 +426,21 @@ class AgentLoop:
         llm_input_preview = self._summarize_llm_input(llm_request.messages)
         await agent.on_iteration_started(idx, agent_state)
 
+        # ITERATION_START hook
+        _hook_exec = getattr(loop_deps, 'hook_executor', None)
+        if _hook_exec is not None:
+            try:
+                await _hook_exec.execute_chain(
+                    HookPoint.ITERATION_START,
+                    HookContext(
+                        run_id=agent_state.run_id,
+                        iteration_id=str(idx),
+                        payload={"iteration_index": idx, "context_messages": len(llm_request.messages)},
+                    ),
+                )
+            except Exception:
+                pass
+
         yield StreamEvent(
             type=StreamEventType.ITERATION_START,
             data={"iteration_index": idx},
@@ -388,7 +460,7 @@ class AgentLoop:
                 else:
                     yield item  # StreamEvent(TOKEN)
         except Exception as e:
-            yield self._handle_iteration_error(agent, e, agent_state, idx)
+            yield self._handle_iteration_error(agent, e, agent_state, idx, hook_executor=_hook_exec)
             return
 
         assert model_response is not None
@@ -497,6 +569,24 @@ class AgentLoop:
                             "output": output_str,
                         },
                     )
+
+        # ITERATION_FINISH hook
+        if _hook_exec is not None:
+            try:
+                await _hook_exec.execute_chain(
+                    HookPoint.ITERATION_FINISH,
+                    HookContext(
+                        run_id=agent_state.run_id,
+                        iteration_id=str(idx),
+                        payload={
+                            "iteration_index": idx,
+                            "tool_count": len(tool_results),
+                            "tokens": model_response.usage.total_tokens,
+                        },
+                    ),
+                )
+            except Exception:
+                pass
 
         yield IterationResult(
             iteration_index=idx,
@@ -1004,8 +1094,30 @@ class AgentLoop:
         error: Exception,
         agent_state: AgentState,
         idx: int,
+        hook_executor: Any = None,
     ) -> IterationResult:
         """Handle iteration errors using agent's error policy."""
+        # ITERATION_ERROR hook
+        if hook_executor is not None:
+            try:
+                import asyncio
+                asyncio.get_event_loop().create_task(
+                    hook_executor.execute_chain(
+                        HookPoint.ITERATION_ERROR,
+                        HookContext(
+                            run_id=agent_state.run_id,
+                            iteration_id=str(idx),
+                            payload={
+                                "iteration_index": idx,
+                                "error_type": type(error).__name__,
+                                "error_message": str(error),
+                            },
+                        ),
+                    )
+                )
+            except Exception:
+                pass
+
         strategy = agent.get_error_policy(error, agent_state)
         if strategy is None:
             strategy = ErrorStrategy.ABORT

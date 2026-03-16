@@ -8,6 +8,8 @@ from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
 
 from agent_framework.infra.logger import get_logger
+from agent_framework.infra.telemetry import get_tracing_manager
+from agent_framework.models.hook import HookContext, HookPoint
 from agent_framework.agent.capability_policy import apply_capability_policy
 from agent_framework.agent.commit_sequencer import CommitSequencer
 from agent_framework.agent.loop import AgentLoop, AgentLoopDeps
@@ -112,6 +114,7 @@ class RunCoordinator:
         run_timeout_ms: int | None = None,
         cancel_event: asyncio.Event | None = None,
     ) -> AgentRunResult:
+        _tm = get_tracing_manager()
         run_id = str(uuid.uuid4())
         agent_state = self._state_ctrl.initialize_state(task, run_id)
         session_state = SessionState(session_id=str(uuid.uuid4()), run_id=run_id)
@@ -138,6 +141,14 @@ class RunCoordinator:
             deps.tool_executor._progressive_mode = getattr(
                 agent.agent_config, "progressive_tool_results", False
             )
+
+        _run_span = _tm.start_span("agent.run", attributes={
+            "run_id": run_id,
+            "agent_id": agent.agent_id,
+            "model": agent.agent_config.model_name,
+            "max_iterations": agent.agent_config.max_iterations,
+            "task": task[:200],
+        })
 
         logger.info(
             "run.started",
@@ -220,6 +231,22 @@ class RunCoordinator:
             deps.context_engineer.apply_context_policy(policy_bundle.context_policy)
 
             await agent.on_before_run(task, agent_state)
+
+            # RUN_START hook
+            _hook_exec = deps.hook_executor
+            if _hook_exec is not None:
+                try:
+                    await _hook_exec.execute_chain(
+                        HookPoint.RUN_START,
+                        HookContext(
+                            run_id=run_id,
+                            agent_id=agent.agent_id,
+                            user_id=user_id,
+                            payload={"task": task[:500], "model": agent.agent_config.model_name},
+                        ),
+                    )
+                except Exception as hook_err:
+                    logger.warning("run.hook_run_start_failed", error=str(hook_err))
 
             # Iteration loop
             final_answer: str | None = None
@@ -343,10 +370,35 @@ class RunCoordinator:
 
             await agent.on_final_answer(final_answer, agent_state)
 
+            # RUN_FINISH hook
+            try:
+                await _hook_exec.execute_chain(
+                    HookPoint.RUN_FINISH,
+                    HookContext(
+                        run_id=run_id,
+                        agent_id=agent.agent_id,
+                        user_id=user_id,
+                        payload={
+                            "success": True,
+                            "iterations_used": agent_state.iteration_count,
+                            "total_tokens": agent_state.total_tokens_used,
+                            "final_answer_preview": (final_answer or "")[:200],
+                        },
+                    ),
+                )
+            except Exception as hook_err:
+                logger.warning("run.hook_run_finish_failed", error=str(hook_err))
+
             result = self._finalize_run(
                 agent, agent_state, final_answer, last_stop_signal
             )
             elapsed_ms = int((time.monotonic() - run_start) * 1000)
+            _run_span.set_attributes({
+                "success": True,
+                "iterations_used": result.iterations_used,
+                "total_tokens": result.usage.total_tokens,
+                "elapsed_ms": elapsed_ms,
+            })
             logger.info(
                 "run.finished",
                 run_id=run_id,
@@ -360,6 +412,7 @@ class RunCoordinator:
             return result
 
         except Exception as e:
+            _run_span.record_exception(e)
             logger.error(
                 "run.failed",
                 run_id=run_id,
@@ -368,6 +421,23 @@ class RunCoordinator:
                 iterations_used=agent_state.iteration_count,
                 total_tokens=agent_state.total_tokens_used,
             )
+            # RUN_ERROR hook
+            try:
+                await _hook_exec.execute_chain(
+                    HookPoint.RUN_ERROR,
+                    HookContext(
+                        run_id=run_id,
+                        agent_id=agent.agent_id,
+                        user_id=user_id,
+                        payload={
+                            "error_type": type(e).__name__,
+                            "error_message": str(e)[:500],
+                            "iterations_used": agent_state.iteration_count,
+                        },
+                    ),
+                )
+            except Exception:
+                pass  # RUN_ERROR hooks must never propagate
             # Contract: failed runs also go through record_turn for CommitDecision
             # (base_manager.py §41: failed runs decide memory via CommitDecision)
             try:
@@ -425,6 +495,7 @@ class RunCoordinator:
             # Always deactivate skill — run-scoped, must not leak
             self._state_ctrl.deactivate_skill(agent_state)
             deps.context_engineer.set_skill_context(None)
+            _run_span.end()
 
     async def run_stream(
         self,
@@ -444,7 +515,13 @@ class RunCoordinator:
         """
         from agent_framework.models.stream import StreamEvent, StreamEventType
 
+        _tm = get_tracing_manager()
         run_id = str(uuid.uuid4())
+        _run_span = _tm.start_span("agent.run_stream", attributes={
+            "run_id": run_id,
+            "agent_id": agent.agent_id,
+            "task": task[:200],
+        })
         agent_state = self._state_ctrl.initialize_state(task, run_id)
         session_state = SessionState(session_id=str(uuid.uuid4()), run_id=run_id)
         if initial_session_messages:
@@ -519,6 +596,22 @@ class RunCoordinator:
             deps.context_engineer.apply_context_policy(policy_bundle.context_policy)
 
             await agent.on_before_run(task, agent_state)
+
+            # RUN_START hook (stream)
+            _hook_exec = deps.hook_executor
+            if _hook_exec is not None:
+                try:
+                    await _hook_exec.execute_chain(
+                        HookPoint.RUN_START,
+                        HookContext(
+                            run_id=run_id,
+                            agent_id=agent.agent_id,
+                            user_id=user_id,
+                            payload={"task": task[:500], "model": agent.agent_config.model_name},
+                        ),
+                    )
+                except Exception as hook_err:
+                    logger.warning("run_stream.hook_run_start_failed", error=str(hook_err))
 
             while True:
                 elapsed_ms = int((time.monotonic() - run_start) * 1000)
@@ -655,21 +748,62 @@ class RunCoordinator:
             )
             await agent.on_final_answer(final_answer, agent_state)
 
+            # RUN_FINISH hook (stream)
+            try:
+                await _hook_exec.execute_chain(
+                    HookPoint.RUN_FINISH,
+                    HookContext(
+                        run_id=run_id,
+                        agent_id=agent.agent_id,
+                        user_id=user_id,
+                        payload={
+                            "success": True,
+                            "iterations_used": agent_state.iteration_count,
+                            "total_tokens": agent_state.total_tokens_used,
+                            "final_answer_preview": (final_answer or "")[:200],
+                        },
+                    ),
+                )
+            except Exception as hook_err:
+                logger.warning("run_stream.hook_run_finish_failed", error=str(hook_err))
+
             result = self._finalize_run(
                 agent, agent_state, final_answer, last_stop_signal
             )
+            _run_span.set_attributes({
+                "success": True,
+                "iterations_used": result.iterations_used,
+                "total_tokens": result.usage.total_tokens,
+            })
             yield StreamEvent(
                 type=StreamEventType.DONE,
                 data={"result": result},
             )
 
         except Exception as e:
+            _run_span.record_exception(e)
             logger.error(
                 "run_stream.failed",
                 run_id=run_id,
                 error_type=type(e).__name__,
                 error=str(e),
             )
+            # RUN_ERROR hook (stream)
+            try:
+                await _hook_exec.execute_chain(
+                    HookPoint.RUN_ERROR,
+                    HookContext(
+                        run_id=run_id,
+                        agent_id=agent.agent_id,
+                        user_id=user_id,
+                        payload={
+                            "error_type": type(e).__name__,
+                            "error_message": str(e)[:500],
+                        },
+                    ),
+                )
+            except Exception:
+                pass
             try:
                 deps.memory_manager.record_turn(
                     task, final_answer, agent_state.iteration_history
@@ -714,6 +848,7 @@ class RunCoordinator:
                     pass
             self._state_ctrl.deactivate_skill(agent_state)
             deps.context_engineer.set_skill_context(None)
+            _run_span.end()
 
     def _detect_and_activate_skill(
         self,

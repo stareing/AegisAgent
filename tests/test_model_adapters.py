@@ -1628,3 +1628,203 @@ class TestCrossAdapterConsistency:
 
         from agent_framework.adapters.model.google_adapter import GoogleAdapter
         assert isinstance(GoogleAdapter(model_name="gemini-2.5-flash").count_tokens(msgs), int)
+
+
+# ─── Fallback Adapter Tests ──────────────────────────────────────────
+
+from agent_framework.adapters.model.base_adapter import BaseModelAdapter as _BaseModelAdapter
+from agent_framework.adapters.model.fallback_adapter import FallbackModelAdapter
+
+
+class _StubAdapter(_BaseModelAdapter):
+    """Minimal adapter stub for fallback tests."""
+
+    def __init__(
+        self,
+        *,
+        complete_side_effect: Exception | ModelResponse | None = None,
+        stream_side_effect: Exception | list[ModelChunk] | None = None,
+    ) -> None:
+        super().__init__()
+        self._complete_side_effect = complete_side_effect
+        self._stream_side_effect = stream_side_effect
+        self.complete_called = False
+        self.stream_called = False
+
+    async def complete(
+        self,
+        messages: list[Message],
+        tools: list[dict] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> ModelResponse:
+        self.complete_called = True
+        if isinstance(self._complete_side_effect, Exception):
+            raise self._complete_side_effect
+        return self._complete_side_effect  # type: ignore[return-value]
+
+    async def stream_complete(
+        self,
+        messages: list[Message],
+        tools: list[dict] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> AsyncIterator[ModelChunk]:
+        self.stream_called = True
+        if isinstance(self._stream_side_effect, Exception):
+            raise self._stream_side_effect
+        for chunk in (self._stream_side_effect or []):
+            yield chunk
+
+    def count_tokens(self, messages: list[Message]) -> int:
+        return 42
+
+
+_OK_RESPONSE = ModelResponse(
+    content="hello",
+    tool_calls=[],
+    finish_reason="stop",
+    usage=TokenUsage(prompt_tokens=10, completion_tokens=5),
+)
+
+_OK_RESPONSE_2 = ModelResponse(
+    content="fallback hello",
+    tool_calls=[],
+    finish_reason="stop",
+    usage=TokenUsage(prompt_tokens=10, completion_tokens=5),
+)
+
+_OK_RESPONSE_3 = ModelResponse(
+    content="fallback-2 hello",
+    tool_calls=[],
+    finish_reason="stop",
+    usage=TokenUsage(prompt_tokens=10, completion_tokens=5),
+)
+
+
+class TestFallbackModelAdapter:
+    """Tests for the FallbackModelAdapter wrapper."""
+
+    @pytest.mark.asyncio
+    async def test_primary_succeeds_fallback_not_called(self) -> None:
+        primary = _StubAdapter(complete_side_effect=_OK_RESPONSE)
+        fallback = _StubAdapter(complete_side_effect=_OK_RESPONSE_2)
+        adapter = FallbackModelAdapter(primary=primary, fallbacks=[fallback])
+
+        result = await adapter.complete(SAMPLE_MESSAGES)
+
+        assert result.content == "hello"
+        assert primary.complete_called
+        assert not fallback.complete_called
+
+    @pytest.mark.asyncio
+    async def test_primary_fails_fallback1_succeeds(self) -> None:
+        primary = _StubAdapter(complete_side_effect=LLMCallError("primary down"))
+        fallback = _StubAdapter(complete_side_effect=_OK_RESPONSE_2)
+        adapter = FallbackModelAdapter(primary=primary, fallbacks=[fallback])
+
+        result = await adapter.complete(SAMPLE_MESSAGES)
+
+        assert result.content == "fallback hello"
+        assert primary.complete_called
+        assert fallback.complete_called
+
+    @pytest.mark.asyncio
+    async def test_primary_fails_fallback1_fails_fallback2_succeeds(self) -> None:
+        primary = _StubAdapter(complete_side_effect=LLMRateLimitError("rate limited"))
+        fb1 = _StubAdapter(complete_side_effect=LLMTimeoutError("timeout"))
+        fb2 = _StubAdapter(complete_side_effect=_OK_RESPONSE_3)
+        adapter = FallbackModelAdapter(primary=primary, fallbacks=[fb1, fb2])
+
+        result = await adapter.complete(SAMPLE_MESSAGES)
+
+        assert result.content == "fallback-2 hello"
+        assert primary.complete_called
+        assert fb1.complete_called
+        assert fb2.complete_called
+
+    @pytest.mark.asyncio
+    async def test_auth_error_not_retried_on_fallbacks(self) -> None:
+        primary = _StubAdapter(complete_side_effect=LLMAuthError("bad key"))
+        fallback = _StubAdapter(complete_side_effect=_OK_RESPONSE_2)
+        adapter = FallbackModelAdapter(primary=primary, fallbacks=[fallback])
+
+        with pytest.raises(LLMAuthError, match="bad key"):
+            await adapter.complete(SAMPLE_MESSAGES)
+
+        assert primary.complete_called
+        assert not fallback.complete_called
+
+    @pytest.mark.asyncio
+    async def test_all_fail_raises_last_error(self) -> None:
+        primary = _StubAdapter(complete_side_effect=LLMCallError("primary fail"))
+        fb1 = _StubAdapter(complete_side_effect=LLMRateLimitError("fb1 rate limit"))
+        fb2 = _StubAdapter(complete_side_effect=LLMTimeoutError("fb2 timeout"))
+        adapter = FallbackModelAdapter(primary=primary, fallbacks=[fb1, fb2])
+
+        with pytest.raises(LLMTimeoutError, match="fb2 timeout"):
+            await adapter.complete(SAMPLE_MESSAGES)
+
+    @pytest.mark.asyncio
+    async def test_stream_primary_succeeds(self) -> None:
+        chunks = [ModelChunk(delta_content="hi"), ModelChunk(finish_reason="stop")]
+        primary = _StubAdapter(stream_side_effect=chunks)
+        fallback = _StubAdapter(stream_side_effect=[])
+        adapter = FallbackModelAdapter(primary=primary, fallbacks=[fallback])
+
+        collected = []
+        async for chunk in adapter.stream_complete(SAMPLE_MESSAGES):
+            collected.append(chunk)
+
+        assert len(collected) == 2
+        assert collected[0].delta_content == "hi"
+        assert not fallback.stream_called
+
+    @pytest.mark.asyncio
+    async def test_stream_primary_fails_fallback_succeeds(self) -> None:
+        fb_chunks = [ModelChunk(delta_content="fallback"), ModelChunk(finish_reason="stop")]
+        primary = _StubAdapter(stream_side_effect=LLMCallError("stream fail"))
+        fallback = _StubAdapter(stream_side_effect=fb_chunks)
+        adapter = FallbackModelAdapter(primary=primary, fallbacks=[fallback])
+
+        collected = []
+        async for chunk in adapter.stream_complete(SAMPLE_MESSAGES):
+            collected.append(chunk)
+
+        assert len(collected) == 2
+        assert collected[0].delta_content == "fallback"
+
+    @pytest.mark.asyncio
+    async def test_stream_auth_error_not_retried(self) -> None:
+        primary = _StubAdapter(stream_side_effect=LLMAuthError("bad key"))
+        fallback = _StubAdapter(stream_side_effect=[ModelChunk(delta_content="ok")])
+        adapter = FallbackModelAdapter(primary=primary, fallbacks=[fallback])
+
+        with pytest.raises(LLMAuthError, match="bad key"):
+            async for _ in adapter.stream_complete(SAMPLE_MESSAGES):
+                pass
+
+        assert not fallback.stream_called
+
+    def test_count_tokens_delegates_to_primary(self) -> None:
+        primary = _StubAdapter()
+        fallback = _StubAdapter()
+        adapter = FallbackModelAdapter(primary=primary, fallbacks=[fallback])
+
+        assert adapter.count_tokens(SAMPLE_MESSAGES) == 42
+
+    def test_session_propagated_to_all_adapters(self) -> None:
+        primary = _StubAdapter()
+        fb1 = _StubAdapter()
+        fb2 = _StubAdapter()
+        adapter = FallbackModelAdapter(primary=primary, fallbacks=[fb1, fb2])
+
+        adapter.begin_session("test-session")
+        assert primary._session.active
+        assert fb1._session.active
+        assert fb2._session.active
+
+        adapter.end_session()
+        assert not primary._session.active
+        assert not fb1._session.active
+        assert not fb2._session.active

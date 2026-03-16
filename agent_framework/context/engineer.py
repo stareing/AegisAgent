@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from agent_framework.context.builder import ContextBuilder
 from agent_framework.context.compressor import ContextCompressor
 from agent_framework.context.prefix_manager import PromptPrefixManager
 from agent_framework.context.source_provider import ContextSourceProvider
 from agent_framework.models.context import ContextStats
+from agent_framework.models.hook import HookContext, HookPoint
 from agent_framework.models.message import Message
 
 if TYPE_CHECKING:
@@ -41,6 +42,7 @@ class ContextEngineer:
         source_provider: ContextSourceProvider | None = None,
         builder: ContextBuilder | None = None,
         compressor: ContextCompressor | None = None,
+        hook_executor: Any = None,
     ) -> None:
         self._source = source_provider or ContextSourceProvider()
         self._builder = builder or ContextBuilder()
@@ -50,6 +52,7 @@ class ContextEngineer:
         self._allow_compression = True
         self._force_include_memory = False
         self._last_stats = ContextStats()
+        self._hook_executor = hook_executor
 
     async def prepare_context_for_llm(
         self,
@@ -72,6 +75,23 @@ class ContextEngineer:
         task: str = context_materials.get("task", agent_state.task)
         active_skill: Skill | None = context_materials.get("active_skill")
         runtime_info: dict | None = context_materials.get("runtime_info")
+
+        # CONTEXT_PRE_BUILD hook
+        if self._hook_executor is not None:
+            try:
+                await self._hook_executor.execute_chain(
+                    HookPoint.CONTEXT_PRE_BUILD,
+                    HookContext(
+                        run_id=agent_state.run_id,
+                        payload={
+                            "task": task[:200],
+                            "memory_count": len(memories),
+                            "session_message_count": len(session_state.messages),
+                        },
+                    ),
+                )
+            except Exception:
+                pass  # Context hooks are advisory
 
         # Collect from each source
         tool_entries: list = context_materials.get("tool_entries", [])
@@ -161,6 +181,24 @@ class ContextEngineer:
             groups_trimmed=groups_trimmed,
             prefix_reused=prefix_reused,
         )
+
+        # CONTEXT_POST_BUILD hook
+        if self._hook_executor is not None:
+            try:
+                await self._hook_executor.execute_chain(
+                    HookPoint.CONTEXT_POST_BUILD,
+                    HookContext(
+                        run_id=agent_state.run_id,
+                        payload={
+                            "total_messages": len(messages),
+                            "total_tokens": total_tokens,
+                            "groups_trimmed": groups_trimmed,
+                            "prefix_reused": prefix_reused,
+                        },
+                    ),
+                )
+            except Exception:
+                pass
 
         return messages
 

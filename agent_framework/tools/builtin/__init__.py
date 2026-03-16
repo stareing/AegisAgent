@@ -12,8 +12,19 @@ if TYPE_CHECKING:
     from agent_framework.tools.catalog import GlobalToolCatalog
 
 
-def register_all_builtins(catalog: GlobalToolCatalog) -> int:
+def register_all_builtins(
+    catalog: GlobalToolCatalog,
+    *,
+    shell_enabled: bool = False,
+) -> int:
     """Register all built-in tools into the given catalog.
+
+    Args:
+        catalog: The tool catalog to register into.
+        shell_enabled: When False (default), shell and system tools
+            (bash_exec, bash_output, kill_shell, run_command) are
+            not registered. get_env is always registered but requires
+            confirmation.
 
     Returns the number of tools registered.
     """
@@ -43,9 +54,8 @@ def register_all_builtins(catalog: GlobalToolCatalog) -> int:
         edit_file, notebook_edit,
         # Search
         grep_search, glob_files,
-        # System / Shell
-        run_command, get_env,
-        bash_exec, bash_output, kill_shell,
+        # System (get_env always available but requires confirmation)
+        get_env,
         # Web
         web_fetch,
         # Task management
@@ -59,6 +69,11 @@ def register_all_builtins(catalog: GlobalToolCatalog) -> int:
         # Memory admin (not exposed to Agent by default — requires capability policy)
         list_memories, forget_memory, clear_memories,
     ]
+
+    # Shell/system tools are high-risk — only register when explicitly enabled
+    if shell_enabled:
+        builtins.extend([run_command, bash_exec, bash_output, kill_shell])
+
     count = 0
     for func in builtins:
         catalog.register_function(func)

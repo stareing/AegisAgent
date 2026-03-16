@@ -78,7 +78,7 @@ def run_command(
     name="get_env",
     description="Get the value of an environment variable.",
     category="system",
-    require_confirm=False,
+    require_confirm=True,
 )
 def get_env(name: str, default: str = "") -> str:
     """Get an environment variable value.
