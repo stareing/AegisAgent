@@ -21,7 +21,7 @@ python -m agent_framework.main --config config/openai.json
 # 运行演示
 python run_demo.py
 
-# 运行测试（939 项全部通过）
+# 运行测试（978 项全部通过）
 pytest tests/
 
 # 使用 Textual TUI 运行（需安装）
@@ -414,34 +414,74 @@ agent.run (run_id, agent_id, model, task)
 
 ### Hooks & Plugins 扩展系统
 
-受治理的框架扩展点 — hooks 可在 19 个预定义生命周期点观察、拦截或建议。Plugin 将 hooks、工具、agent 打包为可安装的扩展单元。
+受治理的框架扩展点 — hooks 可在 20 个预定义生命周期点观察、拦截或修改。Plugin 将 hooks、工具、命令、agent 模板打包为可安装的扩展单元。所有 hook 调度通过统一的 `HookDispatchService`；plugin 注册/回滚通过对称的 `PluginExtensionRegistrar`。
 
-#### Hook 挂载点
+#### Hook 挂载点（20 个）
 
-| 分类 | 挂载点 | 允许 DENY |
-|------|--------|-----------|
-| **运行** | `run.start`、`run.finish`、`run.error` | 否 |
-| **迭代** | `iteration.start`、`iteration.finish`、`iteration.error` | 否 |
-| **工具** | `tool.pre_use`、`tool.post_use`、`tool.error` | 仅 pre |
-| **委派** | `delegation.pre`、`delegation.post`、`delegation.error` | 仅 pre |
-| **记忆** | `memory.pre_record`、`memory.post_record` | 仅 pre |
-| **上下文** | `context.pre_build`、`context.post_build` | 仅 pre |
-| **产物** | `artifact.produced`、`artifact.finalize` | 否 |
-| **配置** | `config.loaded` | 否 |
+| 分类 | 挂载点 | DENY | MODIFY |
+|------|--------|------|--------|
+| **运行** | `run.start`、`run.finish`、`run.error` | 否 | 否 |
+| **迭代** | `iteration.start`、`iteration.finish`、`iteration.error` | 否 | 否 |
+| **工具** | `tool.pre_use`、`tool.post_use`、`tool.error` | pre | pre: `sanitized_arguments`、`display_name` |
+| **委派** | `delegation.pre`、`delegation.post`、`delegation.error` | pre | pre: `task_input_override`、`deadline_ms_override` |
+| **记忆** | `memory.pre_record`、`memory.post_record` | pre | pre: `content`、`title`、`tags` |
+| **上下文** | `context.pre_build`、`context.post_build` | pre | pre: `extra_instructions`、`compression_preference` |
+| **产物** | `artifact.produced`、`artifact.finalize` | 否 | 否 |
+| **配置** | `config.loaded`、`instructions.loaded` | 否 | 否 |
 
-#### 三类 Hook
+#### 编写自定义 Hook
 
-- **Command Hook**：确定性门禁/审计（同步、串行、顺序稳定）
-- **Prompt Hook**：LLM 辅助建议（只读）
-- **Agent Hook**：受控子 agent 执行复杂扩展逻辑
+```python
+from agent_framework.models.hook import (
+    HookCategory, HookContext, HookExecutionMode, HookFailurePolicy,
+    HookMeta, HookPoint, HookResult, HookResultAction,
+)
 
-#### Hook 执行规则
+class MyToolGuard:
+    """拦截参数过大的工具调用。"""
 
-- 稳定执行顺序：`priority` → `plugin_id` → `hook_id`
-- 失败策略：`ignore`（忽略）/ `warn`（警告）/ `fail_closed`（中止）
-- 每个 hook 独立超时控制（默认 3s）
-- DENY 仅在可拒绝挂载点（pre 类）生效
-- Hook 只消费 DTO 快照，禁止持有可变状态对象
+    def __init__(self) -> None:
+        self._meta = HookMeta(
+            hook_id="my_org.tool_guard",
+            plugin_id="my_org",
+            name="参数大小守卫",
+            hook_point=HookPoint.PRE_TOOL_USE,
+            category=HookCategory.COMMAND,
+            failure_policy=HookFailurePolicy.WARN,
+            priority=10,       # 数字越小越先执行
+            timeout_ms=1000,
+        )
+
+    @property
+    def meta(self) -> HookMeta:
+        return self._meta
+
+    def execute(self, context: HookContext) -> HookResult:
+        args = context.payload.get("arguments", {})
+        if len(str(args)) > 50_000:
+            return HookResult(
+                action=HookResultAction.DENY,
+                message="参数过大",
+            )
+        return HookResult(action=HookResultAction.ALLOW)
+
+# 注册到框架
+framework.register_hook(MyToolGuard())
+```
+
+也支持异步 hook — 将 `execute` 改为 `async def` 即可。
+
+#### Hook 结果动作
+
+| 动作 | 含义 | 生效范围 |
+|------|------|----------|
+| `ALLOW` / `NOOP` | 放行 | 所有挂载点 |
+| `DENY` | 阻止操作 | 仅 pre 类（`tool.pre_use`、`delegation.pre`、`memory.pre_record`、`context.pre_build`） |
+| `MODIFY` | 修改白名单字段 | 仅 pre 类（按挂载点限定可修改字段） |
+| `REQUEST_CONFIRMATION` | 触发用户确认处理器 | 仅 pre 类 |
+| `EMIT_ARTIFACT` | 产出产物待注册 | post 类 |
+
+MODIFY 通过按挂载点的字段白名单强制执行 — 非白名单字段静默丢弃并记录警告。
 
 #### 内置 Hook
 
@@ -451,37 +491,101 @@ agent.run (run_id, agent_id, model, task)
 | `AuditNotifyHook` | `run.finish` / `run.error` | 结构化审计记录 + 通知回调 |
 | `MemoryReviewHook` | `memory.pre_record` | 内容策略（大小、标签数、敏感数据检测） |
 
-#### Plugin 系统
+```python
+from agent_framework.hooks.builtin import ToolGuardHook, AuditNotifyHook, MemoryReviewHook
 
-Plugin 是可安装的扩展包，通过 manifest 声明能力：
+# 门禁：拦截参数过大的工具调用
+framework.register_hook(ToolGuardHook(max_argument_chars=50_000))
+
+# 审计：运行完成时发送 webhook
+framework.register_hook(AuditNotifyHook(
+    hook_point=HookPoint.RUN_FINISH,
+    notify_callback=lambda record: requests.post(WEBHOOK_URL, json=record),
+))
+
+# 记忆：阻止敏感数据写入记忆存储
+framework.register_hook(MemoryReviewHook(max_content_length=5000))
+```
+
+#### Hook 执行规则
+
+- **稳定顺序**：`priority`（升序）→ `plugin_id` → `hook_id`
+- **失败策略**：`ignore` / `warn` / `fail_closed`（按 hook 配置）
+- **超时**：按 hook 独立控制（默认 3s）
+- **冻结上下文**：`HookContext` 不可变，payload 构造时深拷贝
+- **实例级隔离**：每个 `AgentFramework` 拥有独立的 `HookSubsystem`，无全局单例污染
+
+#### 架构：HookDispatchService
+
+所有内核组件通过 `HookDispatchService` 统一调度 hook：
 
 ```python
-from agent_framework.plugins import PluginManifest
+# 异步（coordinator、loop、executor、delegation、context engineer）
+outcome = await dispatcher.fire(HookPoint.PRE_TOOL_USE, run_id=..., payload=...)
 
-manifest = PluginManifest(
-    plugin_id="my-plugin",
-    name="My Plugin",
-    version="1.0.0",
-    provides_hooks=True,
-    required_permissions=["register_hooks"],
-)
+# 同步（memory manager、entry.py setup 阶段）
+outcome = dispatcher.fire_sync(HookPoint.MEMORY_PRE_RECORD, payload=...)
+
+# 仅通知（POST 类 hook，永不阻塞主流程）
+await dispatcher.fire_advisory(HookPoint.POST_TOOL_USE, payload=...)
+```
+
+Payload 构造使用集中式工厂（`hooks/payloads.py`），字段名只定义一次。
+
+#### Plugin 系统
+
+Plugin 是可安装的扩展包，可提供 hooks、工具、命令（技能）和 agent 模板：
+
+```python
+from agent_framework.models.plugin import PluginManifest, PluginPermission
+
+class MyPlugin:
+    @property
+    def manifest(self) -> PluginManifest:
+        return PluginManifest(
+            plugin_id="my-plugin",
+            name="My Plugin",
+            version="1.0.0",
+            provides_hooks=True,
+            provides_tools=True,
+            provides_commands=True,
+            required_permissions=[PluginPermission.REGISTER_HOOKS],
+        )
+
+    def load(self) -> None: ...
+    def enable(self) -> None: ...
+    def disable(self) -> None: ...
+    def unload(self) -> None: ...
+
+    def get_hooks(self) -> list:
+        return [MyToolGuard()]
+
+    def get_tools(self) -> list:
+        return []  # ToolEntry 列表
+
+    def get_commands(self) -> list:
+        return []  # Skill 列表 — 注册到 SkillRouter
+
+    def get_agents(self) -> list:
+        return []  # Agent 模板字典 — 可通过框架 API 查询
+
+# 使用
+framework.load_plugin(MyPlugin())
+framework.enable_plugin("my-plugin")  # 自动先执行 validate（权限/依赖/版本）
+
+# 查询插件 agent 模板
+templates = framework.list_plugin_agent_templates()
+
+# 禁用 — 完整移除所有 hooks、工具、命令、agent 模板
+framework.disable_plugin("my-plugin")
 ```
 
 - **生命周期**：`DISCOVERED → VALIDATED → LOADED → ENABLED ⇄ DISABLED → UNLOADED`
-- **权限模型**：10 种声明式权限，高风险权限需显式授予
-- **冲突检测**：双向冲突检查，禁止同时启用冲突 plugin
-- **回滚保证**：`enable()` 失败自动回滚所有部分注册
-- **依赖解析**：加载前验证 plugin 依赖是否满足
-
-```python
-# 注册和使用 hooks
-framework.register_hook(ToolGuardHook())
-framework.register_hook(AuditNotifyHook(notify_callback=my_webhook))
-
-# 加载和启用插件
-framework.load_plugin(my_plugin)
-framework.enable_plugin("my-plugin")
-```
+- **强制校验**：`enable()` 内部强制先执行 `validate()`（权限、依赖、框架版本范围）
+- **权限模型**：10 种声明式权限；`REGISTER_TOOLS` 和 `SPAWN_AGENT` 为高风险权限（需显式授予）
+- **冲突检测**：双向 — `A.conflicts = ["B"]` 同时阻止 A→B 和 B→A
+- **原子回滚**：`enable()` 失败通过 `PluginExtensionRegistrar` 回滚所有部分注册（hooks、工具、命令）
+- **对称禁用**：`disable()` 精确移除 `enable()` 注册的所有内容，无残留泄漏
 
 ---
 
@@ -558,7 +662,7 @@ agent_framework/
 ├── cli.py           # CLI 入口点
 └── main.py          # 交互式终端
 config/              # 模型配置文件（JSON）
-tests/               # 939 项测试，26 个测试文件
+tests/               # 978 项测试，27 个测试文件
 ```
 
 ---
@@ -752,7 +856,7 @@ async def chat(message: str, session_id: str | None = None):
 ## 测试
 
 ```bash
-# 全量测试（866 项）
+# 全量测试（978 项）
 pytest tests/
 
 # 仅运行架构守卫测试

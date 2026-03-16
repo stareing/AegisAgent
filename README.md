@@ -21,7 +21,7 @@ python -m agent_framework.main --config config/openai.json
 # Run demo
 python run_demo.py
 
-# Run tests (939 passing)
+# Run tests (978 passing)
 pytest tests/
 
 # Run with Textual TUI (if installed)
@@ -395,34 +395,74 @@ Supports OTLP export to Jaeger / Grafana Tempo. Install optional deps: `pip inst
 
 ### Hooks & Plugins Extension System
 
-Governed extension points for the framework — hooks can observe, gate, or advise at 19 predefined lifecycle points. Plugins package hooks, tools, and agents as installable units.
+Governed extension points — hooks observe, gate, or modify at 20 predefined lifecycle points. Plugins package hooks, tools, commands, and agent templates as installable units. All hook dispatch goes through a unified `HookDispatchService`; plugins use a symmetric `PluginExtensionRegistrar` for atomic apply/rollback.
 
-#### Hook Points
+#### Hook Points (20)
 
-| Category | Points | DENY allowed |
-|----------|--------|--------------|
-| **Run** | `run.start`, `run.finish`, `run.error` | No |
-| **Iteration** | `iteration.start`, `iteration.finish`, `iteration.error` | No |
-| **Tool** | `tool.pre_use`, `tool.post_use`, `tool.error` | Pre only |
-| **Delegation** | `delegation.pre`, `delegation.post`, `delegation.error` | Pre only |
-| **Memory** | `memory.pre_record`, `memory.post_record` | Pre only |
-| **Context** | `context.pre_build`, `context.post_build` | Pre only |
-| **Artifact** | `artifact.produced`, `artifact.finalize` | No |
-| **Config** | `config.loaded` | No |
+| Category | Points | DENY | MODIFY |
+|----------|--------|------|--------|
+| **Run** | `run.start`, `run.finish`, `run.error` | No | No |
+| **Iteration** | `iteration.start`, `iteration.finish`, `iteration.error` | No | No |
+| **Tool** | `tool.pre_use`, `tool.post_use`, `tool.error` | Pre | Pre: `sanitized_arguments`, `display_name` |
+| **Delegation** | `delegation.pre`, `delegation.post`, `delegation.error` | Pre | Pre: `task_input_override`, `deadline_ms_override` |
+| **Memory** | `memory.pre_record`, `memory.post_record` | Pre | Pre: `content`, `title`, `tags` |
+| **Context** | `context.pre_build`, `context.post_build` | Pre | Pre: `extra_instructions`, `compression_preference` |
+| **Artifact** | `artifact.produced`, `artifact.finalize` | No | No |
+| **Config** | `config.loaded`, `instructions.loaded` | No | No |
 
-#### Three Hook Categories
+#### Writing a Custom Hook
 
-- **Command Hook**: Deterministic gate/audit (sync, serial, stable order)
-- **Prompt Hook**: Advisory via LLM-assisted suggestions (read-only)
-- **Agent Hook**: Complex logic via controlled sub-agent
+```python
+from agent_framework.models.hook import (
+    HookCategory, HookContext, HookExecutionMode, HookFailurePolicy,
+    HookMeta, HookPoint, HookResult, HookResultAction,
+)
 
-#### Hook Execution
+class MyToolGuard:
+    """Block tools with oversized arguments."""
 
-- Stable execution order: `priority` → `plugin_id` → `hook_id`
-- Failure policies: `ignore` / `warn` / `fail_closed`
-- Per-hook timeout enforcement (default 3s)
-- DENY only valid at deniable hook points (pre-use hooks)
-- Hooks consume DTO snapshots only — never mutable state objects
+    def __init__(self) -> None:
+        self._meta = HookMeta(
+            hook_id="my_org.tool_guard",
+            plugin_id="my_org",
+            name="Argument Size Guard",
+            hook_point=HookPoint.PRE_TOOL_USE,
+            category=HookCategory.COMMAND,
+            failure_policy=HookFailurePolicy.WARN,
+            priority=10,       # lower = earlier in chain
+            timeout_ms=1000,
+        )
+
+    @property
+    def meta(self) -> HookMeta:
+        return self._meta
+
+    def execute(self, context: HookContext) -> HookResult:
+        args = context.payload.get("arguments", {})
+        if len(str(args)) > 50_000:
+            return HookResult(
+                action=HookResultAction.DENY,
+                message="Arguments too large",
+            )
+        return HookResult(action=HookResultAction.ALLOW)
+
+# Register with framework
+framework.register_hook(MyToolGuard())
+```
+
+Async hooks are also supported — just make `execute` an `async def`.
+
+#### Hook Result Actions
+
+| Action | Meaning | Where valid |
+|--------|---------|-------------|
+| `ALLOW` / `NOOP` | Pass through | All points |
+| `DENY` | Block the operation | Pre-use points only (`tool.pre_use`, `delegation.pre`, `memory.pre_record`, `context.pre_build`) |
+| `MODIFY` | Change whitelisted payload fields | Pre-use points (per-point field whitelist enforced) |
+| `REQUEST_CONFIRMATION` | Trigger user confirmation handler | Pre-use points |
+| `EMIT_ARTIFACT` | Produce artifacts for registration | Post-use points |
+
+MODIFY is enforced via per-hook-point whitelists — non-whitelisted fields are silently dropped with a warning log.
 
 #### Built-in Hooks
 
@@ -432,37 +472,101 @@ Governed extension points for the framework — hooks can observe, gate, or advi
 | `AuditNotifyHook` | `run.finish` / `run.error` | Structured audit records + notification callback |
 | `MemoryReviewHook` | `memory.pre_record` | Content policy (size, tags, sensitive data detection) |
 
-#### Plugin System
+```python
+from agent_framework.hooks.builtin import ToolGuardHook, AuditNotifyHook, MemoryReviewHook
 
-Plugins are installable extension packages with manifest-declared capabilities:
+# Gate: block oversized tool arguments
+framework.register_hook(ToolGuardHook(max_argument_chars=50_000))
+
+# Audit: send webhook on run completion
+framework.register_hook(AuditNotifyHook(
+    hook_point=HookPoint.RUN_FINISH,
+    notify_callback=lambda record: requests.post(WEBHOOK_URL, json=record),
+))
+
+# Memory: block sensitive data from being saved
+framework.register_hook(MemoryReviewHook(max_content_length=5000))
+```
+
+#### Hook Execution Rules
+
+- **Stable order**: `priority` (ascending) → `plugin_id` → `hook_id`
+- **Failure policies**: `ignore` / `warn` / `fail_closed` (per hook)
+- **Timeout**: per-hook enforcement (default 3s)
+- **Frozen context**: `HookContext` is immutable; payload is deep-copied on construction
+- **Instance-level**: each `AgentFramework` owns its own `HookSubsystem` — no global singleton pollution
+
+#### Architecture: HookDispatchService
+
+All kernel components use `HookDispatchService` — the single entry point for firing hooks:
 
 ```python
-from agent_framework.plugins import PluginManifest
+# Async (in coordinator, loop, executor, delegation, context engineer)
+outcome = await dispatcher.fire(HookPoint.PRE_TOOL_USE, run_id=..., payload=...)
 
-manifest = PluginManifest(
-    plugin_id="my-plugin",
-    name="My Plugin",
-    version="1.0.0",
-    provides_hooks=True,
-    required_permissions=["register_hooks"],
-)
+# Sync (in memory manager, entry.py setup)
+outcome = dispatcher.fire_sync(HookPoint.MEMORY_PRE_RECORD, payload=...)
+
+# Fire-and-forget (POST hooks that should never block)
+await dispatcher.fire_advisory(HookPoint.POST_TOOL_USE, payload=...)
+```
+
+Payload construction uses centralized factories (`hooks/payloads.py`) so field names are defined once.
+
+#### Plugin System
+
+Plugins are installable extension packages providing hooks, tools, commands (skills), and agent templates:
+
+```python
+from agent_framework.models.plugin import PluginManifest, PluginPermission
+
+class MyPlugin:
+    @property
+    def manifest(self) -> PluginManifest:
+        return PluginManifest(
+            plugin_id="my-plugin",
+            name="My Plugin",
+            version="1.0.0",
+            provides_hooks=True,
+            provides_tools=True,
+            provides_commands=True,
+            required_permissions=[PluginPermission.REGISTER_HOOKS],
+        )
+
+    def load(self) -> None: ...
+    def enable(self) -> None: ...
+    def disable(self) -> None: ...
+    def unload(self) -> None: ...
+
+    def get_hooks(self) -> list:
+        return [MyToolGuard()]
+
+    def get_tools(self) -> list:
+        return []  # ToolEntry list
+
+    def get_commands(self) -> list:
+        return []  # Skill list — registered to SkillRouter
+
+    def get_agents(self) -> list:
+        return []  # Agent template dicts — queryable via framework API
+
+# Usage
+framework.load_plugin(MyPlugin())
+framework.enable_plugin("my-plugin")  # auto-validates permissions/deps first
+
+# Query plugin agent templates
+templates = framework.list_plugin_agent_templates()
+
+# Disable — cleanly removes all hooks, tools, commands, agent templates
+framework.disable_plugin("my-plugin")
 ```
 
 - **Lifecycle**: `DISCOVERED → VALIDATED → LOADED → ENABLED ⇄ DISABLED → UNLOADED`
-- **Permission model**: 10 declarative permissions, high-risk ones require explicit grant
-- **Conflict detection**: bidirectional conflict checking between plugins
-- **Rollback guarantee**: `enable()` failure reverts all partial registrations
-- **Dependency resolution**: validates plugin dependencies before loading
-
-```python
-# Register and use hooks
-framework.register_hook(ToolGuardHook())
-framework.register_hook(AuditNotifyHook(notify_callback=my_webhook))
-
-# Load and enable plugins
-framework.load_plugin(my_plugin)
-framework.enable_plugin("my-plugin")
-```
+- **Mandatory validation**: `enable()` always runs `validate()` first (permissions, dependencies, framework version range)
+- **Permission model**: 10 declarative permissions; `REGISTER_TOOLS` and `SPAWN_AGENT` are high-risk (require explicit grant)
+- **Conflict detection**: bidirectional — `A.conflicts = ["B"]` blocks both `A→B` and `B→A`
+- **Atomic rollback**: `enable()` failure reverts all partial registrations (hooks, tools, commands) via `PluginExtensionRegistrar`
+- **Symmetric disable**: `disable()` removes exactly what `enable()` registered — nothing leaks
 
 ---
 
@@ -537,7 +641,7 @@ agent_framework/
 ├── cli.py           # CLI entry point
 └── main.py          # Interactive terminal
 config/              # Model configuration files (JSON)
-tests/               # 939 tests across 26 files
+tests/               # 978 tests across 27 files
 ```
 
 ---
@@ -731,7 +835,7 @@ async def chat(message: str, session_id: str | None = None):
 ## Testing
 
 ```bash
-# Full suite (866 tests)
+# Full suite (978 tests)
 pytest tests/
 
 # Architecture guard tests only
