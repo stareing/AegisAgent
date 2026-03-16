@@ -232,6 +232,7 @@ class AgentRunResult(BaseModel):
     iteration_history: list[IterationResult] = Field(default_factory=list)
     artifacts: list[Artifact] = Field(default_factory=list)
     error: str | None = None
+    progressive_responses: list[str] = Field(default_factory=list)
     # v2.6.1 §32: Explicit termination classification for audit
     termination_source: str = "runtime"
 
@@ -260,6 +261,7 @@ class AgentConfig(BaseModel):
     allow_spawn_children: bool = False
     max_concurrent_tool_calls: int = 5
     allow_parallel_tool_calls: bool = True
+    progressive_tool_results: bool = True
 
 
 class CapabilityPolicy(BaseModel):
@@ -373,3 +375,4 @@ class EffectiveRunConfig(BaseModel):
     max_concurrent_tool_calls: int = 5
     subagent_token_budget: int = 4096
     allow_parallel_tool_calls: bool = True
+    progressive_tool_results: bool = True

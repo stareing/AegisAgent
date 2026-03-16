@@ -92,9 +92,11 @@ class SubAgentConfig(BaseModel):
     max_sub_agents_per_run: int = 5
     max_concurrent_sub_agents: int = 3
     per_sub_agent_max_tokens: int = 4096
-    default_deadline_ms: int = 60000
+    default_deadline_ms: int = 0  # 0 = no timeout, wait until complete
     default_max_iterations: int = 10
     allow_recursive_spawn: bool = False
+    max_spawn_depth: int = 1
+    execution_mode: str = "progressive"  # "parallel" | "progressive"
 
 
 class SkillConfig(BaseModel):

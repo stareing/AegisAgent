@@ -48,6 +48,7 @@ class SubAgentRuntime:
         coordinator: RunCoordinator | None = None,
         max_concurrent: int = 3,
         max_per_run: int = 5,
+        max_spawn_depth: int = 1,
     ) -> None:
         self._factory = SubAgentFactory(parent_deps)
         self._scheduler = SubAgentScheduler(
@@ -56,6 +57,7 @@ class SubAgentRuntime:
         )
         self._coordinator = coordinator
         self._parent_deps = parent_deps
+        self._max_spawn_depth = max_spawn_depth
         # active_children truth source — only SubAgentRuntime maintains this
         self._active: dict[str, SubAgentHandle] = {}  # spawn_id -> handle
 
@@ -154,7 +156,6 @@ class SubAgentRuntime:
 
         # Schedule execution — runtime wraps the actual run
         async def _run() -> SubAgentResult:
-            # child_run_id is assigned by the runtime at actual start
             child_run_id = str(uuid.uuid4())
             task_record.child_run_id = child_run_id
             task_record.status = SubAgentTaskStatus.RUNNING
@@ -172,7 +173,6 @@ class SubAgentRuntime:
                 initial_session_messages=initial_session_messages,
             )
 
-            # Update task record status (runtime-owned transitions)
             task_record.status = (
                 SubAgentTaskStatus.COMPLETED if run_result.success
                 else SubAgentTaskStatus.FAILED
@@ -194,7 +194,6 @@ class SubAgentRuntime:
                 usage=run_result.usage,
                 iterations_used=run_result.iterations_used,
             )
-
         try:
             result = await self._scheduler.schedule(
                 handle, _run(), deadline_ms=spec.deadline_ms,

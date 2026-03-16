@@ -39,6 +39,7 @@ class ReActAgent(BaseAgent):
         allow_spawn_children: bool = False,
         max_concurrent_tool_calls: int = 5,
         allow_parallel_tool_calls: bool = True,
+        progressive_tool_results: bool = True,
     ) -> None:
         full_prompt = REACT_SYSTEM_PROMPT
         if system_prompt:
@@ -53,6 +54,7 @@ class ReActAgent(BaseAgent):
             allow_spawn_children=allow_spawn_children,
             max_concurrent_tool_calls=max_concurrent_tool_calls,
             allow_parallel_tool_calls=allow_parallel_tool_calls,
+            progressive_tool_results=progressive_tool_results,
         )
         super().__init__(config)
         self._max_react_steps = max_react_steps

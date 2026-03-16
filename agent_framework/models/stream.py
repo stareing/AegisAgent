@@ -27,6 +27,15 @@ class StreamEventType(str, Enum):
     ITERATION_START = "iteration_start"
     DONE = "done"
     ERROR = "error"
+    ASSISTANT_TOOL_CALLS = "assistant_tool_calls"
+    # Progressive tool-completion events (transient UI — never enter SessionState)
+    # Fired for every tool in progressive mode, not just spawn_agent.
+    PROGRESSIVE_START = "progressive_start"
+    PROGRESSIVE_DONE = "progressive_done"
+    PROGRESSIVE_RESPONSE = "progressive_response"
+    # Backward-compatible aliases — existing consumers that check SUBAGENT_* still work
+    SUBAGENT_START = "progressive_start"
+    SUBAGENT_DONE = "progressive_done"
 
 
 class StreamEvent(BaseModel):
@@ -35,12 +44,16 @@ class StreamEvent(BaseModel):
     Attributes:
         type: Event classification.
         data: Payload — structure depends on type:
-            TOKEN:            {"text": str}
-            TOOL_CALL_START:  {"tool_name": str, "tool_call_id": str, "arguments": dict}
-            TOOL_CALL_DONE:   {"tool_name": str, "tool_call_id": str, "success": bool, "output": str}
-            ITERATION_START:  {"iteration_index": int}
-            DONE:             {"result": AgentRunResult}
-            ERROR:            {"error": str, "error_type": str}
+            TOKEN:                {"text": str}
+            TOOL_CALL_START:      {"tool_name": str, "tool_call_id": str, "arguments": dict}
+            TOOL_CALL_DONE:       {"tool_name": str, "tool_call_id": str, "success": bool, "output": str}
+            ITERATION_START:      {"iteration_index": int}
+            DONE:                 {"result": AgentRunResult}
+            ERROR:                {"error": str, "error_type": str}
+            ASSISTANT_TOOL_CALLS: {"content": str | None, "tool_calls": list[ToolCallRequest]}
+            PROGRESSIVE_START:    {"tool_call_id": str, "tool_name": str, "description": str, "index": int, "total": int}
+            PROGRESSIVE_DONE:     {"tool_call_id": str, "tool_name": str, "description": str, "success": bool, "output": str, "index": int, "total": int}
+            PROGRESSIVE_RESPONSE: {"text": str, "index": int, "total": int}
     """
 
     type: StreamEventType

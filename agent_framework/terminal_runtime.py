@@ -501,6 +501,18 @@ async def _cmd_help(fw: AgentFramework, mock: InteractiveMockModel | None, state
     print(f"  {_dim('直接输入文本与 Agent 对话。所有命令均以 / 开头。')}")
 
 
+async def _execute_tool(fw: AgentFramework, tool_name: str, arguments: dict) -> Any:
+    """Route a CLI command through ToolExecutor.execute() for unified execution."""
+    from agent_framework.models.tool import ToolResult
+    if not fw._deps or not fw._deps.tool_executor:
+        return ToolResult(tool_call_id="cli", tool_name=tool_name, success=False,
+                          output="Framework not initialized")
+    import uuid
+    req = ToolCallRequest(id=f"cli_{uuid.uuid4().hex[:8]}", function_name=tool_name, arguments=arguments)
+    result, _meta = await fw._deps.tool_executor.execute(req)
+    return result
+
+
 @_register_cmd("exit", "退出程序", category="通用")
 async def _cmd_exit(fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str) -> None:
     return
@@ -557,20 +569,20 @@ async def _cmd_skills(fw: AgentFramework, mock: InteractiveMockModel | None, sta
 
 @_register_cmd("memories", "查看已保存的记忆", category="查看")
 async def _cmd_memories(fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str) -> None:
-    memory_manager = fw._deps.memory_manager if fw._deps else None
-    if not memory_manager:
+    result = await _execute_tool(fw, "list_memories", {"user_id": state.user_id})
+    if not result.success:
         print(f"    {_dim('(记忆系统未初始化)')}")
         return
-    agent_id = fw._agent.agent_id if fw._agent else ""
-    records = memory_manager.list_memories(agent_id, state.user_id)
+    records = result.output if isinstance(result.output, list) else []
     print(f"\n  {_bold('已保存记忆')} ({len(records)}):\n")
     for index, record in enumerate(records):
-        kind = _cyan(f"[{record.kind.value}]")
-        pinned = _yellow(" [pinned]") if record.pinned else ""
-        active = "" if record.active else _dim(" (inactive)")
-        print(f"    {_dim(f'#{index}')} {kind} {record.title}{pinned}{active}")
-        if record.content:
-            print(f"       {_dim(record.content[:80])}")
+        kind = _cyan(f"[{record.get('kind', '')}]")
+        pinned = _yellow(" [pinned]") if record.get("pinned") else ""
+        active = "" if record.get("active", True) else _dim(" (inactive)")
+        print(f"    {_dim(f'#{index}')} {kind} {record.get('title', '')}{pinned}{active}")
+        content = record.get("content", "")
+        if content:
+            print(f"       {_dim(content[:80])}")
     if not records:
         print(f"    {_dim('(无记忆)')}")
 
@@ -892,7 +904,8 @@ async def _cmd_skill_rm(fw: AgentFramework, mock: InteractiveMockModel | None, s
 
 @_register_cmd("memory-clear", "清空所有记忆", category="记忆")
 async def _cmd_memory_clear(fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str) -> None:
-    print(f"  {_green(f'已清除 {fw.clear_memories()} 条记忆')}")
+    result = await _execute_tool(fw, "clear_memories", {"user_id": state.user_id})
+    print(f"  {_green(result.output if result.success else '清除失败')}")
 
 
 @_register_cmd("memory-toggle", "开关记忆系统", usage="/memory-toggle on|off", category="记忆")
@@ -982,6 +995,16 @@ def _print_result(result: Any, include_trace: bool = True) -> None:
                         print(f"      {line}")
                 else:
                     print(f"      {_red(str(tool_result.error or tool_result.output or '未知错误'))}")
+
+    # Progressive intermediate responses — display like conversation turns
+    progressive = getattr(result, "progressive_responses", [])
+    if progressive:
+        print(f"\n  {_bold(_yellow('Progressive 中间回复:'))}")
+        for pi, resp in enumerate(progressive, 1):
+            print(f"  {_dim(f'[{pi}/{len(progressive)}]')} {_cyan('Agent:')}")
+            for line in resp.splitlines():
+                print(f"    {line}")
+            print()
 
     if result.success:
         print(f"\n  {_green('Agent 回复:')}")
@@ -1281,6 +1304,103 @@ async def _setup_protocols(fw: AgentFramework) -> None:
             print(f"  {_red(f'A2A 连接失败: {e}')}")
 
 
+async def _execute_with_progressive(
+    fw: AgentFramework,
+    mock_model: InteractiveMockModel | None,
+    state: ReplState,
+    user_input: str,
+) -> str:
+    """Execute user input with real-time progressive event display."""
+    from agent_framework.models.stream import StreamEventType
+
+    if mock_model:
+        mock_model._reset_turn()
+
+    result = None
+    has_progressive = False
+    progressive_tool_call_ids: set[str] = set()
+
+    async for event in fw.run_stream(
+        user_input,
+        initial_session_messages=state.history,
+        user_id=state.user_id,
+    ):
+        if event.type == StreamEventType.TOKEN:
+            print(event.data.get("text", ""), end="", flush=True)
+
+        elif event.type == StreamEventType.TOOL_CALL_START:
+            tool_name = event.data.get("tool_name", "?")
+            print(f"\n  {_dim('[tool]')} {_cyan(tool_name)}", end="", flush=True)
+
+        elif event.type == StreamEventType.TOOL_CALL_DONE:
+            tool_call_id = str(event.data.get("tool_call_id", ""))
+            if tool_call_id in progressive_tool_call_ids:
+                pass  # Suppress — PROGRESSIVE_DONE handles display
+            else:
+                success = event.data.get("success", False)
+                marker = _green(" [ok]") if success else _red(" [fail]")
+                print(marker, flush=True)
+
+        elif event.type == StreamEventType.ITERATION_START:
+            idx = event.data.get("iteration_index", 0)
+            if idx > 0:
+                print(f"\n  {_dim(f'--- iter #{idx + 1}')}")
+
+        elif event.type == StreamEventType.PROGRESSIVE_START:
+            tool_call_id = str(event.data.get("tool_call_id", ""))
+            if tool_call_id:
+                progressive_tool_call_ids.add(tool_call_id)
+            idx = event.data.get("index", 0)
+            total = event.data.get("total", 0)
+            tool_name = event.data.get("tool_name", "")
+            description = event.data.get("description", "")[:60]
+            tag = "subagent" if tool_name == "spawn_agent" else "tool"
+            print(f"  {_dim(f'[{tag} {idx}/{total}]')} {_yellow('启动:')} {description}")
+            has_progressive = True
+
+        elif event.type == StreamEventType.PROGRESSIVE_DONE:
+            idx = event.data.get("index", 0)
+            total = event.data.get("total", 0)
+            tool_name = event.data.get("tool_name", "")
+            success = event.data.get("success", False)
+            output = event.data.get("output", "")[:80]
+            status = _green("完成") if success else _red("失败")
+            tag = "subagent" if tool_name == "spawn_agent" else "tool"
+            print(f"  {_dim(f'[{tag} {idx}/{total}]')} {status}: {output}")
+
+        elif event.type == StreamEventType.PROGRESSIVE_RESPONSE:
+            text = event.data.get("text", "")
+            idx = event.data.get("index", 0)
+            total = event.data.get("total", 0)
+            print(f"  {_cyan(f'Agent [{idx}/{total}]:')}")
+            for line in text.splitlines():
+                print(f"    {line}")
+
+        elif event.type == StreamEventType.DONE:
+            result = event.data.get("result")
+            if result and result.success:
+                state.append_turn(user_input, result)
+
+    if result is None:
+        return f"  {_red('运行异常: 未收到结果')}"
+
+    if has_progressive:
+        # Progressive events already shown — just show final answer
+        if result.success:
+            lines = [f"\n  {_green('Agent 最终回复:')}"]
+            lines.append(f"  {'─' * 56}")
+            for line in (result.final_answer or "(无回答)").splitlines():
+                lines.append(f"  {line}")
+            lines.append(f"  {'─' * 56}")
+            parts = [f"迭代: {result.iterations_used}", f"Tokens: {result.usage.total_tokens}"]
+            lines.append(f"  {_dim(' | '.join(parts))}")
+            return "\n".join(lines)
+        return f"  {_red('Agent 错误:')} {result.error}"
+
+    # Non-progressive: use standard format
+    return format_result(result, include_trace=True)
+
+
 async def run_classic_repl(fw: AgentFramework, mock_model: InteractiveMockModel | None) -> None:
     import uuid
     from pathlib import Path
@@ -1321,7 +1441,8 @@ async def run_classic_repl(fw: AgentFramework, mock_model: InteractiveMockModel 
                 break
             continue
         try:
-            print(await execute_user_input(fw, mock_model, state, user_input))
+            output = await _execute_with_progressive(fw, mock_model, state, user_input)
+            print(output)
         except Exception as exc:
             print(f"\n  {_red('运行错误:')}")
             print(f"  {exc}")

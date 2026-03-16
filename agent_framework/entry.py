@@ -117,7 +117,7 @@ class AgentFramework:
         if hasattr(model_adapter, "_session_mode_config"):
             model_adapter._session_mode_config = self.config.model.session_mode
 
-        # Register built-in tools (filesystem, system, spawn_agent)
+        # Register built-in tools (filesystem, system, spawn_agent, memory_admin)
         from agent_framework.tools.builtin import register_all_builtins
         register_all_builtins(self._catalog)
 
@@ -214,6 +214,7 @@ class AgentFramework:
                 parent_deps=self._deps,
                 max_concurrent=self.config.subagent.max_concurrent_sub_agents,
                 max_per_run=self.config.subagent.max_sub_agents_per_run,
+                max_spawn_depth=self.config.subagent.max_spawn_depth,
             )
             self._deps.sub_agent_runtime = sub_runtime
             delegation_executor._sub_agent_runtime = sub_runtime
@@ -233,11 +234,17 @@ class AgentFramework:
                 allow_spawn_children=True,
                 max_concurrent_tool_calls=self.config.tools.max_concurrent_tool_calls,
                 allow_parallel_tool_calls=self.config.tools.allow_parallel_tool_calls,
+                progressive_tool_results=(self.config.subagent.execution_mode == "progressive"),
             )
 
         # Bind config-sourced policies to agent so run-level policy
         # reflects FrameworkConfig rather than BaseAgent defaults.
         self._bind_config_policies(self._agent)
+
+        # Bind memory context for memory_admin tools — AFTER agent creation
+        # so agent_id matches the actual agent (e.g. "orchestrator" not "default")
+        from agent_framework.tools.builtin.memory_admin import set_memory_context
+        set_memory_context(memory_manager, self._agent.agent_id)
 
         self._coordinator = RunCoordinator()
         self._setup_done = True
@@ -395,8 +402,21 @@ class AgentFramework:
             return []
         return await self._mcp_manager.list_resource_templates(server_id)
 
+    # ── Admin Plane API ────────────────────────────────────────
+    #
+    # These methods are ADMIN-PLANE interfaces for the host application.
+    # They bypass ToolExecutor intentionally — they are NOT part of the
+    # Agent capability plane.
+    #
+    # Agent/LLM capability MUST go through ToolExecutor.execute() which
+    # enforces: capability policy, confirmation, error envelope, audit.
+    #
+    # Do NOT add new Agent-facing capabilities here. Register them as
+    # @tool functions in tools/builtin/ instead.
+    # ──────────────────────────────────────────────────────────
+
     def list_memories(self, user_id: str | None = None) -> list:
-        """List saved memories for the current agent."""
+        """[Admin] List saved memories for the current agent."""
         if not self._setup_done:
             self.setup()
         return self._deps.memory_manager.list_memories(self._agent.agent_id, user_id)

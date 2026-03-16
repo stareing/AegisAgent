@@ -124,6 +124,9 @@ class TestSubAgentScheduler:
 
         cancelled = await sched.cancel("s1")
         assert cancelled is True
+        result = await sched.await_result(handle)
+        assert result.success is False
+        assert "cancelled" in (result.error or "").lower()
 
     @pytest.mark.asyncio
     async def test_cancel_nonexistent(self):
@@ -134,6 +137,7 @@ class TestSubAgentScheduler:
     @pytest.mark.asyncio
     async def test_cancel_all_tasks(self):
         sched = SubAgentScheduler(max_per_run=10)
+        handles: list[SubAgentHandle] = []
 
         async def _slow():
             await asyncio.sleep(10)
@@ -141,12 +145,16 @@ class TestSubAgentScheduler:
 
         for i in range(3):
             h = self._make_handle(spawn_id=f"s{i}")
+            handles.append(h)
             task_record = sched.allocate_task_id("run_1", f"s{i}")
             sched.submit(h, _slow(), deadline_ms=60000, task_record=task_record)
 
         await asyncio.sleep(0.01)
         count = await sched.cancel_all_tasks("run_1")
         assert count >= 1
+        for handle in handles:
+            if handle.spawn_id in sched._tasks or handle.spawn_id in sched._results:
+                await sched.await_result(handle)
 
     def test_allocate_task_id(self):
         """SubAgentScheduler is the sole source of subagent_task_id (v2.6.3 §39)."""
@@ -646,3 +654,43 @@ class TestAsyncLifecycleRegression:
         assert result.success is False
         assert handle.status == "CANCELLED"
         assert task_record.status == SubAgentTaskStatus.CANCELLED
+
+    @pytest.mark.asyncio
+    async def test_parallel_spawn_not_blocked_by_depth(self):
+        """Parallel spawns must not be blocked — depth is for recursive nesting only."""
+        from agent_framework.models.message import TokenUsage
+        from agent_framework.models.agent import AgentRunResult, StopSignal, StopReason
+        from agent_framework.subagent.runtime import SubAgentRuntime
+
+        mock_deps = MagicMock()
+        mock_deps.context_engineer.build_spawn_seed.return_value = []
+        mock_deps.tool_registry.list_tools.return_value = []
+        mock_deps.tool_registry.export_schemas.return_value = []
+
+        runtime = SubAgentRuntime(
+            parent_deps=mock_deps, max_concurrent=3, max_per_run=5,
+            max_spawn_depth=1,
+        )
+
+        mock_run_result = AgentRunResult(
+            run_id="child", success=True, final_answer="ok",
+            stop_signal=StopSignal(reason=StopReason.LLM_STOP),
+            usage=TokenUsage(total_tokens=10), iterations_used=1,
+        )
+        mock_coordinator = AsyncMock()
+        mock_coordinator.run = AsyncMock(return_value=mock_run_result)
+        runtime._coordinator = mock_coordinator
+
+        mock_agent = MagicMock()
+        mock_agent.agent_id = "sub"
+        mock_sub_deps = MagicMock()
+        mock_sub_deps.tool_registry.list_tools.return_value = []
+        runtime._factory.create_agent_and_deps = MagicMock(
+            return_value=(mock_agent, mock_sub_deps)
+        )
+
+        # Spawn 3 in sequence — none should be blocked
+        for i in range(3):
+            spec = SubAgentSpec(parent_run_id="r1", task_input=f"task {i}", deadline_ms=5000)
+            result = await runtime.spawn(spec, parent_agent=None)
+            assert result.success is True, f"Spawn {i} was unexpectedly blocked"

@@ -313,7 +313,7 @@ class TestOrchestratorAgent:
         """ToolExecutor must use _current_run_id as primary parent_run_id."""
         import inspect
         from agent_framework.tools.executor import ToolExecutor
-        source = inspect.getsource(ToolExecutor._route_execution)
+        source = inspect.getsource(ToolExecutor._subagent_spawn)
         # Primary assignment uses _current_run_id
         assert "parent_run_id = self._current_run_id" in source
         # set_current_run_id must exist
@@ -790,6 +790,60 @@ class TestRunCoordinator:
         result = await coordinator.run(agent, deps, "task")
         assert result.success is False
         assert "boom" in result.error
+
+    @pytest.mark.asyncio
+    async def test_run_progressive_records_intermediate_responses(self):
+        deps = self._make_deps()
+        agent = DefaultAgent(progressive_tool_results=True)
+        coordinator = RunCoordinator()
+
+        first_iteration = IterationResult(
+            model_response=ModelResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="tc_1",
+                        function_name="spawn_agent",
+                        arguments={"task_input": "task 1", "wait": True},
+                    ),
+                    ToolCallRequest(
+                        id="tc_2",
+                        function_name="spawn_agent",
+                        arguments={"task_input": "task 2", "wait": True},
+                    ),
+                ],
+                finish_reason="tool_calls",
+            ),
+            tool_results=[
+                ToolResult(tool_call_id="tc_1", tool_name="spawn_agent", success=True, output="result 1"),
+                ToolResult(tool_call_id="tc_2", tool_name="spawn_agent", success=True, output="result 2"),
+            ],
+            tool_execution_meta=[
+                ToolExecutionMeta(execution_time_ms=10, source="subagent"),
+                ToolExecutionMeta(execution_time_ms=20, source="subagent"),
+            ],
+        )
+        final_iteration = IterationResult(
+            model_response=ModelResponse(
+                content="final",
+                finish_reason="stop",
+                usage=TokenUsage(total_tokens=5),
+            ),
+            stop_signal=StopSignal(reason=StopReason.LLM_STOP),
+        )
+
+        mock_loop = AsyncMock(spec=AgentLoop)
+        mock_loop.execute_iteration.side_effect = [first_iteration, final_iteration]
+        mock_loop._call_llm = AsyncMock(
+            return_value=ModelResponse(content="mid response", finish_reason="stop")
+        )
+        coordinator._loop = mock_loop
+
+        result = await coordinator.run(agent, deps, "task")
+
+        assert result.success is True
+        assert result.final_answer == "final"
+        assert result.progressive_responses == ["mid response"]
 
     @pytest.mark.asyncio
     async def test_skill_detection(self):

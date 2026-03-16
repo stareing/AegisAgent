@@ -179,21 +179,14 @@ class DelegationExecutor:
                 error=f"{DelegationErrorCode.REMOTE_UNAVAILABLE}: A2A adapter not configured",
             )
 
-        # Find alias by URL
-        alias = None
-        for a, info in self._a2a_adapter._known_agents.items():
-            if info.get("url") == agent_url:
-                alias = a
-                break
+        # Find alias by URL — use public API, not private _known_agents
+        alias = self._a2a_adapter.resolve_alias(agent_url)
 
         if alias is None:
             # Try to discover on the fly
             try:
                 await self._a2a_adapter.discover_agent(agent_url)
-                for a, info in self._a2a_adapter._known_agents.items():
-                    if info.get("url") == agent_url:
-                        alias = a
-                        break
+                alias = self._a2a_adapter.resolve_alias(agent_url)
             except Exception as e:
                 logger.warning(
                     "delegation.a2a.discovery_failed",

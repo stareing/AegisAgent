@@ -40,6 +40,6 @@ def apply_capability_policy(
 
     # Filter memory admin tools (§11.10)
     if not policy.allow_memory_admin:
-        result = [t for t in result if t.meta.category != "memory"]
+        result = [t for t in result if t.meta.category not in ("memory", "memory_admin")]
 
     return result

@@ -7,3 +7,4 @@ logs/*.log
 data/*.db
 
 config/*.local.json
+data

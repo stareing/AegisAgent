@@ -137,14 +137,17 @@ class AgentLoop:
 
         if model_response.tool_calls:
             tool_names = [tc.function_name for tc in model_response.tool_calls]
+            progressive = getattr(effective_config, "progressive_tool_results", False)
             logger.info(
                 "iteration.dispatching_tools",
                 iteration_index=idx,
                 tool_count=len(model_response.tool_calls),
                 tool_names=tool_names,
+                mode="progressive" if progressive else "parallel",
             )
             tool_results, tool_metas = await self._dispatch_tool_calls(
-                agent, loop_deps.tool_executor, model_response.tool_calls, agent_state
+                agent, loop_deps.tool_executor, model_response.tool_calls, agent_state,
+                progressive=progressive,
             )
             success_count = sum(1 for r in tool_results if r.success)
             fail_count = len(tool_results) - success_count
@@ -157,8 +160,6 @@ class AgentLoop:
                 total_time_ms=total_time,
             )
         else:
-            # Model responded with text but no stop signal and no tool calls
-            # — potential no-progress scenario
             logger.warning(
                 "iteration.no_tool_no_stop",
                 iteration_index=idx,
@@ -404,12 +405,30 @@ class AgentLoop:
             )
             return
 
+        if model_response.tool_calls:
+            yield StreamEvent(
+                type=StreamEventType.ASSISTANT_TOOL_CALLS,
+                data={
+                    "content": model_response.content,
+                    "tool_calls": model_response.tool_calls,
+                },
+            )
+
         # 3. Dispatch tool calls
         tool_results: list[ToolResult] = []
         tool_metas: list[ToolExecutionMeta] = []
 
         if model_response.tool_calls:
-            for tc in model_response.tool_calls:
+            progressive = getattr(effective_config, "progressive_tool_results", False)
+            total_tools = len(model_response.tool_calls)
+            is_progressive = (
+                progressive
+                and total_tools > 1
+                and hasattr(type(loop_deps.tool_executor), "batch_execute_progressive")
+            )
+
+            # Emit start events — PROGRESSIVE_START for all tools in progressive mode
+            for ti, tc in enumerate(model_response.tool_calls):
                 yield StreamEvent(
                     type=StreamEventType.TOOL_CALL_START,
                     data={
@@ -418,22 +437,66 @@ class AgentLoop:
                         "arguments": tc.arguments,
                     },
                 )
+                if is_progressive:
+                    description = self._progressive_tool_description(tc)
+                    yield StreamEvent(
+                        type=StreamEventType.PROGRESSIVE_START,
+                        data={"tool_call_id": tc.id, "tool_name": tc.function_name,
+                              "description": description,
+                              "index": ti + 1, "total": total_tools},
+                    )
 
-            tool_results, tool_metas = await self._dispatch_tool_calls(
-                agent, loop_deps.tool_executor, model_response.tool_calls, agent_state
-            )
+            if is_progressive:
+                # Progressive: yield events AS EACH TOOL COMPLETES — true real-time
+                completed = 0
+                async for result, meta in self._dispatch_progressive_stream(
+                    agent, loop_deps.tool_executor, model_response.tool_calls, agent_state,
+                ):
+                    completed += 1
+                    tool_results.append(result)
+                    tool_metas.append(meta)
+                    output_str = str(result.output)[:500] if result.output else ""
 
-            for tr, tm in zip(tool_results, tool_metas):
-                output_str = str(tr.output)[:500] if tr.output else ""
-                yield StreamEvent(
-                    type=StreamEventType.TOOL_CALL_DONE,
-                    data={
-                        "tool_name": tr.tool_name,
-                        "tool_call_id": tr.tool_call_id,
-                        "success": tr.success,
-                        "output": output_str,
-                    },
+                    # TOOL_CALL_DONE — immediate
+                    yield StreamEvent(
+                        type=StreamEventType.TOOL_CALL_DONE,
+                        data={
+                            "tool_name": result.tool_name,
+                            "tool_call_id": result.tool_call_id,
+                            "success": result.success,
+                            "output": output_str,
+                        },
+                    )
+
+                    # PROGRESSIVE_DONE — immediate, same moment as tool done
+                    description = ""
+                    for tc in model_response.tool_calls:
+                        if tc.id == result.tool_call_id:
+                            description = self._progressive_tool_description(tc)
+                            break
+                    yield StreamEvent(
+                        type=StreamEventType.PROGRESSIVE_DONE,
+                        data={"tool_call_id": result.tool_call_id, "tool_name": result.tool_name,
+                              "description": description,
+                              "success": result.success, "output": output_str[:200],
+                              "index": completed, "total": total_tools},
+                    )
+            else:
+                # Non-progressive: batch execute, then emit all DONE events
+                tool_results, tool_metas = await self._dispatch_tool_calls(
+                    agent, loop_deps.tool_executor, model_response.tool_calls, agent_state,
                 )
+                for tr, tm in zip(tool_results, tool_metas):
+                    output_str = str(tr.output)[:500] if tr.output else ""
+                    yield StreamEvent(
+                        type=StreamEventType.TOOL_CALL_DONE,
+                        data={
+                            "tool_name": tr.tool_name,
+                            "tool_call_id": tr.tool_call_id,
+                            "success": tr.success,
+                            "output": output_str,
+                        },
+                    )
 
         yield IterationResult(
             iteration_index=idx,
@@ -678,6 +741,7 @@ class AgentLoop:
         tool_executor: ToolExecutorProtocol,
         tool_calls: list[ToolCallRequest],
         agent_state: AgentState,
+        progressive: bool = False,
     ) -> tuple[list[ToolResult], list[ToolExecutionMeta]]:
         """Dispatch tool calls with pre-dispatch constraints.
 
@@ -806,13 +870,34 @@ class AgentLoop:
             "tool.batch_executing",
             tool_names=[tc.function_name for tc in approved],
             count=len(approved),
+            mode="progressive" if progressive else "parallel",
         )
-        results_with_meta = await tool_executor.batch_execute(approved)
 
-        for result, meta in results_with_meta:
-            results.append(result)
-            metas.append(meta)
-            await agent.on_tool_call_completed(result)
+        if progressive and len(approved) > 1 and hasattr(type(tool_executor), "batch_execute_progressive"):
+            # Progressive: all tools run in parallel, results stream back
+            # as each completes. The LLM sees tool_result messages arriving
+            # one by one in completion order within a single iteration.
+            async for result, meta in tool_executor.batch_execute_progressive(approved):
+                results.append(result)
+                metas.append(meta)
+                await agent.on_tool_call_completed(result)
+                logger.info(
+                    "tool.progressive_completed",
+                    tool_name=result.tool_name,
+                    success=result.success,
+                    execution_time_ms=meta.execution_time_ms,
+                    completed_so_far=len(results),
+                    total=len(approved) + len(pre_results),
+                )
+        else:
+            # Parallel (default) or single tool: execute all together
+            results_with_meta = await tool_executor.batch_execute(approved)
+            for result, meta in results_with_meta:
+                results.append(result)
+                metas.append(meta)
+                await agent.on_tool_call_completed(result)
+
+        for result, meta in zip(results[-len(approved):], metas[-len(approved):]):
             if result.success:
                 output_preview = str(result.output)[:150] if result.output else ""
                 logger.info(
@@ -833,6 +918,85 @@ class AgentLoop:
                 )
 
         return results, metas
+
+    async def _dispatch_progressive_stream(
+        self,
+        agent: BaseAgent,
+        tool_executor: ToolExecutorProtocol,
+        tool_calls: list[ToolCallRequest],
+        agent_state: AgentState,
+    ) -> AsyncGenerator[tuple[ToolResult, ToolExecutionMeta], None]:
+        """Progressive tool dispatch — yields (result, meta) as each completes.
+
+        Runs pre-dispatch guards (dedup, policy, hooks) identically to
+        _dispatch_tool_calls, then uses batch_execute_progressive to yield
+        results in completion order. Each yield triggers an immediate
+        TOOL_CALL_DONE event in the caller.
+        """
+        succeeded_sigs = self._collect_succeeded_signatures(agent_state)
+        capability_policy = agent.get_capability_policy()
+        approved: list[ToolCallRequest] = []
+
+        for tc in tool_calls:
+            sig = self._single_tool_signature(tc)
+            if sig in succeeded_sigs:
+                yield (
+                    ToolResult(
+                        tool_call_id=tc.id, tool_name=tc.function_name,
+                        success=True, output=succeeded_sigs[sig],
+                    ),
+                    ToolExecutionMeta(execution_time_ms=0, source="local"),
+                )
+                continue
+            if hasattr(tool_executor, "is_tool_allowed"):
+                if not tool_executor.is_tool_allowed(tc.function_name, capability_policy):
+                    yield (
+                        ToolResult(
+                            tool_call_id=tc.id, tool_name=tc.function_name,
+                            success=False, output=f"Tool '{tc.function_name}' blocked by policy.",
+                        ),
+                        ToolExecutionMeta(execution_time_ms=0, source="local"),
+                    )
+                    continue
+            decision = await agent.on_tool_call_requested(tc)
+            if decision.allowed:
+                approved.append(tc)
+            else:
+                yield (
+                    ToolResult(
+                        tool_call_id=tc.id, tool_name=tc.function_name,
+                        success=False, output=f"Tool denied: {decision.reason or 'policy'}",
+                    ),
+                    ToolExecutionMeta(execution_time_ms=0, source="local"),
+                )
+
+        if approved:
+            async for result, meta in tool_executor.batch_execute_progressive(approved):
+                await agent.on_tool_call_completed(result)
+                logger.info(
+                    "tool.progressive_done",
+                    tool_name=result.tool_name,
+                    success=result.success,
+                    execution_time_ms=meta.execution_time_ms,
+                )
+                yield result, meta
+
+    @staticmethod
+    def _progressive_tool_description(tc: ToolCallRequest) -> str:
+        """Extract a human-readable description for progressive UI display."""
+        if tc.function_name == "spawn_agent":
+            return str(tc.arguments.get("task_input", ""))[:100]
+        # For other tools: tool_name + key argument summary
+        args = tc.arguments or {}
+        if not args:
+            return tc.function_name
+        # Pick the first string-valued argument as summary
+        for key in ("query", "input", "text", "command", "path", "url", "name", "task"):
+            if key in args:
+                return f"{tc.function_name}({str(args[key])[:60]})"
+        # Fallback: first arg value
+        first_key = next(iter(args))
+        return f"{tc.function_name}({first_key}={str(args[first_key])[:40]})"
 
     def _handle_iteration_error(
         self,

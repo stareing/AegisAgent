@@ -452,8 +452,12 @@ class A2AClientAdapter:
 
         return None
 
-    def _resolve_alias(self, agent_url: str) -> str | None:
+    def resolve_alias(self, agent_url: str) -> str | None:
+        """Resolve an agent URL to its alias. Public API for DelegationExecutor."""
         for alias, info in self._known_agents.items():
             if info.get("url") == agent_url:
                 return alias
         return None
+
+    # Keep old name for backward compat
+    _resolve_alias = resolve_alias

@@ -801,6 +801,10 @@ class TestRegressionFixes:
         )
         assert result.success is True
         assert delegation.task_input == "hello a2a"
+        # Result must be DelegationSummary dict (unified with local subagent)
+        assert isinstance(result.output, dict)
+        assert "status" in result.output
+        assert "summary" in result.output
 
     def test_subagent_factory_uses_scoped_executor(self):
         from agent_framework.subagent.factory import SubAgentFactory
