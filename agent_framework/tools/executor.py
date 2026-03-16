@@ -8,9 +8,17 @@ from typing import TYPE_CHECKING, Any, Callable
 from pydantic import ValidationError
 
 from agent_framework.infra.logger import get_logger
+from agent_framework.infra.telemetry import get_tracing_manager
+from agent_framework.models.hook import HookPoint
+from agent_framework.hooks.errors import HookDeniedError
+from agent_framework.hooks.dispatcher import HookDispatchService
+from agent_framework.hooks.payloads import (
+    tool_pre_use_payload, tool_post_use_payload, tool_error_payload,
+    artifact_produced_payload,
+)
 from agent_framework.agent.capability_policy import apply_capability_policy
 from agent_framework.models.agent import CapabilityPolicy
-from agent_framework.models.message import ToolCallRequest
+from agent_framework.models.message import Message, ToolCallRequest
 from agent_framework.models.tool import (
     FieldError,
     ToolEntry,
@@ -63,6 +71,7 @@ class ToolExecutor:
         mcp_client_manager: Any = None,
         parent_agent_getter: Callable[[], Any | None] | None = None,
         max_concurrent: int = 5,
+        hook_executor: Any = None,
     ) -> None:
         self._registry = registry
         self._confirmation = confirmation_handler
@@ -70,6 +79,10 @@ class ToolExecutor:
         self._mcp = mcp_client_manager
         self._parent_agent_getter = parent_agent_getter
         self._max_concurrent = max_concurrent
+        self._hook_executor = hook_executor
+        self._hook_dispatcher: HookDispatchService | None = (
+            HookDispatchService(hook_executor) if hook_executor is not None else None
+        )
         # Set by RunCoordinator at run start — used for parent_run_id in spawn
         self._current_run_id: str = ""
         # Set by RunCoordinator each iteration — used for child context seed.
@@ -88,6 +101,7 @@ class ToolExecutor:
     async def execute(
         self, tool_call_request: ToolCallRequest, policy: CapabilityPolicy | None = None
     ) -> tuple[ToolResult, ToolExecutionMeta]:
+        _tm = get_tracing_manager()
         start = time.monotonic()
         tool_name = tool_call_request.function_name
 
@@ -122,21 +136,82 @@ class ToolExecutor:
                 self._meta(entry, start),
             )
 
+        # PRE_TOOL_USE hook
+        if self._hook_dispatcher is not None:
+            try:
+                outcome = await self._hook_dispatcher.fire(
+                    HookPoint.PRE_TOOL_USE,
+                    run_id=self._current_run_id or None,
+                    payload=tool_pre_use_payload(
+                        tool_name=tool_name,
+                        tool_call_id=tool_call_request.id or "",
+                        arguments=validated,
+                        tool_tags=list(entry.meta.tags),
+                        source=entry.meta.source,
+                    ),
+                )
+                if outcome.needs_confirmation and self._confirmation:
+                    approved = await self._confirmation.request_confirmation(
+                        tool_name, validated,
+                        outcome.confirmation_reason,
+                    )
+                    if not approved:
+                        return self._permission_denied(tool_call_request, start)
+                if "sanitized_arguments" in outcome.modifications:
+                    validated = outcome.modifications["sanitized_arguments"]
+            except HookDeniedError as hde:
+                logger.info("tool.hook_denied", tool_name=tool_name, reason=str(hde))
+                return self._permission_denied(tool_call_request, start)
+
         # Execute
-        try:
-            output = await self._route_execution(entry, validated)
-            output = self._sanitize_output(output, tool_name)
-            return (
-                ToolResult(
+        with _tm.span("agent.tool", attributes={
+            "tool_name": tool_name,
+            "tool_call_id": tool_call_request.id or "",
+            "source": entry.meta.source if hasattr(entry.meta, "source") else "local",
+        }) as _tool_span:
+            try:
+                output = await self._route_execution(entry, validated)
+                output = self._sanitize_output(output, tool_name)
+                _tool_span.set_attribute("success", True)
+                result = ToolResult(
                     tool_call_id=tool_call_request.id,
                     tool_name=tool_name,
                     success=True,
                     output=output,
-                ),
-                self._meta(entry, start),
-            )
-        except Exception as e:
-            return self._handle_tool_error(tool_name, e, entry, start, tool_call_id=tool_call_request.id)
+                )
+                meta = self._meta(entry, start)
+                # POST_TOOL_USE hook (best-effort)
+                if self._hook_dispatcher is not None:
+                    try:
+                        post_outcome = await self._hook_dispatcher.fire(
+                            HookPoint.POST_TOOL_USE,
+                            run_id=self._current_run_id or None,
+                            payload=tool_post_use_payload(
+                                tool_name=tool_name,
+                                tool_call_id=tool_call_request.id or "",
+                                success=True,
+                                output_preview=str(output),
+                            ),
+                        )
+                        for art in post_outcome.emitted_artifacts:
+                            await self._hook_dispatcher.fire_advisory(
+                                HookPoint.ARTIFACT_PRODUCED,
+                                run_id=self._current_run_id or None,
+                                payload=artifact_produced_payload(art, tool_name),
+                            )
+                    except Exception:
+                        pass
+                return result, meta
+            except Exception as e:
+                _tool_span.set_attribute("success", False)
+                _tool_span.record_exception(e)
+                if self._hook_dispatcher is not None:
+                    await self._hook_dispatcher.fire_advisory(
+                        HookPoint.TOOL_ERROR,
+                        run_id=self._current_run_id or None,
+                        payload=tool_error_payload(tool_name, type(e).__name__, str(e)),
+                    )
+                return self._handle_tool_error(tool_name, e, entry, start, tool_call_id=tool_call_request.id)
 
     async def batch_execute(
         self, tool_call_requests: list[ToolCallRequest], policy: CapabilityPolicy | None = None
@@ -293,11 +368,14 @@ class ToolExecutor:
 
     async def _subagent_spawn(self, args: dict) -> Any:
         """Build SubAgentSpec from arguments and dispatch sync or async."""
-        from agent_framework.models.subagent import MemoryScope, SpawnMode, SubAgentSpec
+        from agent_framework.models.subagent import (
+            MemoryScope, SpawnContextMode, SpawnMode, SubAgentSpec,
+        )
         from agent_framework.context.builder import ContextBuilder
 
         mode_str = args.get("mode", "ephemeral").upper()
         scope_str = args.get("memory_scope", "isolated").upper()
+        context_mode_str = args.get("context_mode", "minimal").upper()
         wait = args.get("wait", True)
         # In progressive mode, force wait=True — the batch_execute_progressive
         # already handles "return as each completes". Using wait=False would
@@ -309,23 +387,36 @@ class ToolExecutor:
         if not parent_run_id and parent_agent and hasattr(parent_agent, "agent_id"):
             parent_run_id = parent_agent.agent_id
 
+        context_mode = (
+            SpawnContextMode(context_mode_str)
+            if context_mode_str in SpawnContextMode.__members__
+            else SpawnContextMode.MINIMAL
+        )
+
         spec = SubAgentSpec(
             parent_run_id=parent_run_id,
             task_input=args.get("task_input", ""),
             mode=SpawnMode(mode_str) if mode_str in SpawnMode.__members__ else SpawnMode.EPHEMERAL,
             skill_id=args.get("skill_id"),
             tool_category_whitelist=args.get("tool_categories"),
+            context_mode=context_mode,
             memory_scope=MemoryScope(scope_str) if scope_str in MemoryScope.__members__ else MemoryScope.ISOLATED,
             token_budget=int(args.get("token_budget", 4096)),
             max_iterations=int(args.get("max_iterations", 10)),
             deadline_ms=int(args.get("deadline_ms", 0)),
         )
         if spec.context_seed is None:
-            spec.context_seed = ContextBuilder().build_spawn_seed(
-                session_messages=self._current_session_messages,
-                query=spec.task_input,
-                token_budget=spec.token_budget,
-            )
+            builder = ContextBuilder()
+            if context_mode == SpawnContextMode.MINIMAL:
+                # MINIMAL: only the task_input — prevents sibling task leakage
+                spec.context_seed = [Message(role="user", content=spec.task_input)]
+            else:
+                # PARENT_CONTEXT: filtered parent session (no tool/delegation messages)
+                spec.context_seed = builder.build_filtered_spawn_seed(
+                    session_messages=self._current_session_messages,
+                    query=spec.task_input,
+                    token_budget=spec.token_budget,
+                )
 
         parent_id = getattr(parent_agent, "agent_id", "unknown") if parent_agent else "none"
         logger.info(

@@ -21,7 +21,7 @@ python -m agent_framework.main --config config/openai.json
 # 运行演示
 python run_demo.py
 
-# 运行测试（757 项全部通过）
+# 运行测试（978 项全部通过）
 pytest tests/
 
 # 使用 Textual TUI 运行（需安装）
@@ -145,7 +145,7 @@ python -m agent_framework.main --config config/deepseek.json
 }
 ```
 
-Progressive 模式：LLM 同时派发 3 个子 Agent → 并行执行 → 每完成一个立即返回结果给 LLM → LLM 逐个汇报 → 全部完成后总结。
+Progressive 模式对**所有外部工具调用**生效（不仅限于 spawn_agent）：LLM 同时派发多个工具 → 并行执行 → 每完成一个立即返回结果给 LLM → LLM 逐个响应 → 全部完成后总结。TUI 中 spawn_agent 显示为 `[subagent N/M]`，其他工具显示为 `[tool N/M]`。
 
 #### 能力平面架构
 
@@ -161,7 +161,7 @@ Progressive 模式：LLM 同时派发 3 个子 Agent → 并行执行 → 每完
 
 `AgentFramework` 上的管理方法（list_memories、clear_memories 等）属于 Admin 平面——为宿主应用直接使用，不经过 ToolExecutor。
 
-### 模型适配器（11 个）
+### 模型适配器（11 个）+ Fallback 链
 
 | 适配器 | 类型 |
 |--------|------|
@@ -175,6 +175,21 @@ Progressive 模式：LLM 同时派发 3 个子 Agent → 并行执行 → 每完
 | Zhipu（智谱） | OpenAI 兼容 |
 | MiniMax | OpenAI 兼容 |
 | Custom（自定义） | OpenAI 兼容模板 |
+
+所有适配器内置指数退避重试（`2^attempt + random`，上限 30s）。支持 **Fallback 链**：主模型重试耗尽后自动切换备用模型。
+
+```json
+{
+  "model": {
+    "adapter_type": "doubao",
+    "default_model_name": "doubao-seed-2-0-pro",
+    "fallback_models": [
+      {"adapter_type": "deepseek", "default_model_name": "deepseek-chat", "api_key": "..."},
+      {"adapter_type": "openai", "default_model_name": "gpt-4o", "api_key": "..."}
+    ]
+  }
+}
+```
 
 ```bash
 # 通过配置文件切换模型
@@ -357,6 +372,221 @@ app = framework.build_a2a_server(name="my-agent", port=9000)
 uvicorn.run(app, host="0.0.0.0", port=9000)
 ```
 
+### 安全沙箱
+
+- **Shell 工具默认关闭**：`tools.shell_enabled: false`，需显式启用
+- **环境变量白名单**：子进程仅继承 `PATH`、`HOME`、`PYTHONPATH` 等安全变量，API Key 等敏感变量自动过滤
+- **命令黑名单**：26 个高危命令（`sudo`、`curl`、`wget`、`iptables` 等）被禁止
+- **文件系统沙箱**：`AGENT_FS_SANDBOX_ROOTS` 限制文件访问范围，敏感路径（`.env`、`.pem`、`.ssh`）自动拦截
+- **`get_env` 需确认**：读取环境变量需用户审批
+
+```json
+{
+  "tools": {
+    "shell_enabled": true
+  }
+}
+```
+
+### 可观测性（OpenTelemetry）
+
+原生 OpenTelemetry 分布式追踪，SDK 缺失时自动降级为零开销 noop。
+
+```
+agent.run (run_id, agent_id, model, task)
+├── agent.iteration (iteration_index, context_messages)
+│   ├── agent.llm.call (message_count)
+│   └── agent.tool (tool_name, source, success)
+└── [success, iterations_used, total_tokens, elapsed_ms]
+```
+
+```json
+{
+  "tracing": {
+    "enabled": true,
+    "exporter_type": "console",
+    "service_name": "my-agent"
+  }
+}
+```
+
+支持 OTLP 导出到 Jaeger / Grafana Tempo 等后端。安装可选依赖：`pip install -e ".[otel]"`
+
+### Hooks & Plugins 扩展系统
+
+受治理的框架扩展点 — hooks 可在 20 个预定义生命周期点观察、拦截或修改。Plugin 将 hooks、工具、命令、agent 模板打包为可安装的扩展单元。所有 hook 调度通过统一的 `HookDispatchService`；plugin 注册/回滚通过对称的 `PluginExtensionRegistrar`。
+
+#### Hook 挂载点（20 个）
+
+| 分类 | 挂载点 | DENY | MODIFY |
+|------|--------|------|--------|
+| **运行** | `run.start`、`run.finish`、`run.error` | 否 | 否 |
+| **迭代** | `iteration.start`、`iteration.finish`、`iteration.error` | 否 | 否 |
+| **工具** | `tool.pre_use`、`tool.post_use`、`tool.error` | pre | pre: `sanitized_arguments`、`display_name` |
+| **委派** | `delegation.pre`、`delegation.post`、`delegation.error` | pre | pre: `task_input_override`、`deadline_ms_override` |
+| **记忆** | `memory.pre_record`、`memory.post_record` | pre | pre: `content`、`title`、`tags` |
+| **上下文** | `context.pre_build`、`context.post_build` | pre | pre: `extra_instructions`、`compression_preference` |
+| **产物** | `artifact.produced`、`artifact.finalize` | 否 | 否 |
+| **配置** | `config.loaded`、`instructions.loaded` | 否 | 否 |
+
+#### 编写自定义 Hook
+
+```python
+from agent_framework.models.hook import (
+    HookCategory, HookContext, HookExecutionMode, HookFailurePolicy,
+    HookMeta, HookPoint, HookResult, HookResultAction,
+)
+
+class MyToolGuard:
+    """拦截参数过大的工具调用。"""
+
+    def __init__(self) -> None:
+        self._meta = HookMeta(
+            hook_id="my_org.tool_guard",
+            plugin_id="my_org",
+            name="参数大小守卫",
+            hook_point=HookPoint.PRE_TOOL_USE,
+            category=HookCategory.COMMAND,
+            failure_policy=HookFailurePolicy.WARN,
+            priority=10,       # 数字越小越先执行
+            timeout_ms=1000,
+        )
+
+    @property
+    def meta(self) -> HookMeta:
+        return self._meta
+
+    def execute(self, context: HookContext) -> HookResult:
+        args = context.payload.get("arguments", {})
+        if len(str(args)) > 50_000:
+            return HookResult(
+                action=HookResultAction.DENY,
+                message="参数过大",
+            )
+        return HookResult(action=HookResultAction.ALLOW)
+
+# 注册到框架
+framework.register_hook(MyToolGuard())
+```
+
+也支持异步 hook — 将 `execute` 改为 `async def` 即可。
+
+#### Hook 结果动作
+
+| 动作 | 含义 | 生效范围 |
+|------|------|----------|
+| `ALLOW` / `NOOP` | 放行 | 所有挂载点 |
+| `DENY` | 阻止操作 | 仅 pre 类（`tool.pre_use`、`delegation.pre`、`memory.pre_record`、`context.pre_build`） |
+| `MODIFY` | 修改白名单字段 | 仅 pre 类（按挂载点限定可修改字段） |
+| `REQUEST_CONFIRMATION` | 触发用户确认处理器 | 仅 pre 类 |
+| `EMIT_ARTIFACT` | 产出产物待注册 | post 类 |
+
+MODIFY 通过按挂载点的字段白名单强制执行 — 非白名单字段静默丢弃并记录警告。
+
+#### 内置 Hook
+
+| Hook | 挂载点 | 用途 |
+|------|--------|------|
+| `ToolGuardHook` | `tool.pre_use` | 参数大小限制、危险标签过滤 |
+| `AuditNotifyHook` | `run.finish` / `run.error` | 结构化审计记录 + 通知回调 |
+| `MemoryReviewHook` | `memory.pre_record` | 内容策略（大小、标签数、敏感数据检测） |
+
+```python
+from agent_framework.hooks.builtin import ToolGuardHook, AuditNotifyHook, MemoryReviewHook
+
+# 门禁：拦截参数过大的工具调用
+framework.register_hook(ToolGuardHook(max_argument_chars=50_000))
+
+# 审计：运行完成时发送 webhook
+framework.register_hook(AuditNotifyHook(
+    hook_point=HookPoint.RUN_FINISH,
+    notify_callback=lambda record: requests.post(WEBHOOK_URL, json=record),
+))
+
+# 记忆：阻止敏感数据写入记忆存储
+framework.register_hook(MemoryReviewHook(max_content_length=5000))
+```
+
+#### Hook 执行规则
+
+- **稳定顺序**：`priority`（升序）→ `plugin_id` → `hook_id`
+- **失败策略**：`ignore` / `warn` / `fail_closed`（按 hook 配置）
+- **超时**：按 hook 独立控制（默认 3s）
+- **冻结上下文**：`HookContext` 不可变，payload 构造时深拷贝
+- **实例级隔离**：每个 `AgentFramework` 拥有独立的 `HookSubsystem`，无全局单例污染
+
+#### 架构：HookDispatchService
+
+所有内核组件通过 `HookDispatchService` 统一调度 hook：
+
+```python
+# 异步（coordinator、loop、executor、delegation、context engineer）
+outcome = await dispatcher.fire(HookPoint.PRE_TOOL_USE, run_id=..., payload=...)
+
+# 同步（memory manager、entry.py setup 阶段）
+outcome = dispatcher.fire_sync(HookPoint.MEMORY_PRE_RECORD, payload=...)
+
+# 仅通知（POST 类 hook，永不阻塞主流程）
+await dispatcher.fire_advisory(HookPoint.POST_TOOL_USE, payload=...)
+```
+
+Payload 构造使用集中式工厂（`hooks/payloads.py`），字段名只定义一次。
+
+#### Plugin 系统
+
+Plugin 是可安装的扩展包，可提供 hooks、工具、命令（技能）和 agent 模板：
+
+```python
+from agent_framework.models.plugin import PluginManifest, PluginPermission
+
+class MyPlugin:
+    @property
+    def manifest(self) -> PluginManifest:
+        return PluginManifest(
+            plugin_id="my-plugin",
+            name="My Plugin",
+            version="1.0.0",
+            provides_hooks=True,
+            provides_tools=True,
+            provides_commands=True,
+            required_permissions=[PluginPermission.REGISTER_HOOKS],
+        )
+
+    def load(self) -> None: ...
+    def enable(self) -> None: ...
+    def disable(self) -> None: ...
+    def unload(self) -> None: ...
+
+    def get_hooks(self) -> list:
+        return [MyToolGuard()]
+
+    def get_tools(self) -> list:
+        return []  # ToolEntry 列表
+
+    def get_commands(self) -> list:
+        return []  # Skill 列表 — 注册到 SkillRouter
+
+    def get_agents(self) -> list:
+        return []  # Agent 模板字典 — 可通过框架 API 查询
+
+# 使用
+framework.load_plugin(MyPlugin())
+framework.enable_plugin("my-plugin")  # 自动先执行 validate（权限/依赖/版本）
+
+# 查询插件 agent 模板
+templates = framework.list_plugin_agent_templates()
+
+# 禁用 — 完整移除所有 hooks、工具、命令、agent 模板
+framework.disable_plugin("my-plugin")
+```
+
+- **生命周期**：`DISCOVERED → VALIDATED → LOADED → ENABLED ⇄ DISABLED → UNLOADED`
+- **强制校验**：`enable()` 内部强制先执行 `validate()`（权限、依赖、框架版本范围）
+- **权限模型**：10 种声明式权限；`REGISTER_TOOLS` 和 `SPAWN_AGENT` 为高风险权限（需显式授予）
+- **冲突检测**：双向 — `A.conflicts = ["B"]` 同时阻止 A→B 和 B→A
+- **原子回滚**：`enable()` 失败通过 `PluginExtensionRegistrar` 回滚所有部分注册（hooks、工具、命令）
+- **对称禁用**：`disable()` 精确移除 `enable()` 注册的所有内容，无残留泄漏
+
 ---
 
 ## 架构总览
@@ -385,7 +615,10 @@ uvicorn.run(app, host="0.0.0.0", port=9000)
 ├─────────────────────────────────────────────────┤
 │  协议 (MCP Client, A2A Client)                  │
 ├─────────────────────────────────────────────────┤
-│  基础设施 (Config, Logger, EventBus, DiskStore) │
+│  Hooks (注册表, 执行器, 内置Hooks)              │
+│  Plugins (Manifest, 加载器, 生命周期, 权限)     │
+├─────────────────────────────────────────────────┤
+│  基础设施 (Config, Logger, EventBus, Telemetry) │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -404,6 +637,7 @@ uvicorn.run(app, host="0.0.0.0", port=9000)
 - **唯一写端口**：只有 `RunStateController` 可修改 `AgentState` / `SessionState`
 - **策略解释权唯一**：ContextPolicy 只归 ContextEngineer 解释，MemoryPolicy 只归 MemoryManager 解释
 - **事件仅可观测**：EventBus 订阅方禁止修改任何状态，投递语义为尽力而为
+- **Hook 治理**：Hook 只消费 DTO 快照，不可绕过 CommitSequencer 或直接写核心状态
 - **不支持恢复**：中断的 run 视为终止，继续执行必须创建新 run
 - **重试需幂等声明**：`retryable=true` 不等于 `idempotent=true`，自动重试需要幂等保障
 
@@ -418,15 +652,17 @@ agent_framework/
 ├── memory/          # 记忆管理器、SQLite 存储
 ├── context/         # 上下文工程、压缩、5 槽构建器
 ├── subagent/        # 子 Agent 工厂、调度器、运行时
-├── models/          # pydantic v2 数据模型
+├── hooks/           # Hook 注册表、执行器、内置 hooks
+├── plugins/         # Plugin manifest、加载器、生命周期、权限
+├── models/          # pydantic v2 数据模型（含 hook & plugin）
 ├── protocols/       # MCP 客户端、A2A 客户端
 ├── adapters/model/  # LLM 适配器（11 个提供商）
-├── infra/           # 配置、日志、事件总线
+├── infra/           # 配置、日志、事件总线、追踪
 ├── entry.py         # 框架入口门面
 ├── cli.py           # CLI 入口点
 └── main.py          # 交互式终端
 config/              # 模型配置文件（JSON）
-tests/               # 757 项测试
+tests/               # 978 项测试，27 个测试文件
 ```
 
 ---
@@ -620,7 +856,7 @@ async def chat(message: str, session_id: str | None = None):
 ## 测试
 
 ```bash
-# 全量测试（757 项）
+# 全量测试（978 项）
 pytest tests/
 
 # 仅运行架构守卫测试
@@ -636,10 +872,11 @@ pytest tests/test_subagent.py -v
 
 | 类别 | 说明 | 数量 |
 |------|------|------|
-| 单元测试 | Agent、工具、记忆、上下文、子 Agent 各模块 | ~300 |
+| 单元测试 | Agent、工具、记忆、上下文、子 Agent 各模块 | ~350 |
 | 红线测试 | v2.5.2 – v2.6.5 架构边界断言 | 106 |
 | 架构守卫 | 反旁路扫描 + 故障注入 + 数据流不变量 | 43 |
-| 集成测试 | 完整 run 生命周期、模型适配器冒烟测试 | ~300 |
+| 安全测试 | 沙箱白名单、环境变量过滤、并发锁 | ~20 |
+| 集成测试 | 完整 run 生命周期、适配器、Fallback、OTel | ~350 |
 
 ### 架构守卫覆盖（test_architecture_guard.py）
 
@@ -676,7 +913,8 @@ pytest tests/test_subagent.py -v
 | 结构化日志 | structlog |
 | 事件总线 | blinker |
 | LLM 路由 | litellm |
-| 持久化 | SQLite |
+| 持久化 | SQLite（WAL 模式） |
+| 分布式追踪 | OpenTelemetry（可选） |
 | 协议支持 | MCP SDK, A2A SDK |
 | 测试框架 | pytest, pytest-asyncio |
 
@@ -693,6 +931,9 @@ pip install -e ".[dev]"
 
 # 选装适配器
 pip install -e ".[openai,anthropic,mcp]"
+
+# OpenTelemetry 追踪
+pip install -e ".[otel]"
 
 # 全部安装
 pip install -e ".[all]"

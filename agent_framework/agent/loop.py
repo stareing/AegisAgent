@@ -7,6 +7,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from agent_framework.infra.logger import get_logger
+from agent_framework.infra.telemetry import get_tracing_manager
+from agent_framework.hooks.dispatcher import HookDispatchService
+from agent_framework.hooks.payloads import (
+    iteration_start_payload, iteration_finish_payload, iteration_error_payload,
+)
+from agent_framework.models.hook import HookPoint
 from agent_framework.models.agent import (
     AgentState,
     EffectiveRunConfig,
@@ -52,6 +58,7 @@ class AgentLoopDeps:
 
     model_adapter: ModelAdapterProtocol
     tool_executor: ToolExecutorProtocol
+    hook_executor: Any = None
 
 
 class AgentLoop:
@@ -79,10 +86,28 @@ class AgentLoop:
         llm_request: LLMRequest,
         effective_config: EffectiveRunConfig,
     ) -> IterationResult:
+        _tm = get_tracing_manager()
         idx = agent_state.iteration_count
         llm_input_preview = self._summarize_llm_input(llm_request.messages)
 
+        _iter_span = _tm.start_span("agent.iteration", attributes={
+            "iteration_index": idx,
+            "run_id": agent_state.run_id,
+            "context_messages": len(llm_request.messages),
+        })
+
         await agent.on_iteration_started(idx, agent_state)
+
+        # ITERATION_START hook
+        _hook_exec = getattr(loop_deps, 'hook_executor', None)
+        _dispatcher = HookDispatchService(_hook_exec) if _hook_exec is not None else None
+        if _dispatcher is not None:
+            await _dispatcher.fire_advisory(
+                HookPoint.ITERATION_START,
+                run_id=agent_state.run_id, iteration_id=str(idx),
+                payload=iteration_start_payload(idx, len(llm_request.messages)),
+            )
+
         logger.info(
             "iteration.started",
             iteration_index=idx,
@@ -99,14 +124,20 @@ class AgentLoop:
 
         # 1. Call LLM
         try:
-            model_response = await self._call_llm(
-                loop_deps.model_adapter,
-                llm_request.messages,
-                llm_request.tools_schema,
-                effective_config,
-            )
+            with _tm.span("agent.llm.call", attributes={
+                "iteration_index": idx,
+                "message_count": len(llm_request.messages),
+            }):
+                model_response = await self._call_llm(
+                    loop_deps.model_adapter,
+                    llm_request.messages,
+                    llm_request.tools_schema,
+                    effective_config,
+                )
         except Exception as e:
-            return self._handle_iteration_error(agent, e, agent_state, idx)
+            _iter_span.record_exception(e)
+            _iter_span.end()
+            return self._handle_iteration_error(agent, e, agent_state, idx, hook_executor=_hook_exec)
 
         self._enforce_tool_call_parallel_policy(model_response, effective_config, idx)
 
@@ -167,11 +198,28 @@ class AgentLoop:
                 response_preview=(model_response.content or "")[:120],
             )
 
+        _iter_span.set_attributes({
+            "tokens_total": model_response.usage.total_tokens,
+            "tool_count": len(tool_results),
+            "finish_reason": model_response.finish_reason or "",
+        })
+        _iter_span.end()
+
         logger.info(
             "iteration.completed",
             iteration_index=idx,
             iteration_tokens=model_response.usage.total_tokens,
         )
+
+        # ITERATION_FINISH hook
+        if _dispatcher is not None:
+            await _dispatcher.fire_advisory(
+                HookPoint.ITERATION_FINISH,
+                run_id=agent_state.run_id, iteration_id=str(idx),
+                payload=iteration_finish_payload(
+                    idx, len(tool_results), model_response.usage.total_tokens,
+                ),
+            )
 
         return IterationResult(
             iteration_index=idx,
@@ -369,6 +417,16 @@ class AgentLoop:
         llm_input_preview = self._summarize_llm_input(llm_request.messages)
         await agent.on_iteration_started(idx, agent_state)
 
+        # ITERATION_START hook
+        _hook_exec = getattr(loop_deps, 'hook_executor', None)
+        _dispatcher = HookDispatchService(_hook_exec) if _hook_exec is not None else None
+        if _dispatcher is not None:
+            await _dispatcher.fire_advisory(
+                HookPoint.ITERATION_START,
+                run_id=agent_state.run_id, iteration_id=str(idx),
+                payload=iteration_start_payload(idx, len(llm_request.messages)),
+            )
+
         yield StreamEvent(
             type=StreamEventType.ITERATION_START,
             data={"iteration_index": idx},
@@ -388,7 +446,7 @@ class AgentLoop:
                 else:
                     yield item  # StreamEvent(TOKEN)
         except Exception as e:
-            yield self._handle_iteration_error(agent, e, agent_state, idx)
+            yield self._handle_iteration_error(agent, e, agent_state, idx, hook_executor=_hook_exec)
             return
 
         assert model_response is not None
@@ -455,9 +513,19 @@ class AgentLoop:
                     completed += 1
                     tool_results.append(result)
                     tool_metas.append(meta)
-                    output_str = str(result.output)[:500] if result.output else ""
 
-                    # TOOL_CALL_DONE — immediate
+                    # Full output string — no truncation for downstream consumers
+                    raw_output = result.output
+                    output_str = str(raw_output) if raw_output else ""
+
+                    # Human-readable display_text: for delegation results extract
+                    # the summary field; for other tools use the raw output.
+                    if isinstance(raw_output, dict) and "summary" in raw_output:
+                        display_text = str(raw_output["summary"])
+                    else:
+                        display_text = output_str
+
+                    # TOOL_CALL_DONE — immediate, full output
                     yield StreamEvent(
                         type=StreamEventType.TOOL_CALL_DONE,
                         data={
@@ -468,7 +536,7 @@ class AgentLoop:
                         },
                     )
 
-                    # PROGRESSIVE_DONE — immediate, same moment as tool done
+                    # PROGRESSIVE_DONE — immediate, with display_text for UI
                     description = ""
                     for tc in model_response.tool_calls:
                         if tc.id == result.tool_call_id:
@@ -476,10 +544,16 @@ class AgentLoop:
                             break
                     yield StreamEvent(
                         type=StreamEventType.PROGRESSIVE_DONE,
-                        data={"tool_call_id": result.tool_call_id, "tool_name": result.tool_name,
-                              "description": description,
-                              "success": result.success, "output": output_str[:200],
-                              "index": completed, "total": total_tools},
+                        data={
+                            "tool_call_id": result.tool_call_id,
+                            "tool_name": result.tool_name,
+                            "description": description,
+                            "success": result.success,
+                            "output": output_str,
+                            "display_text": display_text,
+                            "index": completed,
+                            "total": total_tools,
+                        },
                     )
             else:
                 # Non-progressive: batch execute, then emit all DONE events
@@ -497,6 +571,16 @@ class AgentLoop:
                             "output": output_str,
                         },
                     )
+
+        # ITERATION_FINISH hook
+        if _dispatcher is not None:
+            await _dispatcher.fire_advisory(
+                HookPoint.ITERATION_FINISH,
+                run_id=agent_state.run_id, iteration_id=str(idx),
+                payload=iteration_finish_payload(
+                    idx, len(tool_results), model_response.usage.total_tokens,
+                ),
+            )
 
         yield IterationResult(
             iteration_index=idx,
@@ -1004,8 +1088,26 @@ class AgentLoop:
         error: Exception,
         agent_state: AgentState,
         idx: int,
+        hook_executor: Any = None,
     ) -> IterationResult:
         """Handle iteration errors using agent's error policy."""
+        # ITERATION_ERROR hook
+        if hook_executor is not None:
+            try:
+                _err_disp = HookDispatchService(hook_executor)
+                import asyncio
+                asyncio.get_event_loop().create_task(
+                    _err_disp.fire_advisory(
+                        HookPoint.ITERATION_ERROR,
+                        run_id=agent_state.run_id, iteration_id=str(idx),
+                        payload=iteration_error_payload(
+                            idx, type(error).__name__, str(error),
+                        ),
+                    )
+                )
+            except Exception:
+                pass
+
         strategy = agent.get_error_policy(error, agent_state)
         if strategy is None:
             strategy = ErrorStrategy.ABORT

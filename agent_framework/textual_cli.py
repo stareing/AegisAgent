@@ -409,10 +409,10 @@ class AegisAgentApp(App[None]):
         import uuid
         # 1. Load history from DB (IO bound)
         if self._fw._memory_store:
-            loaded = self._state.load_from_db(self._fw._memory_store, self._project_id)
+            loaded = await asyncio.to_thread(self._state.load_from_db, self._fw._memory_store, self._project_id)
             if loaded:
                 self._append_chat(f"[已恢复 {loaded} 条历史消息 (conv: {self._state.conversation_id[:8]}...)]")
-                summary = self._state.render_history_summary()
+                summary = await asyncio.to_thread(self._state.render_history_summary)
                 if summary:
                     self._append_chat(_strip_ansi(summary))
         else:
@@ -452,6 +452,11 @@ class AegisAgentApp(App[None]):
         self._set_follow_output(True)
         self._append_chat_block(["", _USER_PREFIX + text])
         self._set_busy(True)
+        self._flush_updates()  # Force immediately
+        
+        # Yield to let Textual render the updated UI before starting heavy work
+        await asyncio.sleep(0.01)
+        
         self.run_worker(self._dispatch(text), exclusive=True, group="agent")
 
     async def _dispatch(self, text: str) -> None:
@@ -482,6 +487,9 @@ class AegisAgentApp(App[None]):
                 self._fw, self._mock, self._state, text,
                 cancel_event=cancel_event,
             ):
+                # Yield control to the main event loop to ensure UI repaints
+                await asyncio.sleep(0)
+                
                 if event.type == StreamEventType.TOKEN:
                     token_text = event.data.get("text", "")
                     if token_text:
@@ -540,10 +548,19 @@ class AegisAgentApp(App[None]):
                     total = event.data.get("total", 0)
                     tool_name = event.data.get("tool_name", "")
                     success = event.data.get("success", False)
-                    output = event.data.get("output", "")[:60]
+                    description = event.data.get("description", "")
+                    # Prefer display_text (human-readable) over raw output
+                    display = event.data.get("display_text") or event.data.get("output", "")
                     status = "✓" if success else "✗"
                     tag = "subagent" if tool_name == "spawn_agent" else "tool"
-                    self._append_chat(f"\n  [{tag} {idx}/{total}] {status} {output}")
+                    if tag == "subagent" and description:
+                        self._append_chat(f"\n  [{tag} {idx}/{total}] {status} {description}")
+                        if display:
+                            # Show full result, indented
+                            for line in display.strip().split("\n"):
+                                self._append_chat(f"    {line}")
+                    else:
+                        self._append_chat(f"\n  [{tag} {idx}/{total}] {status} {display}")
 
                 elif event.type == StreamEventType.PROGRESSIVE_RESPONSE:
                     text_resp = event.data.get("text", "")
@@ -685,7 +702,7 @@ class AegisAgentApp(App[None]):
         self._flush_updates()
         self._flush_line_buffer()
         if self._fw._memory_store:
-            self._state.save_to_db(self._fw._memory_store, self._project_id)
+            await asyncio.to_thread(self._state.save_to_db, self._fw._memory_store, self._project_id)
         await self._fw.shutdown()
 
     def _set_follow_output(self, follow: bool) -> None:

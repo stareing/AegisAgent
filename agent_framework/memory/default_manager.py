@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from agent_framework.memory.base_manager import BaseMemoryManager
 from agent_framework.models.memory import (
@@ -60,8 +60,9 @@ class DefaultMemoryManager(BaseMemoryManager):
         store: MemoryStoreProtocol,
         max_memories_in_context: int = 10,
         auto_extract: bool = True,
+        hook_executor: Any = None,
     ) -> None:
-        super().__init__(store)
+        super().__init__(store, hook_executor=hook_executor)
         # Constructor defaults; overridden by apply_memory_policy() at run start
         self._max_in_context = max_memories_in_context
         self._auto_extract = auto_extract

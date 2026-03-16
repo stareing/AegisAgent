@@ -54,18 +54,20 @@ class SQLiteMemoryStore:
     def __init__(self, db_path: str = "data/memories.db") -> None:
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.row_factory = sqlite3.Row
         self._init_db()
 
     def _init_db(self) -> None:
-        cur = self._conn.cursor()
-        cur.execute(_CREATE_TABLE)
-        # 迁移：如果旧表缺少 conversation_id 列则重建
-        self._migrate_conversation_table(cur)
-        cur.execute(_CREATE_CONVERSATION_HISTORY)
-        for idx_sql in _CREATE_INDEXES:
-            cur.execute(idx_sql)
-        self._conn.commit()
+        with self._conn:
+            cur = self._conn.cursor()
+            cur.execute(_CREATE_TABLE)
+            # 迁移：如果旧表缺少 conversation_id 列则重建
+            self._migrate_conversation_table(cur)
+            cur.execute(_CREATE_CONVERSATION_HISTORY)
+            for idx_sql in _CREATE_INDEXES:
+                cur.execute(idx_sql)
 
     def _migrate_conversation_table(self, cur: sqlite3.Cursor) -> None:
         """旧表没有 conversation_id 列时，删除旧表让 CREATE IF NOT EXISTS 重建。"""
@@ -106,64 +108,64 @@ class SQLiteMemoryStore:
 
     def save(self, record: MemoryRecord) -> str:
         now = datetime.now(timezone.utc).isoformat()
-        self._conn.execute(
-            """INSERT INTO saved_memories
-               (memory_id, agent_id, user_id, kind, title, content, tags,
-                is_active, is_pinned, source, created_at, updated_at,
-                last_used_at, use_count, version, extra)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                record.memory_id,
-                record.agent_id,
-                record.user_id,
-                record.kind.value,
-                record.title,
-                record.content,
-                json.dumps(record.tags),
-                int(record.is_active),
-                int(record.is_pinned),
-                record.source,
-                record.created_at.isoformat() if record.created_at else now,
-                now,
-                record.last_used_at.isoformat() if record.last_used_at else None,
-                record.use_count,
-                record.version,
-                json.dumps(record.extra) if record.extra else None,
-            ),
-        )
-        self._conn.commit()
+        with self._conn:
+            self._conn.execute(
+                """INSERT INTO saved_memories
+                   (memory_id, agent_id, user_id, kind, title, content, tags,
+                    is_active, is_pinned, source, created_at, updated_at,
+                    last_used_at, use_count, version, extra)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    record.memory_id,
+                    record.agent_id,
+                    record.user_id,
+                    record.kind.value,
+                    record.title,
+                    record.content,
+                    json.dumps(record.tags),
+                    int(record.is_active),
+                    int(record.is_pinned),
+                    record.source,
+                    record.created_at.isoformat() if record.created_at else now,
+                    now,
+                    record.last_used_at.isoformat() if record.last_used_at else None,
+                    record.use_count,
+                    record.version,
+                    json.dumps(record.extra) if record.extra else None,
+                ),
+            )
         return record.memory_id
 
     def update(self, record: MemoryRecord) -> None:
         now = datetime.now(timezone.utc).isoformat()
-        self._conn.execute(
-            """UPDATE saved_memories SET
-               kind=?, title=?, content=?, tags=?, is_active=?, is_pinned=?,
-               source=?, updated_at=?, last_used_at=?, use_count=?, version=?, extra=?
-               WHERE memory_id=?""",
-            (
-                record.kind.value,
-                record.title,
-                record.content,
-                json.dumps(record.tags),
-                int(record.is_active),
-                int(record.is_pinned),
-                record.source,
-                now,
-                record.last_used_at.isoformat() if record.last_used_at else None,
-                record.use_count,
-                record.version,
-                json.dumps(record.extra) if record.extra else None,
-                record.memory_id,
-            ),
-        )
-        self._conn.commit()
+        with self._conn:
+            self._conn.execute(
+                """UPDATE saved_memories SET
+                   kind=?, title=?, content=?, tags=?, is_active=?, is_pinned=?,
+                   source=?, updated_at=?, last_used_at=?, use_count=?, version=?, extra=?
+                   WHERE memory_id=?""",
+                (
+                    record.kind.value,
+                    record.title,
+                    record.content,
+                    json.dumps(record.tags),
+                    int(record.is_active),
+                    int(record.is_pinned),
+                    record.source,
+                    now,
+                    record.last_used_at.isoformat() if record.last_used_at else None,
+                    record.use_count,
+                    record.version,
+                    json.dumps(record.extra) if record.extra else None,
+                    record.memory_id,
+                ),
+            )
 
     def delete(self, memory_id: str) -> None:
-        self._conn.execute(
-            "DELETE FROM saved_memories WHERE memory_id=?", (memory_id,)
-        )
-        self._conn.commit()
+        with self._conn:
+            self._conn.execute(
+                "DELETE FROM saved_memories WHERE memory_id=?", (memory_id,)
+            )
 
     def get(self, memory_id: str) -> MemoryRecord | None:
         cur = self._conn.execute(
@@ -202,11 +204,11 @@ class SQLiteMemoryStore:
 
     def touch(self, memory_id: str) -> None:
         now = datetime.now(timezone.utc).isoformat()
-        self._conn.execute(
-            "UPDATE saved_memories SET last_used_at=?, use_count=use_count+1 WHERE memory_id=?",
-            (now, memory_id),
-        )
-        self._conn.commit()
+        with self._conn:
+            self._conn.execute(
+                "UPDATE saved_memories SET last_used_at=?, use_count=use_count+1 WHERE memory_id=?",
+                (now, memory_id),
+            )
 
     def count(self, agent_id: str, user_id: str | None) -> int:
         cur = self._conn.execute(
@@ -226,19 +228,19 @@ class SQLiteMemoryStore:
     ) -> None:
         """全量覆写指定 conversation_id 的会话消息。"""
         now = datetime.now(timezone.utc).isoformat()
-        cur = self._conn.cursor()
-        cur.execute(
-            "DELETE FROM conversation_history WHERE conversation_id=?",
-            (conversation_id,),
-        )
-        for seq, msg in enumerate(messages):
+        with self._conn:
+            cur = self._conn.cursor()
             cur.execute(
-                "INSERT INTO conversation_history "
-                "(conversation_id, project_id, seq, message_json, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (conversation_id, project_id, seq, msg.model_dump_json(), now),
+                "DELETE FROM conversation_history WHERE conversation_id=?",
+                (conversation_id,),
             )
-        self._conn.commit()
+            for seq, msg in enumerate(messages):
+                cur.execute(
+                    "INSERT INTO conversation_history "
+                    "(conversation_id, project_id, seq, message_json, created_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (conversation_id, project_id, seq, msg.model_dump_json(), now),
+                )
 
     def load_conversation(self, conversation_id: str) -> list[Message]:
         """按序加载指定 conversation_id 的会话消息。"""
@@ -299,11 +301,11 @@ class SQLiteMemoryStore:
 
     def clear_conversation(self, conversation_id: str) -> None:
         """清空指定 conversation_id 的会话历史。"""
-        self._conn.execute(
-            "DELETE FROM conversation_history WHERE conversation_id=?",
-            (conversation_id,),
-        )
-        self._conn.commit()
+        with self._conn:
+            self._conn.execute(
+                "DELETE FROM conversation_history WHERE conversation_id=?",
+                (conversation_id,),
+            )
 
     def close(self) -> None:
         self._conn.close()

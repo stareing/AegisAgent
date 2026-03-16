@@ -6,9 +6,11 @@ from agent_framework.adapters.model.base_adapter import (
     LLMTimeoutError,
     ModelChunk,
 )
+from agent_framework.adapters.model.fallback_adapter import FallbackModelAdapter
 
 __all__ = [
     "BaseModelAdapter",
+    "FallbackModelAdapter",
     "ModelChunk",
     "LLMCallError",
     "LLMRateLimitError",

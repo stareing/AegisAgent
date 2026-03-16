@@ -37,6 +37,15 @@ class SkillRouter:
     def register_skill(self, skill: Skill) -> None:
         self._skills[skill.skill_id] = skill
 
+    def remove_skill(self, skill_id: str) -> bool:
+        """Remove a skill by ID. Returns True if removed, False if not found."""
+        return self._skills.pop(skill_id, None) is not None
+
+    def register_skills(self, skills: list[Skill]) -> None:
+        """Batch register multiple skills."""
+        for skill in skills:
+            self._skills[skill.skill_id] = skill
+
     def detect_skill(self, user_input: str) -> Skill | None:
         """Detect if user input triggers a skill via keywords.
 

@@ -15,6 +15,19 @@ class SpawnMode(str, Enum):
     LONG_LIVED = "LONG_LIVED"
 
 
+class SpawnContextMode(str, Enum):
+    """Controls how much parent context a child agent receives.
+
+    MINIMAL: Only the task_input as a single user message. Default for
+    concurrent spawns — prevents sibling task leakage.
+    PARENT_CONTEXT: Filtered parent session (no tool/delegation messages).
+    Use when the child needs conversational background.
+    """
+
+    MINIMAL = "MINIMAL"
+    PARENT_CONTEXT = "PARENT_CONTEXT"
+
+
 class MemoryScope(str, Enum):
     ISOLATED = "ISOLATED"
     INHERIT_READ = "INHERIT_READ"
@@ -47,6 +60,7 @@ class SubAgentSpec(BaseModel):
     skill_id: str | None = None
     tool_category_whitelist: list[str] | None = None
     context_seed: list[Message] | None = None
+    context_mode: SpawnContextMode = SpawnContextMode.MINIMAL
     memory_scope: MemoryScope = MemoryScope.ISOLATED
     token_budget: int = 4096
     max_iterations: int = 10

@@ -97,6 +97,31 @@ class AgentFramework:
         """Initialize all components and wire dependencies."""
         configure_logging(self.config.logging)
 
+        # Tracing (noop when disabled or SDK absent)
+        from agent_framework.infra.telemetry import get_tracing_manager
+        get_tracing_manager().configure(self.config.tracing)
+
+        # Hooks subsystem — instance-level registry and executor
+        from agent_framework.hooks.singleton import HookSubsystem
+        self._hook_subsystem = HookSubsystem()
+        self._hook_registry = self._hook_subsystem.registry
+        self._hook_executor = self._hook_subsystem.executor
+        self._hook_dispatcher = self._hook_subsystem.dispatcher
+
+        # CONFIG_LOADED hook — fires after config is available, before component init
+        from agent_framework.models.hook import HookPoint
+        from agent_framework.hooks.payloads import config_loaded_payload
+        try:
+            self._hook_dispatcher.fire_sync_advisory(
+                HookPoint.CONFIG_LOADED,
+                payload=config_loaded_payload(
+                    self.config.model.adapter_type,
+                    getattr(self.config.memory, "store_type", "sqlite"),
+                ),
+            )
+        except Exception:
+            pass
+
         # Memory
         memory_store = _create_memory_store(self.config.memory)
         self._memory_store = memory_store
@@ -104,6 +129,7 @@ class AgentFramework:
             store=memory_store,
             max_memories_in_context=self.config.memory.max_memories_in_context,
             auto_extract=self.config.memory.auto_extract_memory,
+            hook_executor=self._hook_executor,
         )
         from agent_framework.models.agent import MemoryQuota
         memory_manager.set_quota(MemoryQuota(
@@ -119,7 +145,10 @@ class AgentFramework:
 
         # Register built-in tools (filesystem, system, spawn_agent, memory_admin)
         from agent_framework.tools.builtin import register_all_builtins
-        register_all_builtins(self._catalog)
+        register_all_builtins(
+            self._catalog,
+            shell_enabled=self.config.tools.shell_enabled,
+        )
 
         # Tool registry
         self._registry = ToolRegistry()
@@ -133,7 +162,11 @@ class AgentFramework:
             confirmation = CLIConfirmationHandler()
 
         # Delegation executor (placeholder, wired after subagent runtime)
-        delegation_executor = DelegationExecutor(sub_agent_runtime=None)
+        delegation_executor = DelegationExecutor(
+            sub_agent_runtime=None,
+            hook_executor=self._hook_executor,
+            confirmation_handler=confirmation,
+        )
 
         # Tool executor
         tool_executor = ToolExecutor(
@@ -143,6 +176,7 @@ class AgentFramework:
             mcp_client_manager=self._mcp_manager,
             parent_agent_getter=lambda: self._agent,
             max_concurrent=self.config.tools.max_concurrent_tool_calls,
+            hook_executor=self._hook_executor,
         )
 
         # Context
@@ -156,6 +190,7 @@ class AgentFramework:
             source_provider=source_provider,
             builder=builder,
             compressor=compressor,
+            hook_executor=self._hook_executor,
         )
 
         # Skill router — load declarative skills from config
@@ -190,6 +225,19 @@ class AgentFramework:
             logger.info("skills.file_loaded", count=file_count,
                         dirs=[str(d) for d in skill_dirs])
 
+        # INSTRUCTIONS_LOADED hook — fires after skills/tools are assembled
+        from agent_framework.hooks.payloads import instructions_loaded_payload
+        try:
+            self._hook_dispatcher.fire_sync_advisory(
+                HookPoint.INSTRUCTIONS_LOADED,
+                payload=instructions_loaded_payload(
+                    skills_loaded=len(skill_router.list_skills()),
+                    tools_registered=len(self._registry.list_tools()) if self._registry else 0,
+                ),
+            )
+        except Exception:
+            pass
+
         # Wire invoke_skill tool with runtime references
         from agent_framework.tools.builtin_skills import set_skill_runtime
         set_skill_runtime(skill_router, context_engineer)
@@ -204,6 +252,7 @@ class AgentFramework:
             skill_router=skill_router,
             confirmation_handler=confirmation,
             delegation_executor=delegation_executor,
+            hook_executor=self._hook_executor,
         )
 
         # Wire SubAgent Runtime
@@ -283,21 +332,69 @@ class AgentFramework:
         """Create model adapter based on config.model.adapter_type.
 
         SDK imports are lazy — only the selected adapter's SDK is loaded.
+        If fallback_models are configured, wraps the primary adapter
+        in a FallbackModelAdapter that tries alternatives on failure.
         """
         cfg = self.config.model
-        common = {
-            "model_name": cfg.default_model_name,
-            "timeout_ms": cfg.timeout_ms,
-            "max_retries": cfg.max_retries,
-        }
-        if cfg.api_key:
-            common["api_key"] = cfg.api_key
-        if cfg.api_base:
-            common["api_base"] = cfg.api_base
-        if cfg.max_output_tokens:
-            common["max_output_tokens"] = cfg.max_output_tokens
+        primary = self._build_adapter(
+            adapter_type=cfg.adapter_type,
+            model_name=cfg.default_model_name,
+            timeout_ms=cfg.timeout_ms,
+            max_retries=cfg.max_retries,
+            api_key=cfg.api_key,
+            api_base=cfg.api_base,
+            max_output_tokens=cfg.max_output_tokens,
+        )
 
-        match cfg.adapter_type:
+        if not cfg.fallback_models:
+            return primary
+
+        from agent_framework.adapters.model.fallback_adapter import FallbackModelAdapter
+
+        fallbacks: list[BaseModelAdapter] = []
+        for fb_dict in cfg.fallback_models:
+            fallbacks.append(self._build_adapter(
+                adapter_type=fb_dict.get("adapter_type", cfg.adapter_type),
+                model_name=fb_dict.get("default_model_name", cfg.default_model_name),
+                timeout_ms=fb_dict.get("timeout_ms", cfg.timeout_ms),
+                max_retries=fb_dict.get("max_retries", cfg.max_retries),
+                api_key=fb_dict.get("api_key", cfg.api_key),
+                api_base=fb_dict.get("api_base", cfg.api_base),
+                max_output_tokens=fb_dict.get("max_output_tokens", cfg.max_output_tokens),
+            ))
+
+        logger.info(
+            "model.fallback_chain_created",
+            primary=cfg.adapter_type,
+            fallback_count=len(fallbacks),
+        )
+        return FallbackModelAdapter(primary=primary, fallbacks=fallbacks)
+
+    @staticmethod
+    def _build_adapter(
+        *,
+        adapter_type: str,
+        model_name: str,
+        timeout_ms: int,
+        max_retries: int,
+        api_key: str | None,
+        api_base: str | None,
+        max_output_tokens: int,
+    ) -> BaseModelAdapter:
+        """Build a single adapter instance from explicit parameters."""
+        common: dict[str, object] = {
+            "model_name": model_name,
+            "timeout_ms": timeout_ms,
+            "max_retries": max_retries,
+        }
+        if api_key:
+            common["api_key"] = api_key
+        if api_base:
+            common["api_base"] = api_base
+        if max_output_tokens:
+            common["max_output_tokens"] = max_output_tokens
+
+        match adapter_type:
             case "openai":
                 from agent_framework.adapters.model.openai_adapter import OpenAIAdapter
                 return OpenAIAdapter(**common)
@@ -306,7 +403,7 @@ class AgentFramework:
                 return AnthropicAdapter(**common)
             case "google":
                 from agent_framework.adapters.model.google_adapter import GoogleAdapter
-                common.pop("api_base", None)  # google-genai doesn't use api_base
+                common.pop("api_base", None)
                 return GoogleAdapter(**common)
             case "deepseek":
                 from agent_framework.adapters.model.openai_compatible_adapter import DeepSeekAdapter
@@ -328,7 +425,7 @@ class AgentFramework:
                 return CustomAdapter(**common)
             case _:
                 from agent_framework.adapters.model.litellm_adapter import LiteLLMAdapter
-                common.pop("api_key", None)  # litellm reads API keys from env
+                common.pop("api_key", None)
                 return LiteLLMAdapter(**common)
 
     async def setup_mcp(self) -> None:
@@ -635,6 +732,60 @@ class AgentFramework:
             skills=skills,
         )
 
+    # ------------------------------------------------------------------
+    # Hooks & Plugins public API
+    # ------------------------------------------------------------------
+
+    def register_hook(self, hook: Any) -> None:
+        """Register a hook into this framework's hook registry."""
+        self._hook_registry.register(hook)
+
+    def unregister_hook(self, hook_id: str) -> None:
+        """Remove a hook by ID."""
+        self._hook_registry.unregister(hook_id)
+
+    def list_hooks(self, hook_point: Any = None) -> list:
+        """List registered hook metadata."""
+        return self._hook_registry.list_hooks(hook_point=hook_point)
+
+    def load_plugin(self, plugin: Any) -> Any:
+        """Load and register a plugin."""
+        from agent_framework.plugins.loader import PluginLoader
+        from agent_framework.plugins.registry import PluginRegistry
+        from agent_framework.plugins.lifecycle import PluginLifecycleManager
+        if not hasattr(self, "_plugin_registry"):
+            self._plugin_registry = PluginRegistry()
+            self._plugin_lifecycle = PluginLifecycleManager(
+                self._plugin_registry, self._hook_registry,
+                tool_registry=self._registry,
+                skill_router=getattr(self._deps, "skill_router", None) if self._deps else None,
+            )
+        loader = PluginLoader(self._plugin_registry)
+        manifest = loader.load_plugin(plugin)
+        return manifest
+
+    def enable_plugin(self, plugin_id: str) -> None:
+        """Enable a loaded plugin (registers its hooks and tools)."""
+        if hasattr(self, "_plugin_lifecycle"):
+            self._plugin_lifecycle.enable(plugin_id)
+
+    def disable_plugin(self, plugin_id: str) -> None:
+        """Disable an enabled plugin."""
+        if hasattr(self, "_plugin_lifecycle"):
+            self._plugin_lifecycle.disable(plugin_id)
+
+    def list_plugin_agent_templates(self) -> dict[str, list]:
+        """Return {plugin_id: [agent_templates]} for all enabled plugins."""
+        if hasattr(self, "_plugin_lifecycle"):
+            return self._plugin_lifecycle.list_agent_templates()
+        return {}
+
+    def get_plugin_agent_templates(self, plugin_id: str) -> list:
+        """Return agent templates from a specific plugin."""
+        if hasattr(self, "_plugin_lifecycle"):
+            return self._plugin_lifecycle.get_agent_templates(plugin_id)
+        return []
+
     async def shutdown(self) -> None:
         """Clean up resources."""
         self.end_conversation()
@@ -642,6 +793,8 @@ class AgentFramework:
             await self._mcp_manager.disconnect_all()
         if self._memory_store:
             self._memory_store.close()
+        from agent_framework.infra.telemetry import get_tracing_manager
+        get_tracing_manager().shutdown()
         logger.info("framework.shutdown")
 
 

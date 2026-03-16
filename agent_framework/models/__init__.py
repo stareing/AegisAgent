@@ -46,6 +46,21 @@ from agent_framework.models.subagent import (
 )
 from agent_framework.models.context import ContextStats, LLMRequest
 from agent_framework.models.mcp import MCPServerConfig, MCPToolInfo, MCPTransportType
+from agent_framework.models.hook import (
+    HookCategory,
+    HookContext,
+    HookExecutionMode,
+    HookFailurePolicy,
+    HookMeta,
+    HookPoint,
+    HookResult,
+    HookResultAction,
+)
+from agent_framework.models.plugin import (
+    PluginManifest,
+    PluginPermission,
+    PluginStatus,
+)
 
 __all__ = [
     "Message", "ModelResponse", "TokenUsage", "ToolCallRequest",
@@ -61,4 +76,9 @@ __all__ = [
     "SubAgentHandle", "SubAgentResult", "SubAgentSpec",
     "ContextStats", "LLMRequest",
     "MCPServerConfig", "MCPToolInfo", "MCPTransportType",
+    # Hook models
+    "HookCategory", "HookContext", "HookExecutionMode", "HookFailurePolicy",
+    "HookMeta", "HookPoint", "HookResult", "HookResultAction",
+    # Plugin models
+    "PluginManifest", "PluginPermission", "PluginStatus",
 ]

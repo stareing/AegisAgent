@@ -252,8 +252,10 @@ class SubAgentRuntime:
         self._active[spec.spawn_id] = handle
 
         try:
-            sub_agent, sub_deps = self._factory.create_agent_and_deps(
-                spec, parent_agent
+            # create_agent_and_deps hits SQLite synchronously for snapshot/store creation
+            import asyncio
+            sub_agent, sub_deps = await asyncio.to_thread(
+                self._factory.create_agent_and_deps, spec, parent_agent
             )
         except Exception:
             self._active.pop(spec.spawn_id, None)

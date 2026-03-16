@@ -17,6 +17,30 @@ from agent_framework.tools.decorator import tool
 _DEFAULT_TIMEOUT = 120  # seconds
 _MAX_OUTPUT_CHARS = 100_000
 
+# Environment variables safe to pass to child processes.
+# Secrets (API keys, tokens, credentials) are excluded by design.
+_ENV_WHITELIST: frozenset[str] = frozenset({
+    "PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM",
+    "SHELL", "TMPDIR", "TMP", "TEMP",
+    "PYTHONPATH", "VIRTUAL_ENV", "CONDA_PREFIX",
+    "NODE_PATH", "GOPATH", "CARGO_HOME", "RUSTUP_HOME",
+})
+
+
+def _build_safe_env() -> dict[str, str]:
+    """Build environment with only whitelisted variables.
+
+    Prevents leaking secrets (API keys, tokens, credentials) to child
+    processes spawned by the shell tool.
+    """
+    safe = {k: v for k, v in os.environ.items() if k in _ENV_WHITELIST}
+    # Always propagate sandbox roots so child processes respect FS boundaries
+    roots = os.environ.get("AGENT_FS_SANDBOX_ROOTS")
+    if roots:
+        safe["AGENT_FS_SANDBOX_ROOTS"] = roots
+    return safe
+
+
 # Commands banned for security — network access, browsers, privilege escalation, etc.
 _BANNED_COMMANDS = frozenset({
     "curl", "wget", "nc", "telnet", "lynx", "w3m", "links",
@@ -68,7 +92,7 @@ class _BashSession:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
-                env={**os.environ, "TERM": "dumb", "PS1": "", "PS2": ""},
+                env={**_build_safe_env(), "TERM": "dumb", "PS1": "", "PS2": ""},
                 start_new_session=True,
             )
         return self._proc
