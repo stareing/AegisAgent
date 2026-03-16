@@ -36,7 +36,7 @@ def reset_hook_singletons() -> None:
 
 
 class HookSubsystem:
-    """Instance-level hook registry + executor bundle.
+    """Instance-level hook registry + executor + dispatcher bundle.
 
     Each AgentFramework instance should own one HookSubsystem.
     The global singletons remain for convenience but are discouraged
@@ -44,5 +44,7 @@ class HookSubsystem:
     """
 
     def __init__(self) -> None:
+        from agent_framework.hooks.dispatcher import HookDispatchService
         self.registry = HookRegistry()
         self.executor = HookExecutor(self.registry)
+        self.dispatcher = HookDispatchService(self.executor)

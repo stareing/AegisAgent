@@ -1363,10 +1363,18 @@ async def _execute_with_progressive(
             total = event.data.get("total", 0)
             tool_name = event.data.get("tool_name", "")
             success = event.data.get("success", False)
-            output = event.data.get("output", "")[:80]
+            description = event.data.get("description", "")
+            # Prefer display_text (human-readable) over raw output
+            display = event.data.get("display_text") or event.data.get("output", "")
             status = _green("完成") if success else _red("失败")
             tag = "subagent" if tool_name == "spawn_agent" else "tool"
-            print(f"  {_dim(f'[{tag} {idx}/{total}]')} {status}: {output}")
+            if tag == "subagent" and description:
+                print(f"  {_dim(f'[{tag} {idx}/{total}]')} {status}: {description}")
+                if display:
+                    for line in display.strip().split("\n"):
+                        print(f"    {line}")
+            else:
+                print(f"  {_dim(f'[{tag} {idx}/{total}]')} {status}: {display}")
 
         elif event.type == StreamEventType.PROGRESSIVE_RESPONSE:
             text = event.data.get("text", "")

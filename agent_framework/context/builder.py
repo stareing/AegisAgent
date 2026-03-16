@@ -142,6 +142,54 @@ class ContextBuilder:
         seed.append(query_msg)
         return seed
 
+    def build_filtered_spawn_seed(
+        self,
+        session_messages: list[Message],
+        query: str,
+        token_budget: int,
+    ) -> list[Message]:
+        """Build a filtered context seed that excludes tool/delegation messages.
+
+        Used when context_mode=PARENT_CONTEXT to give the child conversational
+        background without leaking sibling task details or tool call artifacts.
+
+        Filtering rules:
+        1. Drop role="tool" messages
+        2. Drop assistant messages with tool_calls
+        3. Drop messages with tool_call_id set
+        4. Keep only pure text user/assistant/system messages
+        5. Append query as final user message
+        """
+        query_msg = Message(role="user", content=query)
+        query_tokens = self.calculate_tokens([query_msg])
+        remaining = token_budget - query_tokens
+
+        if remaining <= 0:
+            return [query_msg]
+
+        # Filter: only pure text messages (no tool artifacts)
+        filtered: list[Message] = []
+        for msg in session_messages:
+            if msg.role == "tool":
+                continue
+            if getattr(msg, "tool_call_id", None):
+                continue
+            if msg.role == "assistant" and getattr(msg, "tool_calls", None):
+                continue
+            filtered.append(msg)
+
+        # Take most recent that fit
+        seed: list[Message] = []
+        for msg in reversed(filtered):
+            msg_tokens = self.calculate_tokens([msg])
+            if remaining - msg_tokens < 0:
+                break
+            seed.insert(0, msg)
+            remaining -= msg_tokens
+
+        seed.append(query_msg)
+        return seed
+
     def _allocate_slot_budgets(self) -> dict[str, int]:
         """Allocate token budgets to each slot."""
         budget = self._max_tokens - self._reserve_for_output

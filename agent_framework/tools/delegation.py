@@ -3,8 +3,15 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from agent_framework.infra.logger import get_logger
-from agent_framework.models.hook import HookContext, HookPoint
+from agent_framework.models.hook import HookPoint
 from agent_framework.hooks.errors import HookDeniedError
+from agent_framework.hooks.dispatcher import HookDispatchService
+from agent_framework.hooks.payloads import (
+    delegation_post_payload, delegation_error_payload,
+)
+from agent_framework.tools.delegation_hooks import (
+    apply_pre_delegation_hooks, _DelegationConfirmationDenied,
+)
 from agent_framework.models.subagent import (
     ArtifactRef,
     DelegationErrorCode,
@@ -39,10 +46,15 @@ class DelegationExecutor:
         self,
         sub_agent_runtime: SubAgentRuntimeProtocol | None = None,
         hook_executor: Any = None,
+        confirmation_handler: Any = None,
     ) -> None:
         self._sub_agent_runtime = sub_agent_runtime
         self._a2a_adapter: Any = None
         self._hook_executor = hook_executor
+        self._hook_dispatcher: HookDispatchService | None = (
+            HookDispatchService(hook_executor) if hook_executor is not None else None
+        )
+        self._confirmation = confirmation_handler
 
     async def delegate_to_subagent(
         self, spec: SubAgentSpec, parent_agent: Any
@@ -108,44 +120,33 @@ class DelegationExecutor:
         )
 
         # PRE_DELEGATION hook
-        if self._hook_executor is not None:
+        if self._hook_dispatcher is not None:
             try:
-                await self._hook_executor.execute_chain(
-                    HookPoint.PRE_DELEGATION,
-                    HookContext(
-                        run_id=spec.parent_run_id,
-                        payload={
-                            "task_input": spec.task_input[:500],
-                            "mode": str(spec.mode.value),
-                            "memory_scope": str(spec.memory_scope.value),
-                        },
-                    ),
+                spec = await apply_pre_delegation_hooks(
+                    self._hook_dispatcher, spec,
+                    confirmation_handler=self._confirmation,
                 )
             except HookDeniedError as hde:
                 return SubAgentResult(
-                    spawn_id=spec.spawn_id,
-                    success=False,
+                    spawn_id=spec.spawn_id, success=False,
                     error=f"PERMISSION_DENIED: Hook denied delegation: {hde}",
+                )
+            except _DelegationConfirmationDenied:
+                return SubAgentResult(
+                    spawn_id=spec.spawn_id, success=False,
+                    error="PERMISSION_DENIED: User denied delegation confirmation",
                 )
 
         result = await self._sub_agent_runtime.spawn(spec, parent_agent)
 
-        # POST_DELEGATION hook
-        if self._hook_executor is not None:
-            try:
-                await self._hook_executor.execute_chain(
-                    HookPoint.POST_DELEGATION,
-                    HookContext(
-                        run_id=spec.parent_run_id,
-                        payload={
-                            "spawn_id": result.spawn_id,
-                            "success": result.success,
-                            "iterations_used": result.iterations_used,
-                        },
-                    ),
-                )
-            except Exception:
-                pass
+        if self._hook_dispatcher is not None:
+            await self._hook_dispatcher.fire_advisory(
+                HookPoint.POST_DELEGATION,
+                run_id=spec.parent_run_id,
+                payload=delegation_post_payload(
+                    result.spawn_id, result.success, result.iterations_used,
+                ),
+            )
 
         return result
 
@@ -154,9 +155,8 @@ class DelegationExecutor:
     ) -> str:
         """Start a sub-agent asynchronously. Returns spawn_id without waiting.
 
-        Same permission checks as delegate_to_subagent, but calls
-        SubAgentRuntime.spawn_async() which submits without blocking.
-        Use collect_subagent_result() to get the result later.
+        Same permission checks AND hook semantics as delegate_to_subagent.
+        Uses collect_subagent_result() to get the result and fire POST hooks.
         """
         parent_id = getattr(parent_agent, "agent_id", "unknown") if parent_agent else "none"
 
@@ -176,6 +176,18 @@ class DelegationExecutor:
             if config is not None and not getattr(config, "allow_spawn_children", True):
                 raise RuntimeError("PERMISSION_DENIED: This agent is not allowed to spawn children")
 
+        # PRE_DELEGATION hook — same as sync path
+        if self._hook_dispatcher is not None:
+            try:
+                spec = await apply_pre_delegation_hooks(
+                    self._hook_dispatcher, spec, is_async=True,
+                    confirmation_handler=self._confirmation,
+                )
+            except HookDeniedError as hde:
+                raise RuntimeError(f"PERMISSION_DENIED: Hook denied delegation: {hde}")
+            except _DelegationConfirmationDenied:
+                raise RuntimeError("PERMISSION_DENIED: User denied delegation confirmation")
+
         logger.info(
             "delegation.subagent.async_approved",
             parent_agent_id=parent_id,
@@ -188,19 +200,32 @@ class DelegationExecutor:
     ) -> SubAgentResult | None:
         """Collect result of an async sub-agent.
 
-        Args:
-            spawn_id: The spawn_id returned by delegate_to_subagent_async.
-            wait: If True, block until complete. If False, return None if still running.
-
-        Returns:
-            SubAgentResult if complete, None if still running (wait=False).
+        Fires POST_DELEGATION on success or DELEGATION_ERROR on failure.
         """
         if self._sub_agent_runtime is None:
             return SubAgentResult(
                 spawn_id=spawn_id, success=False,
                 error="SubAgentRuntime not configured",
             )
-        return await self._sub_agent_runtime.collect_result(spawn_id, wait=wait)
+        result = await self._sub_agent_runtime.collect_result(spawn_id, wait=wait)
+
+        if result is not None and self._hook_dispatcher is not None:
+            if result.success:
+                await self._hook_dispatcher.fire_advisory(
+                    HookPoint.POST_DELEGATION,
+                    payload=delegation_post_payload(
+                        result.spawn_id, True, result.iterations_used, async_collected=True,
+                    ),
+                )
+            else:
+                await self._hook_dispatcher.fire_advisory(
+                    HookPoint.DELEGATION_ERROR,
+                    payload=delegation_error_payload(
+                        result.spawn_id, result.error or "", async_collected=True,
+                    ),
+                )
+
+        return result
 
     def set_a2a_adapter(self, adapter: Any) -> None:
         """Wire the A2A client adapter for delegation."""
@@ -249,50 +274,31 @@ class DelegationExecutor:
         try:
             result = await self._a2a_adapter.delegate_task(alias, task_input, skill_id)
             # POST_DELEGATION hook for A2A
-            if self._hook_executor is not None:
-                try:
-                    await self._hook_executor.execute_chain(
-                        HookPoint.POST_DELEGATION,
-                        HookContext(
-                            payload={
-                                "spawn_id": result.spawn_id,
-                                "success": result.success,
-                                "agent_url": agent_url,
-                            },
-                        ),
-                    )
-                except Exception:
-                    pass
+            if self._hook_dispatcher is not None:
+                await self._hook_dispatcher.fire_advisory(
+                    HookPoint.POST_DELEGATION,
+                    payload=delegation_post_payload(
+                        result.spawn_id, result.success, 0,
+                    ),
+                )
             return result
         except TimeoutError:
-            # DELEGATION_ERROR hook
-            if self._hook_executor is not None:
-                try:
-                    await self._hook_executor.execute_chain(
-                        HookPoint.DELEGATION_ERROR,
-                        HookContext(
-                            payload={"agent_url": agent_url, "error": "timeout"},
-                        ),
-                    )
-                except Exception:
-                    pass
+            if self._hook_dispatcher is not None:
+                await self._hook_dispatcher.fire_advisory(
+                    HookPoint.DELEGATION_ERROR,
+                    payload=delegation_error_payload("", "timeout"),
+                )
             return SubAgentResult(
                 spawn_id="",
                 success=False,
                 error=f"{DelegationErrorCode.TIMEOUT}: A2A delegation timed out for {agent_url}",
             )
         except Exception as e:
-            # DELEGATION_ERROR hook
-            if self._hook_executor is not None:
-                try:
-                    await self._hook_executor.execute_chain(
-                        HookPoint.DELEGATION_ERROR,
-                        HookContext(
-                            payload={"agent_url": agent_url, "error": str(e)},
-                        ),
-                    )
-                except Exception:
-                    pass
+            if self._hook_dispatcher is not None:
+                await self._hook_dispatcher.fire_advisory(
+                    HookPoint.DELEGATION_ERROR,
+                    payload=delegation_error_payload("", str(e)),
+                )
             return SubAgentResult(
                 spawn_id="",
                 success=False,

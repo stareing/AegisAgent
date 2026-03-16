@@ -9,7 +9,12 @@ from typing import TYPE_CHECKING, Any
 
 from agent_framework.infra.logger import get_logger
 from agent_framework.infra.telemetry import get_tracing_manager
-from agent_framework.models.hook import HookContext, HookPoint
+from agent_framework.models.hook import HookPoint
+from agent_framework.hooks.dispatcher import HookDispatchService
+from agent_framework.hooks.payloads import (
+    run_start_payload, run_finish_payload, run_error_payload,
+    artifact_finalize_payload,
+)
 from agent_framework.agent.capability_policy import apply_capability_policy
 from agent_framework.agent.commit_sequencer import CommitSequencer
 from agent_framework.agent.loop import AgentLoop, AgentLoopDeps
@@ -103,6 +108,8 @@ class RunCoordinator:
         self._commit_sequencer = CommitSequencer()
         # Cached per-run: tool schemas don't change within a run
         self._cached_tools_schema: list[dict] | None = None
+        # Dispatcher for hook dispatch (created per-run from deps.hook_executor)
+        self._dispatcher: HookDispatchService | None = None
 
     async def run(
         self,
@@ -234,16 +241,13 @@ class RunCoordinator:
 
             # RUN_START hook
             _hook_exec = deps.hook_executor
-            if _hook_exec is not None:
+            self._dispatcher = HookDispatchService(_hook_exec) if _hook_exec is not None else None
+            if self._dispatcher is not None:
                 try:
-                    await _hook_exec.execute_chain(
+                    await self._dispatcher.fire(
                         HookPoint.RUN_START,
-                        HookContext(
-                            run_id=run_id,
-                            agent_id=agent.agent_id,
-                            user_id=user_id,
-                            payload={"task": task[:500], "model": agent.agent_config.model_name},
-                        ),
+                        run_id=run_id, agent_id=agent.agent_id, user_id=user_id,
+                        payload=run_start_payload(task, agent.agent_config.model_name),
                     )
                 except Exception as hook_err:
                     logger.warning("run.hook_run_start_failed", error=str(hook_err))
@@ -371,23 +375,20 @@ class RunCoordinator:
             await agent.on_final_answer(final_answer, agent_state)
 
             # RUN_FINISH hook
-            try:
-                await _hook_exec.execute_chain(
-                    HookPoint.RUN_FINISH,
-                    HookContext(
-                        run_id=run_id,
-                        agent_id=agent.agent_id,
-                        user_id=user_id,
-                        payload={
-                            "success": True,
-                            "iterations_used": agent_state.iteration_count,
-                            "total_tokens": agent_state.total_tokens_used,
-                            "final_answer_preview": (final_answer or "")[:200],
-                        },
-                    ),
-                )
-            except Exception as hook_err:
-                logger.warning("run.hook_run_finish_failed", error=str(hook_err))
+            if self._dispatcher is not None:
+                try:
+                    await self._dispatcher.fire(
+                        HookPoint.RUN_FINISH,
+                        run_id=run_id, agent_id=agent.agent_id, user_id=user_id,
+                        payload=run_finish_payload(
+                            success=True,
+                            iterations_used=agent_state.iteration_count,
+                            total_tokens=agent_state.total_tokens_used,
+                            final_answer_preview=final_answer or "",
+                        ),
+                    )
+                except Exception as hook_err:
+                    logger.warning("run.hook_run_finish_failed", error=str(hook_err))
 
             result = self._finalize_run(
                 agent, agent_state, final_answer, last_stop_signal
@@ -422,22 +423,16 @@ class RunCoordinator:
                 total_tokens=agent_state.total_tokens_used,
             )
             # RUN_ERROR hook
-            try:
-                await _hook_exec.execute_chain(
+            if self._dispatcher is not None:
+                await self._dispatcher.fire_advisory(
                     HookPoint.RUN_ERROR,
-                    HookContext(
-                        run_id=run_id,
-                        agent_id=agent.agent_id,
-                        user_id=user_id,
-                        payload={
-                            "error_type": type(e).__name__,
-                            "error_message": str(e)[:500],
-                            "iterations_used": agent_state.iteration_count,
-                        },
+                    run_id=run_id, agent_id=agent.agent_id, user_id=user_id,
+                    payload=run_error_payload(
+                        error_type=type(e).__name__,
+                        error_message=str(e),
+                        iterations_used=agent_state.iteration_count,
                     ),
                 )
-            except Exception:
-                pass  # RUN_ERROR hooks must never propagate
             # Contract: failed runs also go through record_turn for CommitDecision
             # (base_manager.py §41: failed runs decide memory via CommitDecision)
             try:
@@ -599,16 +594,13 @@ class RunCoordinator:
 
             # RUN_START hook (stream)
             _hook_exec = deps.hook_executor
-            if _hook_exec is not None:
+            self._dispatcher = HookDispatchService(_hook_exec) if _hook_exec is not None else None
+            if self._dispatcher is not None:
                 try:
-                    await _hook_exec.execute_chain(
+                    await self._dispatcher.fire(
                         HookPoint.RUN_START,
-                        HookContext(
-                            run_id=run_id,
-                            agent_id=agent.agent_id,
-                            user_id=user_id,
-                            payload={"task": task[:500], "model": agent.agent_config.model_name},
-                        ),
+                        run_id=run_id, agent_id=agent.agent_id, user_id=user_id,
+                        payload=run_start_payload(task, agent.agent_config.model_name),
                     )
                 except Exception as hook_err:
                     logger.warning("run_stream.hook_run_start_failed", error=str(hook_err))
@@ -749,23 +741,20 @@ class RunCoordinator:
             await agent.on_final_answer(final_answer, agent_state)
 
             # RUN_FINISH hook (stream)
-            try:
-                await _hook_exec.execute_chain(
-                    HookPoint.RUN_FINISH,
-                    HookContext(
-                        run_id=run_id,
-                        agent_id=agent.agent_id,
-                        user_id=user_id,
-                        payload={
-                            "success": True,
-                            "iterations_used": agent_state.iteration_count,
-                            "total_tokens": agent_state.total_tokens_used,
-                            "final_answer_preview": (final_answer or "")[:200],
-                        },
-                    ),
-                )
-            except Exception as hook_err:
-                logger.warning("run_stream.hook_run_finish_failed", error=str(hook_err))
+            if self._dispatcher is not None:
+                try:
+                    await self._dispatcher.fire(
+                        HookPoint.RUN_FINISH,
+                        run_id=run_id, agent_id=agent.agent_id, user_id=user_id,
+                        payload=run_finish_payload(
+                            success=True,
+                            iterations_used=agent_state.iteration_count,
+                            total_tokens=agent_state.total_tokens_used,
+                            final_answer_preview=final_answer or "",
+                        ),
+                    )
+                except Exception as hook_err:
+                    logger.warning("run_stream.hook_run_finish_failed", error=str(hook_err))
 
             result = self._finalize_run(
                 agent, agent_state, final_answer, last_stop_signal
@@ -789,21 +778,16 @@ class RunCoordinator:
                 error=str(e),
             )
             # RUN_ERROR hook (stream)
-            try:
-                await _hook_exec.execute_chain(
+            if self._dispatcher is not None:
+                await self._dispatcher.fire_advisory(
                     HookPoint.RUN_ERROR,
-                    HookContext(
-                        run_id=run_id,
-                        agent_id=agent.agent_id,
-                        user_id=user_id,
-                        payload={
-                            "error_type": type(e).__name__,
-                            "error_message": str(e)[:500],
-                        },
+                    run_id=run_id, agent_id=agent.agent_id, user_id=user_id,
+                    payload=run_error_payload(
+                        error_type=type(e).__name__,
+                        error_message=str(e),
+                        iterations_used=agent_state.iteration_count,
                     ),
                 )
-            except Exception:
-                pass
             try:
                 deps.memory_manager.record_turn(
                     task, final_answer, agent_state.iteration_history
@@ -1095,7 +1079,14 @@ class RunCoordinator:
 
         # Step 2: Feed tool results one by one
         for i, (tr, tm) in enumerate(zip(tool_results, tool_metas)):
-            output_str = str(tr.output) if tr.success else str(tr.error)
+            raw = tr.output if tr.success else tr.error
+            output_str = str(raw) if raw else ""
+            # Human-readable display_text
+            if isinstance(raw, dict) and "summary" in raw:
+                display_text = str(raw["summary"])
+            else:
+                display_text = output_str
+
             mid_response_text = await self._process_progressive_tool_completion(
                 agent=agent,
                 deps=deps,
@@ -1106,7 +1097,7 @@ class RunCoordinator:
                 task=task,
                 tool_call_id=tr.tool_call_id,
                 tool_name=tr.tool_name,
-                output_str=output_str,
+                output_str=display_text,
                 current_index=i + 1,
                 total=total,
             )
@@ -1120,10 +1111,13 @@ class RunCoordinator:
                         break
             yield StreamEvent(
                 type=StreamEventType.PROGRESSIVE_DONE,
-                data={"tool_call_id": tr.tool_call_id, "tool_name": tr.tool_name,
-                      "description": description,
-                      "success": tr.success, "output": output_str[:200],
-                      "index": i + 1, "total": total},
+                data={
+                    "tool_call_id": tr.tool_call_id, "tool_name": tr.tool_name,
+                    "description": description,
+                    "success": tr.success, "output": output_str,
+                    "display_text": display_text,
+                    "index": i + 1, "total": total,
+                },
             )
 
             if mid_response_text:
@@ -1177,6 +1171,11 @@ class RunCoordinator:
         current_index: int,
         total: int,
     ) -> str | None:
+        """Project tool result to session and optionally get mid-stream LLM response.
+
+        The mid-response uses a focused prompt so the LLM generates a brief
+        incremental update (not a full summary of all results).
+        """
         self._state_ctrl.append_projected_messages(session_state, [Message(
             role="tool",
             content=output_str,
@@ -1184,27 +1183,48 @@ class RunCoordinator:
             name=tool_name,
         )])
 
+        # Skip mid-response for the last tool — the normal iteration loop
+        # will handle the final LLM call with full context.
         if current_index >= total:
             return None
 
         try:
+            # Build a focused mid-response: use session context but inject a
+            # system instruction that constrains the LLM to a brief progress update.
             if hasattr(deps.tool_executor, "set_current_session_messages"):
                 maybe = deps.tool_executor.set_current_session_messages(
                     session_state.get_messages()
                 )
                 if inspect.isawaitable(maybe):
                     await maybe
-            mid_request = await self._prepare_llm_request(
-                agent, deps, agent_state,
-                session_state=session_state,
-                effective_config=effective_config,
-                active_skill=active_skill,
-                task=task,
+
+            # Use focused messages: last few session messages + progress instruction
+            recent_msgs = session_state.get_messages()
+            progress_instruction = Message(
+                role="system",
+                content=(
+                    f"Task {current_index}/{total} just completed. "
+                    f"Give a brief 1-2 sentence progress update about THIS result only. "
+                    f"Do NOT summarize all tasks. Do NOT give a final conclusion. "
+                    f"Other tasks are still running."
+                ),
             )
+            # Take system + last few messages + progress instruction
+            focused_msgs = []
+            if recent_msgs and recent_msgs[0].role == "system":
+                focused_msgs.append(recent_msgs[0])
+            # Add only the tool call + result pair for this task
+            focused_msgs.append(progress_instruction)
+            # Add the most recent tool result
+            for m in reversed(recent_msgs):
+                if m.role == "tool" and getattr(m, "tool_call_id", None) == tool_call_id:
+                    focused_msgs.append(m)
+                    break
+
             mid_response = await self._loop._call_llm(
                 deps.model_adapter,
-                mid_request.messages,
-                mid_request.tools_schema,
+                focused_msgs,
+                None,  # No tools for mid-response
                 effective_config,
             )
             if not mid_response.content:
@@ -1232,6 +1252,19 @@ class RunCoordinator:
 
         # Promote artifacts from sub-agent delegation results
         promoted_artifacts = self._collect_subagent_artifacts(agent_state)
+
+        # ARTIFACT_FINALIZE hook — fires after artifact promotion, before result
+        if promoted_artifacts and self._dispatcher is not None:
+            for art in promoted_artifacts:
+                self._dispatcher.fire_sync_advisory(
+                    HookPoint.ARTIFACT_FINALIZE,
+                    run_id=agent_state.run_id,
+                    payload=artifact_finalize_payload(
+                        artifact_name=art.name,
+                        artifact_type=art.artifact_type,
+                        uri=art.uri or "",
+                    ),
+                )
 
         progressive_responses = getattr(agent_state, "_progressive_responses", [])
         return AgentRunResult(

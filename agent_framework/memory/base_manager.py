@@ -3,8 +3,10 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
-from agent_framework.models.hook import HookContext, HookPoint
+from agent_framework.models.hook import HookPoint
 from agent_framework.hooks.errors import HookDeniedError
+from agent_framework.hooks.dispatcher import HookDispatchService
+from agent_framework.hooks.payloads import memory_pre_record_payload, memory_post_record_payload
 from agent_framework.models.memory import (
     CommitDecision,
     MemoryCandidate,
@@ -54,6 +56,9 @@ class BaseMemoryManager(ABC):
         self._user_id: str | None = None
         self._session_active = False
         self._hook_executor = hook_executor
+        self._hook_dispatcher: HookDispatchService | None = (
+            HookDispatchService(hook_executor) if hook_executor is not None else None
+        )
 
     # ------------------------------------------------------------------
     # Session lifecycle (v2.6.3 §41)
@@ -189,13 +194,35 @@ class BaseMemoryManager(ABC):
                 confidence=candidate.confidence,
             )
 
-        # MEMORY_PRE_RECORD hook
-        if not self._fire_memory_hook_sync(
+        # MEMORY_PRE_RECORD hook — supports DENY and MODIFY (title/content/tags)
+        hook_outcome = self._fire_memory_hook_sync(
             HookPoint.MEMORY_PRE_RECORD,
-            {"content": candidate.content, "title": candidate.title,
-             "tags": list(candidate.tags), "kind": str(candidate.kind)},
-        ):
-            return None
+            memory_pre_record_payload(
+                candidate.content, candidate.title,
+                candidate.tags, str(candidate.kind),
+            ),
+        )
+        if hook_outcome is None:
+            return None  # DENY
+        # Apply MODIFY results back to candidate
+        if isinstance(hook_outcome, dict):
+            updates: dict = {}
+            if "content" in hook_outcome:
+                updates["content"] = hook_outcome["content"]
+            if "title" in hook_outcome:
+                updates["title"] = hook_outcome["title"]
+            if "tags" in hook_outcome:
+                updates["tags"] = hook_outcome["tags"]
+            if updates:
+                candidate = MemoryCandidate(
+                    kind=candidate.kind,
+                    title=updates.get("title", candidate.title),
+                    content=updates.get("content", candidate.content),
+                    tags=updates.get("tags", candidate.tags),
+                    reason=candidate.reason,
+                    candidate_source=candidate.candidate_source,
+                    confidence=candidate.confidence,
+                )
 
         existing = self._store.list_by_user(
             self._agent_id, self._user_id, active_only=False
@@ -237,7 +264,7 @@ class BaseMemoryManager(ABC):
             self._store.update(match)
             self._fire_memory_hook_sync(
                 HookPoint.MEMORY_POST_RECORD,
-                {"memory_id": match.memory_id, "action": "update"},
+                memory_post_record_payload(match.memory_id, "update"),
             )
             return match.memory_id
         else:
@@ -259,7 +286,7 @@ class BaseMemoryManager(ABC):
             memory_id = self._store.save(record)
             self._fire_memory_hook_sync(
                 HookPoint.MEMORY_POST_RECORD,
-                {"memory_id": memory_id, "action": "insert"},
+                memory_post_record_payload(memory_id, "insert"),
             )
             return memory_id
 
@@ -304,32 +331,27 @@ class BaseMemoryManager(ABC):
     def set_enabled(self, enabled: bool) -> None:
         self._enabled = enabled
 
-    def _fire_memory_hook_sync(self, hook_point: HookPoint, payload: dict) -> bool:
-        """Fire a memory hook synchronously. Returns False if DENY."""
-        if self._hook_executor is None:
-            return True
-        import asyncio
-        ctx = HookContext(
-            run_id=self._run_id,
-            agent_id=self._agent_id,
-            payload=payload,
-        )
-        try:
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
+    def _fire_memory_hook_sync(
+        self, hook_point: HookPoint, payload: dict,
+    ) -> dict | None | bool:
+        """Fire a memory hook synchronously via dispatcher.
 
-            if loop is not None and loop.is_running():
-                # Already in async context — cannot block here, hook is best-effort
-                return True
-            else:
-                asyncio.run(self._hook_executor.execute_chain(hook_point, ctx))
-                return True
+        Returns None (DENY), dict (MODIFY modifications), or True (pass-through).
+        """
+        if self._hook_dispatcher is None:
+            return True
+        try:
+            outcome = self._hook_dispatcher.fire_sync(
+                hook_point,
+                run_id=self._run_id,
+                agent_id=self._agent_id,
+                payload=payload,
+            )
+            return outcome.modifications if outcome.modifications else True
         except HookDeniedError:
-            return False
+            return None
         except Exception:
-            return True  # Hook failure doesn't block memory
+            return True
 
     @staticmethod
     def _normalize(text: str) -> str:

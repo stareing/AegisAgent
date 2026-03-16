@@ -106,6 +106,21 @@ class AgentFramework:
         self._hook_subsystem = HookSubsystem()
         self._hook_registry = self._hook_subsystem.registry
         self._hook_executor = self._hook_subsystem.executor
+        self._hook_dispatcher = self._hook_subsystem.dispatcher
+
+        # CONFIG_LOADED hook — fires after config is available, before component init
+        from agent_framework.models.hook import HookPoint
+        from agent_framework.hooks.payloads import config_loaded_payload
+        try:
+            self._hook_dispatcher.fire_sync_advisory(
+                HookPoint.CONFIG_LOADED,
+                payload=config_loaded_payload(
+                    self.config.model.adapter_type,
+                    getattr(self.config.memory, "store_type", "sqlite"),
+                ),
+            )
+        except Exception:
+            pass
 
         # Memory
         memory_store = _create_memory_store(self.config.memory)
@@ -150,6 +165,7 @@ class AgentFramework:
         delegation_executor = DelegationExecutor(
             sub_agent_runtime=None,
             hook_executor=self._hook_executor,
+            confirmation_handler=confirmation,
         )
 
         # Tool executor
@@ -208,6 +224,19 @@ class AgentFramework:
             file_count = skill_router.load_file_skills(skill_dirs)
             logger.info("skills.file_loaded", count=file_count,
                         dirs=[str(d) for d in skill_dirs])
+
+        # INSTRUCTIONS_LOADED hook — fires after skills/tools are assembled
+        from agent_framework.hooks.payloads import instructions_loaded_payload
+        try:
+            self._hook_dispatcher.fire_sync_advisory(
+                HookPoint.INSTRUCTIONS_LOADED,
+                payload=instructions_loaded_payload(
+                    skills_loaded=len(skill_router.list_skills()),
+                    tools_registered=len(self._registry.list_tools()) if self._registry else 0,
+                ),
+            )
+        except Exception:
+            pass
 
         # Wire invoke_skill tool with runtime references
         from agent_framework.tools.builtin_skills import set_skill_runtime
@@ -729,6 +758,7 @@ class AgentFramework:
             self._plugin_lifecycle = PluginLifecycleManager(
                 self._plugin_registry, self._hook_registry,
                 tool_registry=self._registry,
+                skill_router=getattr(self._deps, "skill_router", None) if self._deps else None,
             )
         loader = PluginLoader(self._plugin_registry)
         manifest = loader.load_plugin(plugin)
@@ -743,6 +773,18 @@ class AgentFramework:
         """Disable an enabled plugin."""
         if hasattr(self, "_plugin_lifecycle"):
             self._plugin_lifecycle.disable(plugin_id)
+
+    def list_plugin_agent_templates(self) -> dict[str, list]:
+        """Return {plugin_id: [agent_templates]} for all enabled plugins."""
+        if hasattr(self, "_plugin_lifecycle"):
+            return self._plugin_lifecycle.list_agent_templates()
+        return {}
+
+    def get_plugin_agent_templates(self, plugin_id: str) -> list:
+        """Return agent templates from a specific plugin."""
+        if hasattr(self, "_plugin_lifecycle"):
+            return self._plugin_lifecycle.get_agent_templates(plugin_id)
+        return []
 
     async def shutdown(self) -> None:
         """Clean up resources."""

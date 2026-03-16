@@ -684,6 +684,24 @@ class TestFrozenContext:
         assert HookPoint.INSTRUCTIONS_LOADED.value == "instructions.loaded"
 
 
+class TestSkillRouterRemove:
+    """SkillRouter.remove_skill must work for plugin lifecycle."""
+
+    def test_remove_existing(self) -> None:
+        from agent_framework.agent.skill_router import SkillRouter
+        from agent_framework.models.agent import Skill
+        router = SkillRouter()
+        router.register_skill(Skill(skill_id="test", name="Test", description="d"))
+        assert router.get_skill("test") is not None
+        assert router.remove_skill("test") is True
+        assert router.get_skill("test") is None
+
+    def test_remove_nonexistent(self) -> None:
+        from agent_framework.agent.skill_router import SkillRouter
+        router = SkillRouter()
+        assert router.remove_skill("nope") is False
+
+
 # ---------------------------------------------------------------------------
 # Interpreter tests
 # ---------------------------------------------------------------------------

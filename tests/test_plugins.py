@@ -103,6 +103,12 @@ class _TestPlugin:
     def get_tools(self) -> list:
         return []
 
+    def get_commands(self) -> list:
+        return []
+
+    def get_agents(self) -> list:
+        return []
+
 
 class _FailingPlugin(_TestPlugin):
     """Plugin that fails during enable."""
@@ -323,6 +329,27 @@ class TestPluginLifecycleManager:
         lm.enable("p1")
         assert preg.get_status("p1") == PluginStatus.ENABLED
 
+    def test_enable_auto_validates(self) -> None:
+        """enable() must call validate() — missing permissions block enable."""
+        preg, hreg, lm = self._make_lifecycle()  # No permissions granted
+        plugin = _TestPlugin(
+            "p1",
+            required_permissions=[PluginPermission.REGISTER_TOOLS],
+        )
+        preg.register(plugin)
+        preg.set_status("p1", PluginStatus.LOADED)
+        with pytest.raises(PluginPermissionError, match="high-risk"):
+            lm.enable("p1")
+
+    def test_enable_auto_validates_dependencies(self) -> None:
+        """enable() must check dependencies even without explicit validate()."""
+        preg, hreg, lm = self._make_lifecycle()
+        plugin = _TestPlugin("p1", dependencies=["missing_dep"])
+        preg.register(plugin)
+        preg.set_status("p1", PluginStatus.LOADED)
+        with pytest.raises(PluginValidationError, match="missing"):
+            lm.enable("p1")
+
     def test_grant_revoke_permission(self) -> None:
         preg, hreg, lm = self._make_lifecycle()
         lm.grant_permission(PluginPermission.REGISTER_TOOLS)
@@ -474,5 +501,118 @@ class TestPluginToolRegistration:
         with pytest.raises(PluginLifecycleError):
             lm.enable("fail_plugin")
 
-        # First tool should have been rolled back
-        mock_tool_reg.unregister.assert_called_once_with("tool_ok")
+        # First tool should have been rolled back via remove() (ToolRegistry API)
+        mock_tool_reg.remove.assert_called_once_with("tool_ok")
+
+
+class TestPluginCommandLifecycle:
+    """Verify commands (skills) are properly registered and unregistered."""
+
+    def test_disable_removes_commands(self) -> None:
+        """After disable, plugin commands must not remain in SkillRouter."""
+        from unittest.mock import MagicMock
+        from agent_framework.models.agent import Skill
+
+        preg = PluginRegistry()
+        hreg = HookRegistry()
+        mock_router = MagicMock()
+        lm = PluginLifecycleManager(preg, hreg, skill_router=mock_router)
+
+        test_skill = Skill(skill_id="plugin_cmd", name="Plugin Command",
+                           description="test")
+
+        class CmdPlugin(_TestPlugin):
+            def get_commands(self):
+                return [test_skill]
+
+        plugin = CmdPlugin("cmd_plugin")
+        preg.register(plugin)
+        preg.set_status("cmd_plugin", PluginStatus.LOADED)
+        lm.enable("cmd_plugin")
+
+        mock_router.register_skill.assert_called_once_with(test_skill)
+
+        lm.disable("cmd_plugin")
+        mock_router.remove_skill.assert_called_once_with("plugin_cmd")
+
+    def test_enable_rollback_removes_commands(self) -> None:
+        """If enable fails after commands registered, commands must be rolled back."""
+        from unittest.mock import MagicMock
+        from agent_framework.models.agent import Skill
+
+        preg = PluginRegistry()
+        hreg = HookRegistry()
+        mock_router = MagicMock()
+        lm = PluginLifecycleManager(preg, hreg, skill_router=mock_router)
+
+        test_skill = Skill(skill_id="will_rollback", name="RB",
+                           description="test")
+
+        class CmdFailPlugin(_TestPlugin):
+            """Plugin where get_commands succeeds but get_agents raises."""
+            def get_commands(self):
+                return [test_skill]
+            def get_agents(self):
+                raise RuntimeError("agent registration boom")
+
+        plugin = CmdFailPlugin("fail_cmd_plugin")
+        preg.register(plugin)
+        preg.set_status("fail_cmd_plugin", PluginStatus.LOADED)
+
+        with pytest.raises(PluginLifecycleError):
+            lm.enable("fail_cmd_plugin")
+
+        # Command should have been rolled back
+        mock_router.remove_skill.assert_called_once_with("will_rollback")
+
+
+class TestPluginAgentTemplates:
+    """Verify agent templates have public query API."""
+
+    def test_agent_templates_stored_and_queryable(self) -> None:
+        preg = PluginRegistry()
+        hreg = HookRegistry()
+        lm = PluginLifecycleManager(preg, hreg)
+
+        agent_def = {"agent_id": "reviewer", "model_name": "gpt-4"}
+
+        class AgentPlugin(_TestPlugin):
+            def get_agents(self):
+                return [agent_def]
+
+        plugin = AgentPlugin("agent_plugin")
+        preg.register(plugin)
+        preg.set_status("agent_plugin", PluginStatus.LOADED)
+        lm.enable("agent_plugin")
+
+        # Public API: query templates
+        all_templates = lm.list_agent_templates()
+        assert "agent_plugin" in all_templates
+        assert all_templates["agent_plugin"] == [agent_def]
+
+        specific = lm.get_agent_templates("agent_plugin")
+        assert specific == [agent_def]
+
+    def test_disable_removes_agent_templates(self) -> None:
+        preg = PluginRegistry()
+        hreg = HookRegistry()
+        lm = PluginLifecycleManager(preg, hreg)
+
+        class AgentPlugin(_TestPlugin):
+            def get_agents(self):
+                return [{"agent_id": "temp"}]
+
+        plugin = AgentPlugin("agent_plugin")
+        preg.register(plugin)
+        preg.set_status("agent_plugin", PluginStatus.LOADED)
+        lm.enable("agent_plugin")
+        assert lm.list_agent_templates() != {}
+
+        lm.disable("agent_plugin")
+        assert lm.list_agent_templates() == {}
+
+    def test_nonexistent_plugin_returns_empty(self) -> None:
+        preg = PluginRegistry()
+        hreg = HookRegistry()
+        lm = PluginLifecycleManager(preg, hreg)
+        assert lm.get_agent_templates("nonexistent") == []

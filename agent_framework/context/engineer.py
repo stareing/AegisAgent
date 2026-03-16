@@ -8,7 +8,9 @@ from agent_framework.context.compressor import ContextCompressor
 from agent_framework.context.prefix_manager import PromptPrefixManager
 from agent_framework.context.source_provider import ContextSourceProvider
 from agent_framework.models.context import ContextStats
-from agent_framework.models.hook import HookContext, HookPoint
+from agent_framework.hooks.dispatcher import HookDispatchService
+from agent_framework.hooks.payloads import context_pre_build_payload, context_post_build_payload
+from agent_framework.models.hook import HookPoint
 from agent_framework.models.message import Message
 
 if TYPE_CHECKING:
@@ -53,6 +55,9 @@ class ContextEngineer:
         self._force_include_memory = False
         self._last_stats = ContextStats()
         self._hook_executor = hook_executor
+        self._hook_dispatcher: HookDispatchService | None = (
+            HookDispatchService(hook_executor) if hook_executor is not None else None
+        )
 
     async def prepare_context_for_llm(
         self,
@@ -76,20 +81,21 @@ class ContextEngineer:
         active_skill: Skill | None = context_materials.get("active_skill")
         runtime_info: dict | None = context_materials.get("runtime_info")
 
-        # CONTEXT_PRE_BUILD hook
-        if self._hook_executor is not None:
+        # CONTEXT_PRE_BUILD hook — supports MODIFY for extra_instructions, compression_preference
+        _hook_extra_instructions: str | None = None
+        if self._hook_dispatcher is not None:
             try:
-                await self._hook_executor.execute_chain(
+                outcome = await self._hook_dispatcher.fire(
                     HookPoint.CONTEXT_PRE_BUILD,
-                    HookContext(
-                        run_id=agent_state.run_id,
-                        payload={
-                            "task": task[:200],
-                            "memory_count": len(memories),
-                            "session_message_count": len(session_state.messages),
-                        },
-                    ),
+                    run_id=agent_state.run_id,
+                    payload=context_pre_build_payload(task, len(memories), len(session_state.messages)),
                 )
+                if "extra_instructions" in outcome.modifications:
+                    _hook_extra_instructions = str(outcome.modifications["extra_instructions"])
+                if "compression_preference" in outcome.modifications:
+                    pref = outcome.modifications["compression_preference"]
+                    if pref == "disable":
+                        self._allow_compression = False
             except Exception:
                 pass  # Context hooks are advisory
 
@@ -163,6 +169,14 @@ class ContextEngineer:
             sys_content = messages[0].content or ""
             messages[0] = Message(role="system", content=f"{sys_content}\n\n{memory_block}")
 
+        # Append hook-injected extra instructions if present
+        if _hook_extra_instructions:
+            sys_content = messages[0].content or ""
+            messages[0] = Message(
+                role="system",
+                content=f"{sys_content}\n\n<hook-instructions>{_hook_extra_instructions}</hook-instructions>",
+            )
+
         # Append session history (includes user task as first message)
         for group in session_groups:
             messages.extend(group.messages)
@@ -182,23 +196,14 @@ class ContextEngineer:
             prefix_reused=prefix_reused,
         )
 
-        # CONTEXT_POST_BUILD hook
-        if self._hook_executor is not None:
-            try:
-                await self._hook_executor.execute_chain(
-                    HookPoint.CONTEXT_POST_BUILD,
-                    HookContext(
-                        run_id=agent_state.run_id,
-                        payload={
-                            "total_messages": len(messages),
-                            "total_tokens": total_tokens,
-                            "groups_trimmed": groups_trimmed,
-                            "prefix_reused": prefix_reused,
-                        },
-                    ),
-                )
-            except Exception:
-                pass
+        if self._hook_dispatcher is not None:
+            await self._hook_dispatcher.fire_advisory(
+                HookPoint.CONTEXT_POST_BUILD,
+                run_id=agent_state.run_id,
+                payload=context_post_build_payload(
+                    len(messages), total_tokens, groups_trimmed, prefix_reused,
+                ),
+            )
 
         return messages
 

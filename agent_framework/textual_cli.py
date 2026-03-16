@@ -548,10 +548,19 @@ class AegisAgentApp(App[None]):
                     total = event.data.get("total", 0)
                     tool_name = event.data.get("tool_name", "")
                     success = event.data.get("success", False)
-                    output = event.data.get("output", "")[:60]
+                    description = event.data.get("description", "")
+                    # Prefer display_text (human-readable) over raw output
+                    display = event.data.get("display_text") or event.data.get("output", "")
                     status = "✓" if success else "✗"
                     tag = "subagent" if tool_name == "spawn_agent" else "tool"
-                    self._append_chat(f"\n  [{tag} {idx}/{total}] {status} {output}")
+                    if tag == "subagent" and description:
+                        self._append_chat(f"\n  [{tag} {idx}/{total}] {status} {description}")
+                        if display:
+                            # Show full result, indented
+                            for line in display.strip().split("\n"):
+                                self._append_chat(f"    {line}")
+                    else:
+                        self._append_chat(f"\n  [{tag} {idx}/{total}] {status} {display}")
 
                 elif event.type == StreamEventType.PROGRESSIVE_RESPONSE:
                     text_resp = event.data.get("text", "")

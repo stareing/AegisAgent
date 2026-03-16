@@ -22,6 +22,7 @@ from agent_framework.plugins.errors import (
     PluginPermissionError,
     PluginValidationError,
 )
+from agent_framework.plugins.extensions import PluginExtensionRegistrar, PluginApplyReceipt
 from agent_framework.plugins.protocol import PluginProtocol
 from agent_framework.plugins.registry import PluginRegistry
 
@@ -40,11 +41,16 @@ class PluginLifecycleManager:
         hook_registry: HookRegistry,
         granted_permissions: set[PluginPermission] | None = None,
         tool_registry: Any = None,
+        skill_router: Any = None,
     ) -> None:
         self._plugins = plugin_registry
         self._hooks = hook_registry
         self._granted_permissions = granted_permissions or set()
-        self._tool_registry = tool_registry
+        self._registrar = PluginExtensionRegistrar(
+            hook_registry=hook_registry,
+            tool_registry=tool_registry,
+            skill_router=skill_router,
+        )
 
     def validate(self, plugin_id: str) -> None:
         """Validate manifest, check dependencies and permissions."""
@@ -117,52 +123,29 @@ class PluginLifecycleManager:
         if status != PluginStatus.VALIDATED:
             self.validate(plugin_id)
 
-        registered_hook_ids: list[str] = []
-        registered_tool_names: list[str] = []
+        receipt = PluginApplyReceipt(plugin_id=plugin_id)
         try:
             plugin.enable()
-
-            # Register hooks
-            for hook in plugin.get_hooks():
-                self._hooks.register(hook)
-                registered_hook_ids.append(hook.meta.hook_id)
-
-            # Register tools
-            tools = plugin.get_tools()
-            if tools and self._tool_registry is not None:
-                for tool_entry in tools:
-                    self._tool_registry.register(tool_entry)
-                    registered_tool_names.append(tool_entry.meta.name)
+            receipt = self._registrar.apply(plugin)
 
             self._plugins.set_status(plugin_id, PluginStatus.ENABLED)
             logger.info(
                 "plugin.enabled",
                 plugin_id=plugin_id,
-                hooks_registered=len(registered_hook_ids),
-                tools_registered=len(registered_tool_names),
+                hooks_registered=len(receipt.hook_ids),
+                tools_registered=len(receipt.tool_names),
+                commands_registered=len(receipt.skill_ids),
+                agents_registered=receipt.agent_template_count,
             )
 
         except Exception as e:
-            # Rollback: unregister any tools that were registered
-            # ToolRegistry uses remove(), not unregister()
-            if self._tool_registry is not None:
-                for tname in registered_tool_names:
-                    try:
-                        self._tool_registry.remove(tname)
-                    except Exception:
-                        pass
-
-            # Rollback: unregister any hooks that were registered
-            for hid in registered_hook_ids:
-                self._hooks.unregister(hid)
-
+            partial = getattr(e, "partial_receipt", receipt)
+            self._registrar.rollback(partial)
             self._plugins.set_status(plugin_id, PluginStatus.FAILED)
             logger.error(
                 "plugin.enable_failed",
                 plugin_id=plugin_id,
                 error=str(e),
-                rolled_back_hooks=len(registered_hook_ids),
-                rolled_back_tools=len(registered_tool_names),
             )
             raise PluginLifecycleError(
                 f"Failed to enable plugin '{plugin_id}': {e}",
@@ -184,31 +167,11 @@ class PluginLifecycleManager:
                 plugin_id=plugin_id,
             )
 
-        # Unregister all hooks from this plugin
-        hooks = self._hooks.list_hooks(plugin_id=plugin_id, enabled_only=False)
-        for meta in hooks:
-            self._hooks.unregister(meta.hook_id)
-
-        # Unregister all tools from this plugin
-        tools_unregistered = 0
-        if self._tool_registry is not None:
-            tools = plugin.get_tools()
-            if tools:
-                for tool_entry in tools:
-                    try:
-                        self._tool_registry.remove(tool_entry.meta.name)
-                        tools_unregistered += 1
-                    except Exception:
-                        pass
+        self._registrar.remove(plugin)
 
         plugin.disable()
         self._plugins.set_status(plugin_id, PluginStatus.DISABLED)
-        logger.info(
-            "plugin.disabled",
-            plugin_id=plugin_id,
-            hooks_unregistered=len(hooks),
-            tools_unregistered=tools_unregistered,
-        )
+        logger.info("plugin.disabled", plugin_id=plugin_id)
 
     def unload(self, plugin_id: str) -> None:
         """Unload a plugin — disable first if needed, then release."""
@@ -241,6 +204,12 @@ class PluginLifecycleManager:
             return True  # Unknown format, pass
         except Exception:
             return True  # If packaging not installed or parse fails, pass
+
+    def list_agent_templates(self) -> dict[str, list]:
+        return self._registrar.list_agent_templates()
+
+    def get_agent_templates(self, plugin_id: str) -> list:
+        return self._registrar.get_agent_templates(plugin_id)
 
     def grant_permission(self, permission: PluginPermission) -> None:
         """Grant a permission for plugin validation."""
