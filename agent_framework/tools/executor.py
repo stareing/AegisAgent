@@ -31,6 +31,7 @@ from agent_framework.protocols.core import (
     DelegationExecutorProtocol,
     ToolRegistryProtocol,
 )
+from agent_framework.tools.todo import TaskService
 
 if TYPE_CHECKING:
     from agent_framework.models.message import Message
@@ -89,6 +90,13 @@ class ToolExecutor:
         self._current_session_messages: list[Message] = []
         # Set by RunCoordinator from EffectiveRunConfig
         self._progressive_mode: bool = False
+        # Run-scoped task graph management
+        self._todo_service = TaskService()
+
+    @property
+    def todo_service(self) -> TaskService:
+        """Expose TaskService for coordinator to read task state."""
+        return self._todo_service
 
     def set_current_run_id(self, run_id: str) -> None:
         """Called by RunCoordinator to bind the current run_id for quota tracking."""
@@ -328,7 +336,35 @@ class ToolExecutor:
 
     # ── Source-specific routing ───────────────────────────────
 
+    # ── Task graph tool names (run-scoped interception) ─────────
+    _TASK_TOOLS = frozenset({"task_create", "task_update", "task_list", "task_get"})
+
     async def _route_local(self, entry: ToolEntry, args: dict) -> Any:
+        # Run-scoped task graph interception
+        if entry.meta.name in self._TASK_TOOLS and self._current_run_id:
+            mgr = self._todo_service.get(self._current_run_id)
+            name = entry.meta.name
+            if name == "task_create":
+                return mgr.create(
+                    args.get("subject", ""),
+                    args.get("description", ""),
+                    args.get("blocked_by"),
+                )
+            elif name == "task_update":
+                return mgr.update(
+                    args["task_id"],
+                    status=args.get("status"),
+                    subject=args.get("subject"),
+                    description=args.get("description"),
+                    add_blocked_by=args.get("add_blocked_by"),
+                    add_blocks=args.get("add_blocks"),
+                    owner=args.get("owner"),
+                )
+            elif name == "task_list":
+                return mgr.list_all()
+            elif name == "task_get":
+                return mgr.get(args["task_id"])
+
         if entry.callable_ref is None:
             raise RuntimeError(f"No callable for tool {entry.meta.name}")
         if entry.meta.is_async:

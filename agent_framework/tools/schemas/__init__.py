@@ -27,8 +27,10 @@ from agent_framework.tools.schemas.builtin_args import (
     WebSearchArgs,
     # Notebook
     NotebookEditArgs,
-    # Task
-    TodoWriteArgs,
+    # Task graph
+    TaskCreateArgs,
+    TaskUpdateArgs,
+    TaskGetArgs,
     # Control
     SlashCommandArgs,
     # Delegation
@@ -46,7 +48,8 @@ __all__ = [
     "ReadFileArgs", "WriteFileArgs", "EditFileArgs", "ListDirectoryArgs",
     "FileExistsArgs", "GrepSearchArgs", "GlobFilesArgs",
     "BashExecArgs", "BashOutputArgs", "RunCommandArgs", "GetEnvArgs",
-    "WebFetchArgs", "WebSearchArgs", "NotebookEditArgs", "TodoWriteArgs",
+    "WebFetchArgs", "WebSearchArgs", "NotebookEditArgs",
+    "TaskCreateArgs", "TaskUpdateArgs", "TaskGetArgs",
     "SlashCommandArgs", "SpawnAgentArgs", "CheckSpawnResultArgs",
     "ListMemoriesArgs", "ForgetMemoryArgs", "ClearMemoriesArgs", "ThinkArgs",
 ]

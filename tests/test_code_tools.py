@@ -1,5 +1,5 @@
 """Tests for the new code tools: edit_file, grep_search, glob_files,
-bash_exec, web_fetch, notebook_edit, todo_write/todo_read.
+bash_exec, web_fetch, notebook_edit, task_create/task_update/task_list/task_get.
 """
 
 from __future__ import annotations
@@ -362,49 +362,43 @@ class TestWebFetch:
         assert "404" in result["error"]
 
 
-# ── todo_write / todo_read ─────────────────────────────────
+# ── task_create / task_update / task_list / task_get ───────
 
 class TestTaskManager:
+    """Tests for persistent TaskManager with dependency graph."""
+
     def setup_method(self) -> None:
-        from agent_framework.tools.builtin.task_manager import _TaskStore
-        _TaskStore._instance = None
+        import tempfile
+        from agent_framework.tools.todo import TaskManager
+        self._tmp = tempfile.mkdtemp()
+        self._mgr = TaskManager(self._tmp)
 
     def test_create_tasks(self) -> None:
-        from agent_framework.tools.builtin.task_manager import todo_write, todo_read
+        t1 = json.loads(self._mgr.create("Task A"))
+        t2 = json.loads(self._mgr.create("Task B"))
+        assert t1["id"] == 1
+        assert t2["id"] == 2
 
-        result = todo_write(json.dumps([
-            {"title": "Task A", "priority": 1},
-            {"title": "Task B"},
-        ]))
-        assert result["total_tasks"] == 2
-        assert len(result["tasks"]) == 2
-
-        read = todo_read()
-        assert read["summary"]["total"] == 2
-        assert read["summary"]["pending"] == 2
+        result = json.loads(self._mgr.list_all())
+        assert result["summary"]["total"] == 2
+        assert result["summary"]["ready"] == 2
 
     def test_update_status(self) -> None:
-        from agent_framework.tools.builtin.task_manager import todo_write, todo_read
+        self._mgr.create("Do X")
+        self._mgr.update(1, status="completed")
+        result = json.loads(self._mgr.list_all())
+        assert result["summary"]["completed"] == 1
 
-        create = todo_write(json.dumps([{"title": "Do X"}]))
-        task_id = create["tasks"][0]["id"]
+    def test_dependency_chain(self) -> None:
+        self._mgr.create("A")
+        self._mgr.create("B", blocked_by=[1])
+        result = json.loads(self._mgr.list_all())
+        assert result["ready_task_ids"] == [1]
+        assert result["blocked_task_ids"] == [2]
 
-        todo_write(json.dumps([{"id": task_id, "title": "Do X", "status": "completed"}]))
-        read = todo_read()
-        assert read["summary"]["completed"] == 1
-
-    def test_priority_ordering(self) -> None:
-        from agent_framework.tools.builtin.task_manager import todo_write, todo_read
-
-        todo_write(json.dumps([
-            {"title": "Low", "priority": 0},
-            {"title": "High", "priority": 10},
-        ]))
-        read = todo_read()
-        assert read["tasks"][0]["title"] == "High"
-
-    def test_invalid_json(self) -> None:
-        from agent_framework.tools.builtin.task_manager import todo_write
-
-        with pytest.raises(ValueError, match="JSON"):
-            todo_write("not json")
+    def test_complete_unblocks(self) -> None:
+        self._mgr.create("A")
+        self._mgr.create("B", blocked_by=[1])
+        self._mgr.update(1, status="completed")
+        result = json.loads(self._mgr.list_all())
+        assert result["ready_task_ids"] == [2]

@@ -219,11 +219,39 @@ class NotebookEditArgs(BaseModel):
 # Task management tools
 # ---------------------------------------------------------------------------
 
-class TodoWriteArgs(BaseModel):
-    """Parameters for todo_write tool."""
-    tasks: str = Field(
-        description="JSON array of task objects with title, status, priority",
+class TaskCreateArgs(BaseModel):
+    """Parameters for task_create tool."""
+    subject: str = Field(description="Short task title")
+    description: str = Field(default="", description="Detailed task description")
+    blocked_by: list[int] | None = Field(
+        default=None,
+        description="Task IDs that must complete before this task can start",
     )
+
+
+class TaskUpdateArgs(BaseModel):
+    """Parameters for task_update tool."""
+    task_id: int = Field(description="ID of the task to update")
+    status: str | None = Field(
+        default=None,
+        description="New status: 'pending', 'in_progress', or 'completed'",
+    )
+    subject: str | None = Field(default=None, description="New subject text")
+    description: str | None = Field(default=None, description="New description")
+    add_blocked_by: list[int] | None = Field(
+        default=None,
+        description="Task IDs to add as upstream dependencies",
+    )
+    add_blocks: list[int] | None = Field(
+        default=None,
+        description="Task IDs to add as downstream dependents",
+    )
+    owner: str | None = Field(default=None, description="Agent/user who owns this task")
+
+
+class TaskGetArgs(BaseModel):
+    """Parameters for task_get tool."""
+    task_id: int = Field(description="The task ID to retrieve")
 
 
 # ---------------------------------------------------------------------------

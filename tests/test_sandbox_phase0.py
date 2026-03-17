@@ -117,14 +117,15 @@ class TestShellEnabledFlag:
         register_all_builtins(catalog, shell_enabled=True)
 
         tool_names = {e.meta.name for e in catalog.list_all()}
-        shell_tools = {"bash_exec", "bash_output", "kill_shell", "run_command"}
+        # run_command/get_env removed — bash_exec covers both use cases
+        shell_tools = {"bash_exec", "bash_output", "kill_shell"}
         for name in shell_tools:
             assert name in tool_names, (
                 f"{name} should be registered when shell_enabled=True"
             )
 
-    def test_get_env_always_registered(self) -> None:
-        """get_env is registered regardless of shell_enabled setting."""
+    def test_get_env_via_bash(self) -> None:
+        """get_env removed; env vars accessed via bash_exec('echo $VAR')."""
         from agent_framework.tools.catalog import GlobalToolCatalog
         from agent_framework.tools.builtin import register_all_builtins
 
@@ -132,7 +133,8 @@ class TestShellEnabledFlag:
         register_all_builtins(catalog, shell_enabled=False)
 
         tool_names = {e.meta.name for e in catalog.list_all()}
-        assert "get_env" in tool_names
+        # get_env no longer registered as standalone tool
+        assert "get_env" not in tool_names
 
 
 class TestGetEnvConfirmation:

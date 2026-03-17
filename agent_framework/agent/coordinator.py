@@ -361,6 +361,9 @@ class RunCoordinator:
                     session_state, iteration_result
                 )
 
+                # Track task tool calls for reminder injection
+                self._track_todo_round(deps, iteration_result)
+
                 # Check stop (returns StopDecision, not bare bool)
                 stop_decision = agent.should_stop(iteration_result, agent_state)
                 if stop_decision.should_stop:
@@ -738,6 +741,9 @@ class RunCoordinator:
                     session_state, iteration_result
                 )
 
+                # Track task tool calls for reminder injection
+                self._track_todo_round(deps, iteration_result)
+
                 stop_decision = agent.should_stop(iteration_result, agent_state)
                 if stop_decision.should_stop:
                     if iteration_result.model_response and iteration_result.model_response.content:
@@ -862,6 +868,28 @@ class RunCoordinator:
             self._state_ctrl.activate_skill(agent_state, skill)
             deps.context_engineer.set_skill_context(skill.system_prompt_addon)
 
+    # Tool names that count as "task write" for reminder tracking
+    _TASK_WRITE_TOOLS = frozenset({"task_create", "task_update"})
+
+    @staticmethod
+    def _track_todo_round(
+        deps: AgentRuntimeDeps,
+        iteration_result: IterationResult,
+    ) -> None:
+        """Check if this iteration called any task tool and update the TaskManager."""
+        try:
+            todo_svc = getattr(deps.tool_executor, "_todo_service", None)
+            run_id = getattr(deps.tool_executor, "_current_run_id", "")
+            if todo_svc is None or not run_id:
+                return
+            wrote_task = any(
+                tr.tool_name in RunCoordinator._TASK_WRITE_TOOLS and tr.success
+                for tr in iteration_result.tool_results
+            )
+            todo_svc.get(run_id).mark_round(wrote_task)
+        except Exception:
+            pass  # Graceful degradation when executor is mocked
+
     @staticmethod
     def _collect_runtime_info(
         agent: BaseAgent | None = None,
@@ -941,6 +969,25 @@ class RunCoordinator:
                 "Use glob_files/grep_search before summarizing; read multiple "
                 "implementation files and distinguish verified facts from inference."
             )
+
+        # Todo state injection — run-scoped via TodoService
+        if deps:
+            try:
+                todo_svc = getattr(deps.tool_executor, "_todo_service", None)
+                run_id = getattr(deps.tool_executor, "_current_run_id", "")
+                if todo_svc is not None and run_id:
+                    mgr = todo_svc.get(run_id)
+                    summary = mgr.summary_text()
+                    if summary:
+                        info["todo_summary"] = summary
+                    if mgr.should_remind():
+                        info["todo_reminder"] = (
+                            "The task list hasn't been updated recently. "
+                            "Consider using task_update to mark progress, "
+                            "complete finished tasks, or add new tasks with task_create."
+                        )
+            except Exception:
+                pass  # Graceful degradation when executor is mocked
 
         return info
 

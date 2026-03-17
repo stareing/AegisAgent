@@ -9,7 +9,7 @@ Tool categories (aligned with system tools spec):
 - system: bash_exec, bash_output, kill_shell, run_command, get_env
 - network: web_fetch, web_search
 - delegation: spawn_agent, check_spawn_result
-- control: todo_write, todo_read, slash_command, exit_plan_mode
+- control: task_create, task_update, task_list, task_get, slash_command, exit_plan_mode
 - memory_admin: list_memories, forget_memory, clear_memories
 - reasoning: think
 
@@ -82,15 +82,19 @@ def register_all_builtins(
         read_file,
         write_file,
         list_directory,
-        file_exists,
+        # file_exists,  # redundant: bash "test -f" or list_directory
     )
-    from agent_framework.tools.builtin.system import run_command, get_env
+    # from agent_framework.tools.builtin.system import run_command, get_env
+    #   run_command — redundant with bash_exec
+    #   get_env — bash "echo $VAR" covers this
     from agent_framework.tools.builtin.spawn_agent import spawn_agent, check_spawn_result
-    from agent_framework.tools.builtin.code_edit import edit_file, notebook_edit
+    from agent_framework.tools.builtin.code_edit import edit_file  # notebook_edit: niche, use write_file
     from agent_framework.tools.builtin.search import grep_search, glob_files
     from agent_framework.tools.builtin.shell import bash_exec, bash_output, kill_shell
     from agent_framework.tools.builtin.web import web_fetch, web_search
-    from agent_framework.tools.builtin.task_manager import todo_write, todo_read
+    from agent_framework.tools.builtin.task_manager import (
+        task_create, task_update, task_list, task_get,
+    )
     from agent_framework.tools.builtin.think import think
     from agent_framework.tools.builtin.memory_admin import (
         list_memories, forget_memory, clear_memories,
@@ -99,17 +103,15 @@ def register_all_builtins(
 
     builtins = [
         # Filesystem (read)
-        read_file, list_directory, file_exists,
+        read_file, list_directory,
         # Filesystem (write)
-        write_file, edit_file, notebook_edit,
+        write_file, edit_file,
         # Filesystem (search)
         grep_search, glob_files,
-        # System (get_env always available but requires confirmation)
-        get_env,
         # Network
         web_fetch,
-        # Control
-        todo_write, todo_read,
+        # Control (task graph)
+        task_create, task_update, task_list, task_get,
         # Reasoning
         think,
         # Delegation
@@ -124,16 +126,17 @@ def register_all_builtins(
     if web_search_enabled:
         builtins.append(web_search)
 
-    # Shell/system tools are high-risk — only register when explicitly enabled
+    # Shell/system tools — bash_exec is the primary shell interface
     if shell_enabled:
-        builtins.extend([run_command, bash_exec, bash_output, kill_shell])
+        builtins.extend([bash_exec, bash_output, kill_shell])
 
     # Control tools (optional, enabled by default)
     if control_tools_enabled:
         from agent_framework.tools.builtin.control_tools import (
-            slash_command, exit_plan_mode,
+            # slash_command,  # integration-layer specific, not for agent
+            exit_plan_mode,
         )
-        builtins.extend([slash_command, exit_plan_mode])
+        builtins.extend([exit_plan_mode])
 
     count = 0
     for func in builtins:

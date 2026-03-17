@@ -1,0 +1,14 @@
+{
+  "id": 1,
+  "subject": "完成需求规格说明书评审",
+  "description": "确认产品需求边界、交互逻辑和验收标准",
+  "status": "completed",
+  "blockedBy": [],
+  "blocks": [
+    2,
+    3
+  ],
+  "owner": "",
+  "created_at": 1773759280.0053208,
+  "updated_at": 1773759361.9904246
+}

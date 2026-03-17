@@ -89,8 +89,10 @@ class TestToolMetadata:
             assert meta.namespace == SYSTEM_NAMESPACE
 
     def test_control_tools_category(self) -> None:
-        from agent_framework.tools.builtin.task_manager import todo_write, todo_read
-        for fn in (todo_write, todo_read):
+        from agent_framework.tools.builtin.task_manager import (
+            task_create, task_update, task_list, task_get,
+        )
+        for fn in (task_create, task_update, task_list, task_get):
             meta = self._get_meta(fn)
             assert meta.category == ToolCategory.CONTROL
             assert "control" in meta.tags
@@ -217,13 +219,13 @@ class TestCapabilityPolicyNewCategories:
 
         tools = [
             ToolEntry(meta=ToolMeta(name="read_file", category="filesystem", source="local")),
-            ToolEntry(meta=ToolMeta(name="todo_write", category="control", source="local")),
+            ToolEntry(meta=ToolMeta(name="task_create", category="control", source="local")),
             ToolEntry(meta=ToolMeta(name="think", category="reasoning", source="local")),
         ]
         policy = CapabilityPolicy(blocked_tool_categories=["control"])
         filtered = apply_capability_policy(tools, policy)
         names = {t.meta.name for t in filtered}
-        assert "todo_write" not in names
+        assert "task_create" not in names
         assert "read_file" in names
         assert "think" in names
 
@@ -358,7 +360,7 @@ class TestParameterSchemas:
             GrepSearchArgs, GlobFilesArgs,
             BashExecArgs, BashOutputArgs,
             WebFetchArgs, WebSearchArgs,
-            NotebookEditArgs, TodoWriteArgs,
+            NotebookEditArgs, TaskCreateArgs, TaskUpdateArgs, TaskGetArgs,
             SlashCommandArgs,
             SpawnAgentArgs, CheckSpawnResultArgs,
             ListMemoriesArgs, ForgetMemoryArgs, ClearMemoriesArgs,
@@ -410,19 +412,25 @@ class TestRegistration:
         from agent_framework.tools.builtin import register_all_builtins
         catalog = GlobalToolCatalog()
         count = register_all_builtins(catalog)
-        assert count >= 18  # all non-shell tools
+        assert count >= 18  # core tools (no shell)
 
         # Shell tools should NOT be registered by default
         assert not self._has(catalog, "bash_exec")
+
+        # Removed tools should not be registered
         assert not self._has(catalog, "run_command")
+        assert not self._has(catalog, "get_env")
+        assert not self._has(catalog, "file_exists")
+        assert not self._has(catalog, "notebook_edit")
 
         # Core tools should be registered
         assert self._has(catalog, "read_file")
         assert self._has(catalog, "web_fetch")
         assert self._has(catalog, "web_search")
         assert self._has(catalog, "spawn_agent")
-        assert self._has(catalog, "slash_command")
         assert self._has(catalog, "exit_plan_mode")
+        # slash_command commented out — integration-layer specific
+        assert not self._has(catalog, "slash_command")
 
     def test_register_all_builtins_with_shell(self) -> None:
         from agent_framework.tools.catalog import GlobalToolCatalog
@@ -430,8 +438,8 @@ class TestRegistration:
         catalog = GlobalToolCatalog()
         count = register_all_builtins(catalog, shell_enabled=True)
         assert self._has(catalog, "bash_exec")
+        assert self._has(catalog, "bash_output")
         assert self._has(catalog, "kill_shell")
-        assert self._has(catalog, "run_command")
 
     def test_register_without_web_search(self) -> None:
         from agent_framework.tools.catalog import GlobalToolCatalog
@@ -448,4 +456,4 @@ class TestRegistration:
         register_all_builtins(catalog, control_tools_enabled=False)
         assert not self._has(catalog, "slash_command")
         assert not self._has(catalog, "exit_plan_mode")
-        assert self._has(catalog, "todo_write")  # task tools still registered
+        assert self._has(catalog, "task_create")  # task tools still registered

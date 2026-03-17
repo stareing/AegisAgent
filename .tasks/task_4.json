@@ -1,0 +1,16 @@
+{
+  "id": 4,
+  "subject": "完成前端页面开发与接口对接",
+  "description": "按照UI稿实现页面逻辑，对接后端API接口完成交互",
+  "status": "pending",
+  "blockedBy": [
+    2,
+    3
+  ],
+  "blocks": [
+    5
+  ],
+  "owner": "",
+  "created_at": 1773759304.30884,
+  "updated_at": 1773759304.3088405
+}
