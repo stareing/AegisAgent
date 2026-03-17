@@ -487,9 +487,6 @@ class AegisAgentApp(App[None]):
                 self._fw, self._mock, self._state, text,
                 cancel_event=cancel_event,
             ):
-                # Yield control to the main event loop to ensure UI repaints
-                await asyncio.sleep(0)
-                
                 if event.type == StreamEventType.TOKEN:
                     token_text = event.data.get("text", "")
                     if token_text:
