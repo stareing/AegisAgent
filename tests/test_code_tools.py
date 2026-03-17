@@ -265,7 +265,7 @@ class TestGlobFiles:
 
 class TestBashExec:
     def test_basic_command(self) -> None:
-        from agent_framework.tools.builtin.shell import bash_exec, _ShellSessionManager
+        from agent_framework.tools.builtin.shell import bash_exec, ShellSessionManager as _ShellSessionManager
         _ShellSessionManager._sessions.clear()  # fresh session
 
         result = asyncio.run(bash_exec("echo hello"))
@@ -273,7 +273,7 @@ class TestBashExec:
         assert "hello" in result["output"]
 
     def test_persistent_cwd(self) -> None:
-        from agent_framework.tools.builtin.shell import bash_exec, _ShellSessionManager
+        from agent_framework.tools.builtin.shell import bash_exec, ShellSessionManager as _ShellSessionManager
         _ShellSessionManager._sessions.clear()
 
         async def _run():
@@ -285,21 +285,21 @@ class TestBashExec:
         assert "/tmp" in result["output"]
 
     def test_exit_code(self) -> None:
-        from agent_framework.tools.builtin.shell import bash_exec, _ShellSessionManager
+        from agent_framework.tools.builtin.shell import bash_exec, ShellSessionManager as _ShellSessionManager
         _ShellSessionManager._sessions.clear()
 
         result = asyncio.run(bash_exec("false"))
         assert result["exit_code"] != 0
 
     def test_timeout(self) -> None:
-        from agent_framework.tools.builtin.shell import bash_exec, _ShellSessionManager
+        from agent_framework.tools.builtin.shell import bash_exec, ShellSessionManager as _ShellSessionManager
         _ShellSessionManager._sessions.clear()
 
         result = asyncio.run(bash_exec("sleep 10", timeout_seconds=1))
         assert result["timed_out"] is True
 
     def test_background_and_output(self) -> None:
-        from agent_framework.tools.builtin.shell import bash_exec, bash_output, _ShellSessionManager
+        from agent_framework.tools.builtin.shell import bash_exec, bash_output, ShellSessionManager as _ShellSessionManager
         _ShellSessionManager._sessions.clear()
 
         async def _run():
@@ -316,7 +316,7 @@ class TestBashExec:
 
 class TestKillShell:
     def test_kill(self) -> None:
-        from agent_framework.tools.builtin.shell import bash_exec, kill_shell, _ShellSessionManager
+        from agent_framework.tools.builtin.shell import bash_exec, kill_shell, ShellSessionManager as _ShellSessionManager
         _ShellSessionManager._sessions.clear()
 
         async def _run():

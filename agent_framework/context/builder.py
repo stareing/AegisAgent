@@ -105,11 +105,21 @@ class ContextBuilder:
         """Rough token estimate: ~4 chars per token."""
         total = 0
         for m in messages:
-            if m.content:
-                total += len(m.content) // 4
+            text = m.text_content
+            if text:
+                total += len(text) // 4
             if m.tool_calls:
                 for tc in m.tool_calls:
                     total += len(str(tc.arguments)) // 4
+            # Multimodal parts: estimate tokens for non-text content
+            if m.content_parts:
+                for p in m.content_parts:
+                    if p.type == "text":
+                        continue
+                    if p.data:
+                        total += len(p.data) // 4
+                    else:
+                        total += 85
         return max(total, 1)
 
     def build_spawn_seed(

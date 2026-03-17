@@ -24,7 +24,7 @@ from typing import Any, Callable
 from pydantic import BaseModel, Field
 
 from agent_framework.context.transaction_group import ToolTransactionGroup
-from agent_framework.models.message import Message
+from agent_framework.models.message import ContentPart, Message
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +161,12 @@ class ContextCompressor:
             # Too few groups to compress — return as-is
             return groups
 
+        # Protect groups containing multimodal content from compression.
+        # Images/audio cannot be reconstructed from a text summary.
+        for g in groups:
+            if any(msg.has_multimodal for msg in g.messages):
+                g.protected = True
+
         # Split: old (compressible) vs recent (protected)
         split_point = max(1, len(groups) - _PROTECTED_RECENT_GROUPS)
         old_groups = groups[:split_point]
@@ -277,10 +283,20 @@ class ContextCompressor:
     def _rough_count(messages: list[Message]) -> int:
         total = 0
         for m in messages:
-            if m.content:
-                total += len(m.content) // 4
+            text = m.text_content
+            if text:
+                total += len(text) // 4
             if m.tool_calls:
                 total += len(str(m.tool_calls)) // 4
+            # Multimodal parts: estimate ~85 tokens per image, ~50 per audio chunk
+            if m.content_parts:
+                for p in m.content_parts:
+                    if p.type == "text":
+                        continue
+                    if p.data:
+                        total += len(p.data) // 4
+                    else:
+                        total += 85  # URL reference estimate
         return max(total, 1)
 
     @staticmethod
@@ -288,7 +304,8 @@ class ContextCompressor:
         parts = []
         for g in groups:
             for msg in g.messages:
-                parts.append(f"{msg.role}:{(msg.content or '')[:100]}")
+                text = msg.text_content or ""
+                parts.append(f"{msg.role}:{text[:100]}")
         content = "|".join(parts)
         return hashlib.sha256(content.encode()).hexdigest()[:16]
 

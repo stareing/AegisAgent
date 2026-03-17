@@ -155,7 +155,11 @@ class DefaultMemoryManager(BaseMemoryManager):
         final_answer: str | None,
         iteration_results: list[IterationResult],
     ) -> list[MemoryCandidate]:
-        """Extract memory candidates using simple pattern matching."""
+        """Extract memory candidates using simple pattern matching.
+
+        Only extracts from text content — multimodal parts (images, audio)
+        are not suitable for pattern-based memory extraction.
+        """
         candidates: list[MemoryCandidate] = []
         text = user_input.strip()
         if not text:

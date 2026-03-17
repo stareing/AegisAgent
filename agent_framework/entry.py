@@ -49,7 +49,7 @@ from agent_framework.infra.logger import configure_logging, get_logger
 from agent_framework.memory.default_manager import DefaultMemoryManager
 from agent_framework.memory.sqlite_store import SQLiteMemoryStore
 from agent_framework.models.agent import AgentRunResult, Skill
-from agent_framework.models.message import Message
+from agent_framework.models.message import ContentPart, Message
 from agent_framework.models.session import SessionState
 from agent_framework.tools.catalog import GlobalToolCatalog
 from agent_framework.tools.confirmation import AutoApproveConfirmationHandler, CLIConfirmationHandler
@@ -630,17 +630,21 @@ class AgentFramework:
         initial_session_messages: list[Message] | None = None,
         user_id: str | None = None,
         cancel_event: asyncio.Event | None = None,
+        content_parts: list[ContentPart] | None = None,
     ) -> AgentRunResult:
         """Run the agent on a task.
 
         Args:
-            task: The user input / task description.
+            task: The user input / task description (text portion).
             initial_session_messages: Prior conversation history. Injected into
                 the session so the model sees multi-turn context. The ContextBuilder
                 automatically trims older messages when the token budget is tight.
             user_id: Optional end-user identity for memory namespace isolation.
             cancel_event: External cancellation signal. When set, the coordinator
                 stops at the next iteration boundary with USER_CANCEL.
+            content_parts: Multimodal content parts (images, audio, files).
+                When provided, the user message carries both text content and
+                multimodal parts. Adapters convert to provider-specific formats.
         """
         if not self._setup_done:
             self.setup()
@@ -651,6 +655,7 @@ class AgentFramework:
             initial_session_messages=initial_session_messages,
             user_id=user_id,
             cancel_event=cancel_event,
+            content_parts=content_parts,
         )
 
     async def run_stream(
@@ -659,6 +664,7 @@ class AgentFramework:
         initial_session_messages: list[Message] | None = None,
         user_id: str | None = None,
         cancel_event: asyncio.Event | None = None,
+        content_parts: list[ContentPart] | None = None,
     ):
         """Stream agent execution, yielding StreamEvents in real-time.
 
@@ -678,6 +684,7 @@ class AgentFramework:
             initial_session_messages=initial_session_messages,
             user_id=user_id,
             cancel_event=cancel_event,
+            content_parts=content_parts,
         ):
             yield event
 

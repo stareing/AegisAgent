@@ -322,7 +322,7 @@ class TestSubAgentFactory:
             ToolEntry(meta=ToolMeta(name="search", category="general", source="local")),
             ToolEntry(meta=ToolMeta(name="shell", category="system", source="local")),
             ToolEntry(meta=ToolMeta(name="http", category="network", source="local")),
-            ToolEntry(meta=ToolMeta(name="spawn_agent", category="subagent", source="local")),
+            ToolEntry(meta=ToolMeta(name="spawn_agent", category="delegation", source="local")),
         ]
 
         factory = SubAgentFactory(deps)

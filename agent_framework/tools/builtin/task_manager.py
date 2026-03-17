@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_framework.tools.decorator import tool
+from agent_framework.tools.schemas.builtin_args import SYSTEM_NAMESPACE
 
 
 class TaskStatus(str, Enum):
@@ -124,8 +125,10 @@ class _TaskStore:
         "Accepts a list of tasks with title, status (pending/in_progress/completed), "
         "and priority. Updates existing tasks by id, creates new ones otherwise."
     ),
-    category="task",
+    category="control",
     require_confirm=False,
+    tags=["system", "control", "task"],
+    namespace=SYSTEM_NAMESPACE,
 )
 def todo_write(tasks: str) -> dict:
     """Create or update tasks in the task list.
@@ -160,8 +163,10 @@ def todo_write(tasks: str) -> dict:
 @tool(
     name="todo_read",
     description="Read the current task list with status and progress summary.",
-    category="task",
+    category="control",
     require_confirm=False,
+    tags=["system", "control", "task"],
+    namespace=SYSTEM_NAMESPACE,
 )
 def todo_read() -> dict:
     """Read all tasks from the task list.

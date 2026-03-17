@@ -245,37 +245,30 @@ class TestOrchestratorAgent:
 
     def test_orchestrator_hard_exit_guard(self):
         """Orchestrator must force stop after N post-spawn iterations when enabled."""
-        from unittest.mock import patch
         from agent_framework.agent.orchestrator_agent import OrchestratorAgent
-        agent = OrchestratorAgent()
-        state = AgentState(run_id="r1", spawn_count=2, iteration_count=10)
-        # Simulate: last spawn was at iteration 5, now at iteration 10
+        # Enable the guard via instance parameter (not global constant)
+        agent = OrchestratorAgent(max_post_spawn_iterations=3)
+        state = AgentState(
+            run_id="r1", spawn_count=2, iteration_count=10,
+            last_spawn_iteration_index=5,  # O(1) lookup
+        )
         for i in range(10):
-            tr_list = []
-            if i == 5:
-                tr_list = [ToolResult(tool_call_id="tc", tool_name="spawn_agent", success=True, output="done")]
-            state.iteration_history.append(IterationResult(
-                iteration_index=i, tool_results=tr_list,
-            ))
+            state.iteration_history.append(IterationResult(iteration_index=i))
         result = IterationResult(iteration_index=10)
-        # Enable the guard by setting limit to 3
-        with patch("agent_framework.agent.orchestrator_agent._MAX_POST_SPAWN_ITERATIONS", 3):
-            decision = agent.should_stop(result, state)
+        decision = agent.should_stop(result, state)
         assert decision.should_stop is True
         assert "synthesis budget" in decision.reason.lower() or "spawn" in decision.reason.lower()
 
     def test_orchestrator_hard_exit_guard_disabled(self):
-        """When _MAX_POST_SPAWN_ITERATIONS <= 0, guard does not trigger."""
+        """When max_post_spawn_iterations <= 0, guard does not trigger."""
         from agent_framework.agent.orchestrator_agent import OrchestratorAgent
-        agent = OrchestratorAgent()
-        state = AgentState(run_id="r1", spawn_count=2, iteration_count=10)
+        agent = OrchestratorAgent()  # default: 0 = unlimited
+        state = AgentState(
+            run_id="r1", spawn_count=2, iteration_count=10,
+            last_spawn_iteration_index=5,
+        )
         for i in range(10):
-            tr_list = []
-            if i == 5:
-                tr_list = [ToolResult(tool_call_id="tc", tool_name="spawn_agent", success=True, output="done")]
-            state.iteration_history.append(IterationResult(
-                iteration_index=i, tool_results=tr_list,
-            ))
+            state.iteration_history.append(IterationResult(iteration_index=i))
         result = IterationResult(iteration_index=10)
         decision = agent.should_stop(result, state)
         assert decision.should_stop is False
@@ -293,6 +286,28 @@ class TestOrchestratorAgent:
             ],
         )
         ctrl.apply_iteration_result(state, result)
+        assert state.spawn_count == 1
+
+    def test_last_spawn_iteration_index_updated(self):
+        """apply_iteration_result must update last_spawn_iteration_index on spawn."""
+        from agent_framework.agent.run_state import RunStateController
+        ctrl = RunStateController()
+        state = AgentState(run_id="r1")
+        assert state.last_spawn_iteration_index == -1
+
+        # First iteration: no spawn
+        ctrl.apply_iteration_result(state, IterationResult(
+            iteration_index=0,
+            tool_results=[ToolResult(tool_call_id="tc1", tool_name="read_file", success=True, output="data")],
+        ))
+        assert state.last_spawn_iteration_index == -1
+
+        # Second iteration: spawn
+        ctrl.apply_iteration_result(state, IterationResult(
+            iteration_index=1,
+            tool_results=[ToolResult(tool_call_id="tc2", tool_name="spawn_agent", success=True, output="done")],
+        ))
+        assert state.last_spawn_iteration_index == 1
         assert state.spawn_count == 1
 
     def test_spawn_count_not_updated_on_failure(self):

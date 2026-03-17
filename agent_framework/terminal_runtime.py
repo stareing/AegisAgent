@@ -469,10 +469,20 @@ class ReplState:
 
     @staticmethod
     def _estimate_message_tokens(message: Message) -> int:
-        text = message.content or ""
+        text = message.text_content or ""
         cjk_chars = sum(1 for char in text if "\u4e00" <= char <= "\u9fff")
         ascii_chars = len(text) - cjk_chars
-        return ascii_chars // 4 + int(cjk_chars / 1.5)
+        tokens = ascii_chars // 4 + int(cjk_chars / 1.5)
+        # Multimodal parts: estimate extra tokens for non-text content
+        if message.content_parts:
+            for p in message.content_parts:
+                if p.type == "text":
+                    continue
+                if p.data:
+                    tokens += len(p.data) // 4
+                else:
+                    tokens += 85
+        return tokens
 
 
 _COMMANDS: dict[str, tuple[Any, str, str, str]] = {}
@@ -636,9 +646,14 @@ async def _cmd_history(fw: AgentFramework, mock: InteractiveMockModel | None, st
     print(f"\n  {_bold('对话历史')} ({state.turn_count} 轮, {state.message_count()} 条消息, ~{estimate} tokens):\n")
     for index, message in enumerate(messages):
         if message.role == "user":
-            print(f"  {_cyan('User:')} {message.content[:120]}")
+            text = message.text_content or ""
+            suffix = ""
+            if message.has_multimodal:
+                media_types = [p.type for p in (message.content_parts or []) if p.type != "text"]
+                suffix = f" {_magenta('[+' + ', '.join(media_types) + ']')}"
+            print(f"  {_cyan('User:')} {text[:120]}{suffix}")
         elif message.role == "assistant":
-            print(f"  {_green('Agent:')} {(message.content or '')[:120]}")
+            print(f"  {_green('Agent:')} {(message.text_content or '')[:120]}")
             if index < len(messages) - 1:
                 print()
     print(f"\n  {_dim(f'消息数: {state.message_count()}  |  ~{estimate} tokens')}")

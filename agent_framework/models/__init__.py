@@ -1,4 +1,5 @@
 from agent_framework.models.message import (
+    ContentPart,
     Message,
     ModelResponse,
     TokenUsage,
@@ -63,7 +64,7 @@ from agent_framework.models.plugin import (
 )
 
 __all__ = [
-    "Message", "ModelResponse", "TokenUsage", "ToolCallRequest",
+    "ContentPart", "Message", "ModelResponse", "TokenUsage", "ToolCallRequest",
     "FieldError", "ToolEntry", "ToolExecutionError", "ToolExecutionMeta",
     "ToolMeta", "ToolResult",
     "AgentConfig", "AgentRunResult", "AgentState", "AgentStatus",

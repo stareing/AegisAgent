@@ -186,13 +186,50 @@ class GoogleAdapter(BaseModelAdapter):
                     contents.append({"role": "user", "parts": [fn_response]})
 
             elif m.role == "user":
-                contents.append({
-                    "role": "user",
-                    "parts": [{"text": m.content or ""}],
-                })
+                if m.content_parts:
+                    parts = GoogleAdapter._convert_content_parts(m.content_parts)
+                    contents.append({"role": "user", "parts": parts})
+                else:
+                    contents.append({
+                        "role": "user",
+                        "parts": [{"text": m.content or ""}],
+                    })
 
         system_instruction = "\n\n".join(system_parts) if system_parts else None
         return system_instruction, contents
+
+    @staticmethod
+    def _convert_content_parts(parts: list) -> list[dict[str, Any]]:
+        """Convert framework ContentParts to Gemini parts format."""
+        result: list[dict[str, Any]] = []
+        for p in parts:
+            if p.type == "text":
+                result.append({"text": p.text or ""})
+            elif p.type == "image_url":
+                # Gemini: use file_data with URL
+                result.append({
+                    "file_data": {"mime_type": "image/jpeg", "file_uri": p.image_url or ""},
+                })
+            elif p.type == "image_base64":
+                result.append({
+                    "inline_data": {
+                        "mime_type": p.media_type or "image/png",
+                        "data": p.data or "",
+                    },
+                })
+            elif p.type == "audio":
+                result.append({
+                    "inline_data": {
+                        "mime_type": p.media_type or "audio/wav",
+                        "data": p.data or "",
+                    },
+                })
+            elif p.type == "file":
+                mime = p.media_type or "application/octet-stream"
+                result.append({
+                    "file_data": {"mime_type": mime, "file_uri": p.file_uri or ""},
+                })
+        return result
 
     @staticmethod
     def _convert_tools(tools: list[dict]) -> list[dict[str, Any]]:

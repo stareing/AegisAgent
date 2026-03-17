@@ -32,7 +32,7 @@ from agent_framework.models.agent import (
     StopSignal,
 )
 from agent_framework.models.context import LLMRequest
-from agent_framework.models.message import Message, TokenUsage
+from agent_framework.models.message import ContentPart, Message, TokenUsage
 from agent_framework.models.session import SessionState
 from agent_framework.models.memory import RunSessionOutcome
 from agent_framework.models.subagent import Artifact
@@ -111,6 +111,16 @@ class RunCoordinator:
         # Dispatcher for hook dispatch (created per-run from deps.hook_executor)
         self._dispatcher: HookDispatchService | None = None
 
+    def _build_user_message(
+        self,
+        task: str,
+        content_parts: list[ContentPart] | None = None,
+    ) -> Message:
+        """Build the initial user Message, preserving multimodal content_parts."""
+        if content_parts:
+            return Message(role="user", content=task, content_parts=content_parts)
+        return Message(role="user", content=task)
+
     async def run(
         self,
         agent: BaseAgent,
@@ -120,6 +130,7 @@ class RunCoordinator:
         user_id: str | None = None,
         run_timeout_ms: int | None = None,
         cancel_event: asyncio.Event | None = None,
+        content_parts: list[ContentPart] | None = None,
     ) -> AgentRunResult:
         _tm = get_tracing_manager()
         run_id = str(uuid.uuid4())
@@ -133,7 +144,7 @@ class RunCoordinator:
         # Write user task as first message in session so subsequent iterations
         # see [user] → [assistant+tool] → [tool_result] in correct order.
         self._state_ctrl.append_user_message(
-            session_state, Message(role="user", content=task)
+            session_state, self._build_user_message(task, content_parts)
         )
 
         timeout_ms = run_timeout_ms or DEFAULT_RUN_TIMEOUT_MS
@@ -501,6 +512,7 @@ class RunCoordinator:
         user_id: str | None = None,
         run_timeout_ms: int | None = None,
         cancel_event: asyncio.Event | None = None,
+        content_parts: list[ContentPart] | None = None,
     ) -> AsyncGenerator[StreamEvent, None]:
         """Streaming variant of run(). Yields StreamEvents in real-time.
 
@@ -524,7 +536,7 @@ class RunCoordinator:
                 session_state, initial_session_messages
             )
         self._state_ctrl.append_user_message(
-            session_state, Message(role="user", content=task)
+            session_state, self._build_user_message(task, content_parts)
         )
 
         timeout_ms = run_timeout_ms or DEFAULT_RUN_TIMEOUT_MS

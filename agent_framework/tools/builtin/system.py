@@ -12,6 +12,7 @@ import shlex
 import subprocess
 
 from agent_framework.tools.decorator import tool
+from agent_framework.tools.schemas.builtin_args import SYSTEM_NAMESPACE
 
 
 @tool(
@@ -19,7 +20,8 @@ from agent_framework.tools.decorator import tool
     description="Execute a shell command and return its output. Use with caution.",
     category="system",
     require_confirm=True,
-    tags=["dangerous"],
+    tags=["system", "shell", "dangerous"],
+    namespace=SYSTEM_NAMESPACE,
 )
 def run_command(
     command: str,
@@ -79,6 +81,8 @@ def run_command(
     description="Get the value of an environment variable.",
     category="system",
     require_confirm=True,
+    tags=["system", "env"],
+    namespace=SYSTEM_NAMESPACE,
 )
 def get_env(name: str, default: str = "") -> str:
     """Get an environment variable value.
