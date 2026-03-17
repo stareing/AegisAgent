@@ -201,6 +201,9 @@ class AgentState(BaseModel):
     total_tokens_used: int = 0
     active_skill_id: str | None = None
     spawn_count: int = 0
+    # O(1) lookup: index of the last iteration that contained a delegation tool call.
+    # Updated by RunStateController.apply_iteration_result() when spawn_count increases.
+    last_spawn_iteration_index: int = -1
     iteration_history: list[IterationResult] = Field(default_factory=list)
 
 

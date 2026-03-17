@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 from agent_framework.tools.decorator import tool
+from agent_framework.tools.schemas.builtin_args import SYSTEM_NAMESPACE
 
 # Injected at registration time by entry.py — not a global singleton.
 _memory_manager_ref: Any = None
@@ -36,6 +37,8 @@ def _get_manager() -> Any:
     description="List all saved memories for the current agent and user.",
     category="memory_admin",
     require_confirm=False,
+    tags=["system", "memory"],
+    namespace=SYSTEM_NAMESPACE,
 )
 def list_memories(user_id: str | None = None) -> list[dict]:
     """List saved memories.
@@ -66,6 +69,8 @@ def list_memories(user_id: str | None = None) -> list[dict]:
     description="Delete a saved memory by its memory_id.",
     category="memory_admin",
     require_confirm=True,
+    tags=["system", "memory", "dangerous"],
+    namespace=SYSTEM_NAMESPACE,
 )
 def forget_memory(memory_id: str) -> str:
     """Delete one memory.
@@ -86,6 +91,8 @@ def forget_memory(memory_id: str) -> str:
     description="Clear all saved memories for the current agent.",
     category="memory_admin",
     require_confirm=True,
+    tags=["system", "memory", "dangerous"],
+    namespace=SYSTEM_NAMESPACE,
 )
 def clear_memories(user_id: str | None = None) -> str:
     """Clear all memories.

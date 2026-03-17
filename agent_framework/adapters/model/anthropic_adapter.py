@@ -175,14 +175,50 @@ class AnthropicAdapter(BaseModelAdapter):
                     result.append({"role": "user", "content": [tool_result_block]})
 
             elif m.role == "user":
-                # Merge consecutive user messages
-                if result and result[-1]["role"] == "user" and isinstance(result[-1].get("content"), str):
-                    result[-1]["content"] += "\n" + (m.content or "")
-                elif result and result[-1]["role"] == "user" and isinstance(result[-1].get("content"), list):
-                    result[-1]["content"].append({"type": "text", "text": m.content or ""})
+                if m.content_parts:
+                    blocks = AnthropicAdapter._convert_content_parts(m.content_parts)
+                    # Merge into previous user message if consecutive
+                    if result and result[-1]["role"] == "user" and isinstance(result[-1].get("content"), list):
+                        result[-1]["content"].extend(blocks)
+                    else:
+                        result.append({"role": "user", "content": blocks})
                 else:
-                    result.append({"role": "user", "content": m.content or ""})
+                    # Merge consecutive user messages (text-only)
+                    if result and result[-1]["role"] == "user" and isinstance(result[-1].get("content"), str):
+                        result[-1]["content"] += "\n" + (m.content or "")
+                    elif result and result[-1]["role"] == "user" and isinstance(result[-1].get("content"), list):
+                        result[-1]["content"].append({"type": "text", "text": m.content or ""})
+                    else:
+                        result.append({"role": "user", "content": m.content or ""})
 
+        return result
+
+    @staticmethod
+    def _convert_content_parts(parts: list) -> list[dict[str, Any]]:
+        """Convert framework ContentParts to Anthropic content blocks."""
+        result: list[dict[str, Any]] = []
+        for p in parts:
+            if p.type == "text":
+                result.append({"type": "text", "text": p.text or ""})
+            elif p.type == "image_url":
+                result.append({
+                    "type": "image",
+                    "source": {"type": "url", "url": p.image_url or ""},
+                })
+            elif p.type == "image_base64":
+                result.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": p.media_type or "image/png",
+                        "data": p.data or "",
+                    },
+                })
+            elif p.type == "audio":
+                # Anthropic doesn't natively support audio — include as text reference
+                result.append({"type": "text", "text": f"[Audio: {p.media_type or 'audio'}]"})
+            elif p.type == "file":
+                result.append({"type": "text", "text": f"[File: {p.file_uri or ''}]"})
         return result
 
     @staticmethod

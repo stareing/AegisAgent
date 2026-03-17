@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Any
 
 from agent_framework.tools.decorator import tool
+from agent_framework.tools.schemas.builtin_args import SYSTEM_NAMESPACE
 
 
 @tool(
@@ -21,8 +22,10 @@ from agent_framework.tools.decorator import tool
         "Spawn a sub-agent to handle a specific sub-task. "
         "Set wait=false to run asynchronously and collect the result later with check_spawn_result."
     ),
-    category="subagent",
+    category="delegation",
     require_confirm=False,
+    tags=["system", "delegation", "subagent"],
+    namespace=SYSTEM_NAMESPACE,
     source="subagent",
 )
 async def spawn_agent(
@@ -62,8 +65,10 @@ async def spawn_agent(
 @tool(
     name="check_spawn_result",
     description="Check or collect the result of an async sub-agent. Use after spawn_agent(wait=false).",
-    category="subagent",
+    category="delegation",
     require_confirm=False,
+    tags=["system", "delegation", "subagent"],
+    namespace=SYSTEM_NAMESPACE,
     source="subagent",
 )
 async def check_spawn_result(

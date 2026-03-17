@@ -18,6 +18,7 @@ from pathlib import Path
 
 from agent_framework.tools.builtin.filesystem import _ensure_within_sandbox
 from agent_framework.tools.decorator import tool
+from agent_framework.tools.schemas.builtin_args import SYSTEM_NAMESPACE
 
 # Sane default limits to avoid overwhelming the LLM context.
 _MAX_MATCHES = 200
@@ -206,8 +207,10 @@ def _is_hidden_or_gitignored(path: Path, root: Path) -> bool:
         "Supports glob-based file filtering and case-insensitive search. "
         "Files and directories matched by .gitignore are excluded by default."
     ),
-    category="search",
+    category="filesystem",
     require_confirm=False,
+    tags=["system", "search", "read"],
+    namespace=SYSTEM_NAMESPACE,
 )
 def grep_search(
     pattern: str,
@@ -288,8 +291,10 @@ def grep_search(
         "Returns matching file paths sorted by modification time (newest first). "
         "Files and directories matched by .gitignore are excluded by default."
     ),
-    category="search",
+    category="filesystem",
     require_confirm=False,
+    tags=["system", "search", "read"],
+    namespace=SYSTEM_NAMESPACE,
 )
 def glob_files(
     pattern: str,

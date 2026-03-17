@@ -1,7 +1,9 @@
 """Built-in filesystem tools.
 
-These tools provide basic file system operations.
-All require confirmation by default (require_confirm=True) for safety.
+Category: filesystem — read operations are safe for sub-agents,
+write operations require confirmation by default.
+
+These tools provide basic file system operations with sandbox enforcement.
 """
 
 from __future__ import annotations
@@ -10,6 +12,7 @@ import os
 from pathlib import Path
 
 from agent_framework.tools.decorator import tool
+from agent_framework.tools.schemas.builtin_args import SYSTEM_NAMESPACE
 
 _MAX_FILE_SIZE_BYTES = 2 * 1024 * 1024  # 2 MB
 _MAX_GLOB_RESULTS = 500
@@ -77,6 +80,8 @@ def _is_binary_file(file_path: Path, check_bytes: int = 8192) -> bool:
     description="Read the contents of a file at the given path.",
     category="filesystem",
     require_confirm=False,
+    tags=["system", "file", "read"],
+    namespace=SYSTEM_NAMESPACE,
 )
 def read_file(path: str, encoding: str = "utf-8") -> str:
     """Read the contents of a file at the given path.
@@ -121,6 +126,8 @@ def read_file(path: str, encoding: str = "utf-8") -> str:
     description="Write content to a file at the given path. Creates the file if it doesn't exist.",
     category="filesystem",
     require_confirm=True,
+    tags=["system", "file", "write"],
+    namespace=SYSTEM_NAMESPACE,
 )
 def write_file(path: str, content: str, encoding: str = "utf-8") -> str:
     """Write content to a file.
@@ -144,6 +151,8 @@ def write_file(path: str, content: str, encoding: str = "utf-8") -> str:
     description="List files and directories at the given path.",
     category="filesystem",
     require_confirm=False,
+    tags=["system", "file", "read"],
+    namespace=SYSTEM_NAMESPACE,
 )
 def list_directory(path: str = ".", pattern: str = "*") -> list[str]:
     """List files and directories.
@@ -181,6 +190,8 @@ def list_directory(path: str = ".", pattern: str = "*") -> list[str]:
     description="Check if a file or directory exists at the given path.",
     category="filesystem",
     require_confirm=False,
+    tags=["system", "file", "read"],
+    namespace=SYSTEM_NAMESPACE,
 )
 def file_exists(path: str) -> bool:
     """Check if a path exists.

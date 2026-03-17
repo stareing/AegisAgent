@@ -11,6 +11,7 @@ from pathlib import Path
 
 from agent_framework.tools.builtin.filesystem import _ensure_within_sandbox
 from agent_framework.tools.decorator import tool
+from agent_framework.tools.schemas.builtin_args import SYSTEM_NAMESPACE
 
 
 @tool(
@@ -23,6 +24,8 @@ from agent_framework.tools.decorator import tool
     ),
     category="filesystem",
     require_confirm=True,
+    tags=["system", "file", "write"],
+    namespace=SYSTEM_NAMESPACE,
 )
 def edit_file(
     file_path: str,
@@ -82,6 +85,8 @@ def edit_file(
     ),
     category="filesystem",
     require_confirm=True,
+    tags=["system", "file", "write", "notebook"],
+    namespace=SYSTEM_NAMESPACE,
 )
 def notebook_edit(
     file_path: str,

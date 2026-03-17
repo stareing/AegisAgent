@@ -9,6 +9,7 @@ from typing import Any, AsyncIterator
 import litellm
 
 from agent_framework.models.message import (
+    ContentPart,
     Message,
     ModelResponse,
     ToolCallRequest,
@@ -112,11 +113,14 @@ class LiteLLMAdapter(BaseModelAdapter):
 
     @staticmethod
     def _messages_to_dicts(messages: list[Message]) -> list[dict[str, Any]]:
-        """Convert Message objects to dicts for litellm."""
-        result = []
+        """Convert Message objects to dicts for litellm (OpenAI format)."""
+        result: list[dict[str, Any]] = []
         for m in messages:
             d: dict[str, Any] = {"role": m.role}
-            if m.content is not None:
+            # Multimodal: content_parts takes precedence
+            if m.content_parts:
+                d["content"] = LiteLLMAdapter._convert_content_parts(m.content_parts)
+            elif m.content is not None:
                 d["content"] = m.content
             if m.tool_calls:
                 d["tool_calls"] = [
@@ -135,6 +139,42 @@ class LiteLLMAdapter(BaseModelAdapter):
             if m.name is not None:
                 d["name"] = m.name
             result.append(d)
+        return result
+
+    @staticmethod
+    def _convert_content_parts(parts: list[ContentPart]) -> list[dict[str, Any]]:
+        """Convert framework ContentParts to OpenAI content array format.
+
+        LiteLLM uses OpenAI-compatible message format, so the conversion
+        is identical to OpenAIAdapter._convert_content_parts.
+        """
+        result: list[dict[str, Any]] = []
+        for p in parts:
+            if p.type == "text":
+                result.append({"type": "text", "text": p.text or ""})
+            elif p.type == "image_url":
+                img: dict[str, Any] = {"url": p.image_url or ""}
+                if p.detail:
+                    img["detail"] = p.detail
+                result.append({"type": "image_url", "image_url": img})
+            elif p.type == "image_base64":
+                media = p.media_type or "image/png"
+                url = f"data:{media};base64,{p.data or ''}"
+                img = {"url": url}
+                if p.detail:
+                    img["detail"] = p.detail
+                result.append({"type": "image_url", "image_url": img})
+            elif p.type == "audio":
+                fmt = "wav"
+                if p.media_type:
+                    fmt = p.media_type.split("/")[-1]  # "audio/mp3" -> "mp3"
+                result.append({
+                    "type": "input_audio",
+                    "input_audio": {"data": p.data or "", "format": fmt},
+                })
+            elif p.type == "file":
+                # Files not directly supported — treat as text reference
+                result.append({"type": "text", "text": f"[File: {p.file_uri or ''}]"})
         return result
 
     def _build_kwargs(

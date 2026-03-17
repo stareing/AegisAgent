@@ -34,9 +34,12 @@ def apply_capability_policy(
     if not policy.allow_system_tools:
         result = [t for t in result if t.meta.category != "system"]
 
-    # Filter spawn tools
+    # Filter spawn tools — both by name (legacy) and by delegation category
     if not policy.allow_spawn:
-        result = [t for t in result if t.meta.name != "spawn_agent"]
+        result = [
+            t for t in result
+            if t.meta.name != "spawn_agent" and t.meta.category != "delegation"
+        ]
 
     # Filter memory admin tools (§11.10)
     if not policy.allow_memory_admin:

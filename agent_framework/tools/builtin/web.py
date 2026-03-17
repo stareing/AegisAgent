@@ -1,6 +1,13 @@
 """Built-in web tools.
 
-Provides web page fetching with content extraction and SSRF protection.
+Category: network — requires allow_network_tools in CapabilityPolicy.
+Sub-agents: blocked by default.
+
+Provides:
+- web_fetch: fetch and extract web page content (known URL)
+- web_search: search the web for information (query-based)
+
+Both tools include SSRF protection for fetch operations.
 """
 
 from __future__ import annotations
@@ -14,6 +21,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from agent_framework.tools.decorator import tool
+from agent_framework.tools.schemas.builtin_args import SYSTEM_NAMESPACE
 
 _MAX_CONTENT_CHARS = 80_000
 _MAX_RESPONSE_BYTES = 2 * 1024 * 1024  # 2 MB
@@ -124,8 +132,10 @@ class _TextExtractor(HTMLParser):
         "Returns page title and text content. "
         "Use for reading documentation, API references, or public web pages."
     ),
-    category="web",
+    category="network",
     require_confirm=False,
+    tags=["system", "network", "web", "read"],
+    namespace=SYSTEM_NAMESPACE,
 )
 def web_fetch(
     url: str,
@@ -207,4 +217,122 @@ def web_fetch(
         "content": text,
         "url": url,
         "content_length": len(text),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Web search
+# ---------------------------------------------------------------------------
+
+_SEARCH_MAX_RESULTS = 10
+_SEARCH_SNIPPET_CHARS = 300
+
+
+@tool(
+    name="web_search",
+    description=(
+        "Search the web for information. Returns a list of results with "
+        "title, URL, and snippet. Use for finding information beyond the "
+        "knowledge cutoff or for discovering relevant URLs."
+    ),
+    category="network",
+    require_confirm=False,
+    tags=["system", "network", "web", "search"],
+    namespace=SYSTEM_NAMESPACE,
+)
+def web_search(
+    query: str,
+    max_results: int = 5,
+    allowed_domains: list[str] | None = None,
+    blocked_domains: list[str] | None = None,
+) -> dict:
+    """Search the web for information.
+
+    Uses a simple web search approach: fetches search engine results page
+    and extracts result snippets. For production, replace with a dedicated
+    search API (Google Custom Search, Bing, SerpAPI, etc.).
+
+    Args:
+        query: Search query string.
+        max_results: Maximum number of results to return (max 10).
+        allowed_domains: Only return results from these domains.
+        blocked_domains: Exclude results from these domains.
+
+    Returns:
+        Dict with 'query', 'results' list, and 'result_count'.
+    """
+    import json as _json
+    from urllib.parse import quote_plus
+
+    max_results = min(max_results, _SEARCH_MAX_RESULTS)
+
+    # Use DuckDuckGo HTML search (no API key required)
+    search_url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
+
+    try:
+        _check_ssrf(search_url)
+        req = Request(search_url, headers={
+            "User-Agent": _USER_AGENT,
+            "Accept": "text/html",
+        })
+        with urlopen(req, timeout=15) as resp:
+            raw = resp.read(_MAX_RESPONSE_BYTES).decode(errors="replace")
+    except Exception as e:
+        return {
+            "query": query,
+            "results": [],
+            "result_count": 0,
+            "error": f"Search failed: {e}",
+        }
+
+    # Parse DuckDuckGo HTML results
+    results: list[dict] = []
+    # DuckDuckGo results are in <a class="result__a"> tags
+    import re as _re
+
+    # Extract result blocks
+    result_blocks = _re.findall(
+        r'class="result__a"[^>]*href="([^"]*)"[^>]*>(.*?)</a>.*?'
+        r'class="result__snippet"[^>]*>(.*?)</(?:a|td|div)',
+        raw,
+        _re.DOTALL,
+    )
+
+    for href, title_html, snippet_html in result_blocks:
+        if len(results) >= max_results:
+            break
+
+        # Clean HTML from title and snippet
+        title = _re.sub(r"<[^>]+>", "", title_html).strip()
+        snippet = _re.sub(r"<[^>]+>", "", snippet_html).strip()
+
+        # Extract actual URL from DuckDuckGo redirect
+        url_match = _re.search(r"uddg=([^&]+)", href)
+        if url_match:
+            from urllib.parse import unquote
+            actual_url = unquote(url_match.group(1))
+        else:
+            actual_url = href
+
+        if not actual_url or not title:
+            continue
+
+        # Apply domain filters
+        parsed = urlparse(actual_url)
+        domain = parsed.hostname or ""
+        if allowed_domains and not any(d in domain for d in allowed_domains):
+            continue
+        if blocked_domains and any(d in domain for d in blocked_domains):
+            continue
+
+        results.append({
+            "title": title[:200],
+            "url": actual_url,
+            "snippet": snippet[:_SEARCH_SNIPPET_CHARS],
+        })
+
+    return {
+        "query": query,
+        "results": results,
+        "result_count": len(results),
     }

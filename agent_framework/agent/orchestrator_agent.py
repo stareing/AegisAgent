@@ -22,10 +22,8 @@ from agent_framework.models.agent import (
     StopSignal,
 )
 
-
-# After all spawns complete, allow at most N iterations for synthesis.
-# <= 0 means unlimited.
-_MAX_POST_SPAWN_ITERATIONS = 0
+# Default synthesis budget: 0 = unlimited
+_DEFAULT_MAX_POST_SPAWN_ITERATIONS = 0
 
 
 class OrchestratorAgent(BaseAgent):
@@ -50,6 +48,7 @@ class OrchestratorAgent(BaseAgent):
         max_concurrent_tool_calls: int = 5,
         allow_parallel_tool_calls: bool = True,
         progressive_tool_results: bool = True,
+        max_post_spawn_iterations: int = _DEFAULT_MAX_POST_SPAWN_ITERATIONS,
     ) -> None:
         config = AgentConfig(
             agent_id=agent_id,
@@ -64,6 +63,9 @@ class OrchestratorAgent(BaseAgent):
             progressive_tool_results=progressive_tool_results,
         )
         super().__init__(config)
+        # Instance-level synthesis budget — not a global constant.
+        # Allows different orchestrators to have different budgets.
+        self._max_post_spawn_iterations = max_post_spawn_iterations
 
     async def on_spawn_requested(self, spawn_spec: object) -> SpawnDecision:
         """Approve spawn requests with audit logging.
@@ -88,31 +90,31 @@ class OrchestratorAgent(BaseAgent):
         2. Post-spawn synthesis budget: if spawns happened but LLM keeps
            iterating without spawning more, force stop after N iterations
            to prevent runaway loops
+
+        Performance: uses AgentState.last_spawn_iteration_index (O(1))
+        instead of scanning iteration_history (O(N)).
         """
         # Base class checks first
         parent_decision = super().should_stop(iteration_result, agent_state)
         if parent_decision.should_stop:
             return parent_decision
 
-        # Hard guard: if enabled, enforce synthesis budget after the last spawn
-        if _MAX_POST_SPAWN_ITERATIONS > 0 and agent_state.spawn_count > 0:
-            # Find the last iteration that contained a spawn_agent result
-            last_spawn_iter = -1
-            for i, it in enumerate(agent_state.iteration_history):
-                for tr in it.tool_results:
-                    if tr.tool_name == "spawn_agent":
-                        last_spawn_iter = i
-            # Count iterations since last spawn
-            current_iter = len(agent_state.iteration_history) - 1
-            iters_since_last_spawn = current_iter - last_spawn_iter
+        # Hard guard: if enabled, enforce synthesis budget after the last spawn.
+        # Uses last_spawn_iteration_index (maintained by RunStateController)
+        # for O(1) lookup instead of scanning iteration_history.
+        budget = self._max_post_spawn_iterations
+        if budget > 0 and agent_state.spawn_count > 0:
+            last_spawn_iter = agent_state.last_spawn_iteration_index
+            current_iter = agent_state.iteration_count
+            iters_since_spawn = current_iter - last_spawn_iter
 
-            if iters_since_last_spawn >= _MAX_POST_SPAWN_ITERATIONS:
+            if iters_since_spawn >= budget:
                 return StopDecision(
                     should_stop=True,
                     reason=(
                         f"Orchestrator exceeded synthesis budget: "
-                        f"{iters_since_last_spawn} iterations after last spawn "
-                        f"(limit: {_MAX_POST_SPAWN_ITERATIONS}). "
+                        f"{iters_since_spawn} iterations after last spawn "
+                        f"(limit: {budget}). "
                         f"Total spawns: {agent_state.spawn_count}."
                     ),
                     source="OrchestratorAgent.hard_guard",

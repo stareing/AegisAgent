@@ -7,6 +7,7 @@ Useful for complex reasoning, brainstorming, or planning before acting.
 from __future__ import annotations
 
 from agent_framework.tools.decorator import tool
+from agent_framework.tools.schemas.builtin_args import SYSTEM_NAMESPACE
 
 
 @tool(
@@ -16,8 +17,10 @@ from agent_framework.tools.decorator import tool
         "This tool does not take any action or obtain new information. "
         "Use it when complex reasoning is needed before deciding what to do."
     ),
-    category="general",
+    category="reasoning",
     require_confirm=False,
+    tags=["system", "reasoning"],
+    namespace=SYSTEM_NAMESPACE,
 )
 def think(thought: str) -> str:
     """Log a thought without taking any action.

@@ -32,11 +32,13 @@ def messages_to_text(messages: list[Message]) -> str:
 
     Single source: both REPL compact() and ContextCompressor._llm_summarize()
     use this function. No content truncation.
+
+    Uses .text_content to extract text from both plain and multimodal messages.
     """
     lines: list[str] = []
     for msg in messages:
         role = msg.role
-        content = msg.content or ""
+        content = msg.text_content or ""
 
         if msg.tool_calls:
             args_parts = []
@@ -47,7 +49,13 @@ def messages_to_text(messages: list[Message]) -> str:
         elif msg.tool_call_id:
             lines.append(f"[tool:{msg.name or '?'}] {content}")
         else:
-            lines.append(f"[{role}] {content}")
+            # Annotate multimodal messages so the summary preserves awareness
+            if msg.has_multimodal:
+                media_types = [p.type for p in (msg.content_parts or []) if p.type != "text"]
+                suffix = f" [+{', '.join(media_types)}]"
+                lines.append(f"[{role}] {content}{suffix}")
+            else:
+                lines.append(f"[{role}] {content}")
 
     return "\n".join(lines)
 
@@ -57,11 +65,17 @@ def wrap_summary(summary_text: str, version: int = 1) -> str:
     return f"<{SUMMARY_TAG} version=\"{version}\">\n{summary_text}\n</{SUMMARY_TAG}>"
 
 
+def has_multimodal_content(msg: Message) -> bool:
+    """Check if a message contains non-text content parts (images, audio, files)."""
+    return msg.has_multimodal
+
+
 def is_summary_message(msg: Message) -> bool:
     """Check if a message is a compressed summary."""
-    if not msg.content:
+    text = msg.text_content
+    if not text:
         return False
-    return msg.content.strip().startswith(f"<{SUMMARY_TAG}")
+    return text.strip().startswith(f"<{SUMMARY_TAG}")
 
 
 async def call_llm_compress(

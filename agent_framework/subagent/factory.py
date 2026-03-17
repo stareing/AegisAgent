@@ -119,8 +119,8 @@ class SubAgentFactory:
         )
 
         # Build scoped tool registry
-        # Doc 2.6/20.1: sub-agents default-deny system/network/subagent categories
-        _BLOCKED_CATEGORIES = {"system", "network", "subagent"}
+        # Doc 2.6/20.1: sub-agents default-deny system/network/delegation categories
+        _BLOCKED_CATEGORIES = {"system", "network", "subagent", "delegation"}
 
         all_tools = self._parent_deps.tool_registry.list_tools()
 

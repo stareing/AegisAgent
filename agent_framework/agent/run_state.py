@@ -131,10 +131,23 @@ class RunStateController:
         if iteration_result.model_response:
             agent_state.total_tokens_used += iteration_result.model_response.usage.total_tokens
 
-        # Spawn counting — track how many sub-agents were spawned this run
-        for tr in iteration_result.tool_results:
-            if tr.tool_name == "spawn_agent" and tr.success:
+        # Spawn counting — track how many sub-agents were spawned this run.
+        # Uses ToolExecutionMeta.source to identify delegation calls instead
+        # of hardcoding tool names. Falls back to tool_name for compat.
+        prev_spawn_count = agent_state.spawn_count
+        metas = iteration_result.tool_execution_meta
+        for idx, tr in enumerate(iteration_result.tool_results):
+            is_spawn = False
+            if idx < len(metas) and metas[idx].source == "subagent":
+                is_spawn = True
+            elif tr.tool_name == "spawn_agent":
+                is_spawn = True
+            if is_spawn and tr.success:
                 agent_state.spawn_count += 1
+
+        # O(1) index: update last_spawn_iteration_index if new spawns this iteration
+        if agent_state.spawn_count > prev_spawn_count:
+            agent_state.last_spawn_iteration_index = agent_state.iteration_count
 
         # Append to audit trail (APPEND-ONLY)
         agent_state.iteration_count += 1

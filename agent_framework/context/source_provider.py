@@ -61,6 +61,7 @@ class ContextSourceProvider:
                 "current_iteration", "spawned_subagents",
             }
             meta_keys = {"investigation_mode", "investigation_expectation"}
+            todo_keys = {"todo_summary", "todo_reminder"}
 
             env_lines = [
                 f"  <{k}>{_xml_escape(str(v))}</{k}>"
@@ -73,7 +74,7 @@ class ContextSourceProvider:
             other_lines = [
                 f"  <{k}>{_xml_escape(str(v))}</{k}>"
                 for k, v in runtime_info.items()
-                if k not in env_keys and k not in cap_keys and k not in meta_keys
+                if k not in env_keys and k not in cap_keys and k not in meta_keys and k not in todo_keys
             ]
 
             if env_lines or other_lines:
@@ -102,6 +103,18 @@ class ContextSourceProvider:
                     "  </rules>\n"
                     "</investigation-protocol>"
                 )
+            # Todo state block (rendered via runtime_info, not user messages)
+            todo_summary = runtime_info.get("todo_summary")
+            todo_reminder = runtime_info.get("todo_reminder")
+            if todo_summary or todo_reminder:
+                todo_lines = ["<todo-state>"]
+                if todo_summary:
+                    todo_lines.append(f"  <summary>{_xml_escape(todo_summary)}</summary>")
+                if todo_reminder:
+                    todo_lines.append(f"  <reminder>{_xml_escape(todo_reminder)}</reminder>")
+                todo_lines.append("</todo-state>")
+                parts.append("\n".join(todo_lines))
+
         # Tool catalog with source-based XML grouping
         if tool_entries:
             parts.append(self._format_tool_catalog(tool_entries))
