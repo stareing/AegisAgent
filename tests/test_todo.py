@@ -98,6 +98,106 @@ class TestTaskCRUD:
         result = json.loads(mgr.update(1, owner="agent-1"))
         assert result["owner"] == "agent-1"
 
+    # ── New fields aligned with Claude Code TaskCreate/TaskUpdate ──
+
+    def test_create_with_active_form(self, mgr):
+        result = json.loads(mgr.create("Run tests", active_form="Running tests"))
+        assert result["activeForm"] == "Running tests"
+
+    def test_create_with_metadata(self, mgr):
+        result = json.loads(mgr.create("Deploy", metadata={"env": "prod", "priority": "p0"}))
+        assert result["metadata"]["env"] == "prod"
+        assert result["metadata"]["priority"] == "p0"
+
+    def test_update_active_form(self, mgr):
+        mgr.create("Task A")
+        result = json.loads(mgr.update(1, active_form="Working on A"))
+        assert result["activeForm"] == "Working on A"
+
+    def test_update_metadata_merge(self, mgr):
+        mgr.create("Task A", metadata={"key1": "v1", "key2": "v2"})
+        result = json.loads(mgr.update(1, metadata={"key2": "updated", "key3": "new"}))
+        assert result["metadata"] == {"key1": "v1", "key2": "updated", "key3": "new"}
+
+    def test_update_metadata_delete_key(self, mgr):
+        mgr.create("Task A", metadata={"keep": "yes", "drop": "me"})
+        result = json.loads(mgr.update(1, metadata={"drop": None}))
+        assert "drop" not in result["metadata"]
+        assert result["metadata"]["keep"] == "yes"
+
+    def test_delete_status(self, mgr):
+        mgr.create("Task A")
+        result = json.loads(mgr.update(1, status="deleted"))
+        assert result["status"] == "deleted"
+        # File should be gone
+        assert json.loads(mgr.get(1)).get("error") is not None
+
+    def test_delete_cleans_dependency_edges(self, mgr):
+        mgr.create("A")
+        mgr.create("B", blocked_by=[1])
+        mgr.create("C", blocked_by=[2])
+        # Delete B — should remove B from C's blockedBy and A's blocks
+        mgr.update(2, status="deleted")
+        c = json.loads(mgr.get(3))
+        assert 2 not in c["blockedBy"]
+        a = json.loads(mgr.get(1))
+        assert 2 not in a["blocks"]
+
+    def test_delete_not_in_list(self, mgr):
+        mgr.create("A")
+        mgr.create("B")
+        mgr.update(1, status="deleted")
+        result = json.loads(mgr.list_all())
+        assert result["summary"]["total"] == 1
+        ids = [t["id"] for t in result["tasks"]]
+        assert 1 not in ids
+
+    # ── PRD §6.1.5 Validation rules ──────────────────────────────
+
+    def test_empty_subject_raises(self, mgr):
+        with pytest.raises(ValueError, match="subject is required"):
+            mgr.create("")
+
+    def test_whitespace_subject_raises(self, mgr):
+        with pytest.raises(ValueError, match="subject is required"):
+            mgr.create("   ")
+
+    def test_max_items_enforced(self, tmp_tasks_dir):
+        mgr = TaskManager(tmp_tasks_dir, max_items=3)
+        mgr.create("A")
+        mgr.create("B")
+        mgr.create("C")
+        with pytest.raises(ValueError, match="Maximum 3 tasks"):
+            mgr.create("D")
+
+    def test_single_in_progress_enforced(self, mgr):
+        mgr.create("A")
+        mgr.create("B")
+        mgr.update(1, status="in_progress")
+        with pytest.raises(ValueError, match="Only one task can be in_progress"):
+            mgr.update(2, status="in_progress")
+
+    def test_single_in_progress_allows_same_task(self, mgr):
+        """Updating the same in_progress task is fine."""
+        mgr.create("A")
+        mgr.update(1, status="in_progress")
+        result = json.loads(mgr.update(1, subject="A updated"))
+        assert result["status"] == "in_progress"
+
+    def test_single_in_progress_after_completing_first(self, mgr):
+        """Can start new in_progress after completing the current one."""
+        mgr.create("A")
+        mgr.create("B")
+        mgr.update(1, status="in_progress")
+        mgr.update(1, status="completed")
+        result = json.loads(mgr.update(2, status="in_progress"))
+        assert result["status"] == "in_progress"
+
+    def test_invalid_status_raises(self, mgr):
+        mgr.create("A")
+        with pytest.raises(ValueError, match="Invalid status"):
+            mgr.update(1, status="bogus")
+
 
 # ══════════════════════════════════════════════════════════════════
 # 2. Dependency graph
@@ -368,15 +468,20 @@ class TestDiskPersistence:
         b = json.loads(mgr2.get(2))
         assert b["blockedBy"] == []
 
-    def test_json_files_exist(self, tmp_tasks_dir):
+    def test_single_json_file(self, tmp_tasks_dir):
         mgr = TaskManager(tmp_tasks_dir)
         mgr.create("Task 1")
         mgr.create("Task 2")
 
-        files = sorted(tmp_tasks_dir.glob("task_*.json"))
-        assert len(files) == 2
-        assert files[0].name == "task_1.json"
-        assert files[1].name == "task_2.json"
+        # Single file, not per-task files
+        assert (tmp_tasks_dir / "tasks.json").exists()
+        assert not list(tmp_tasks_dir.glob("task_*.json"))
+
+        # File contains both tasks
+        import json as _json
+        data = _json.loads((tmp_tasks_dir / "tasks.json").read_text())
+        assert len(data["tasks"]) == 2
+        assert data["next_id"] == 3
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -407,12 +512,12 @@ class TestToolExecutorRouting:
 
 
 class TestModelDrivenPlanning:
-    def test_task_create_description_discourages_simple_use(self):
+    def test_task_create_description_guides_proactive_use(self):
         from agent_framework.tools.builtin.task_manager import task_create
         meta = task_create.__tool_meta__
         desc = meta.description.lower()
-        assert "do not use" in desc
-        assert "multi-step" in desc
+        assert "proactively" in desc or "use proactively" in desc.replace("use ", "use ")
+        assert "3+" in desc or "3 or more" in desc
 
     def test_task_tools_always_registered(self):
         from unittest.mock import MagicMock
@@ -429,3 +534,35 @@ class TestModelDrivenPlanning:
         assert "task_update" in registered_names
         assert "task_list" in registered_names
         assert "task_get" in registered_names
+
+
+# ══════════════════════════════════════════════════════════════════
+# 10. TodoConfig integration
+# ══════════════════════════════════════════════════════════════════
+
+
+class TestTodoConfig:
+    def test_config_exists_in_framework(self):
+        from agent_framework.infra.config import FrameworkConfig, TodoConfig
+        cfg = FrameworkConfig()
+        assert hasattr(cfg, "todo")
+        assert isinstance(cfg.todo, TodoConfig)
+
+    def test_config_defaults(self):
+        from agent_framework.infra.config import TodoConfig
+        cfg = TodoConfig()
+        assert cfg.enabled is True
+        assert cfg.max_items == 20
+        assert cfg.reminder_threshold_rounds == 3
+        assert cfg.inject_reminder is True
+
+    def test_config_flows_to_task_manager(self, tmp_tasks_dir):
+        mgr = TaskManager(tmp_tasks_dir, max_items=5, reminder_threshold=2)
+        assert mgr._max_items == 5
+        assert mgr._reminder_threshold == 2
+
+    def test_config_flows_to_service(self, tmp_tasks_dir):
+        service = TaskService(tmp_tasks_dir, max_items=5, reminder_threshold=2)
+        mgr = service.get("run-1")
+        assert mgr._max_items == 5
+        assert mgr._reminder_threshold == 2

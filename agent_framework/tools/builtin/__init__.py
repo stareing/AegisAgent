@@ -6,7 +6,7 @@ into a GlobalToolCatalog in one shot.
 Tool categories (aligned with system tools spec):
 - filesystem: read_file, write_file, edit_file, list_directory, file_exists,
               glob_files, grep_search, notebook_edit
-- system: bash_exec, bash_output, kill_shell, run_command, get_env
+- system: bash_exec, bash_output, bash_stop, task_stop, kill_shell, run_command, get_env
 - network: web_fetch, web_search
 - delegation: spawn_agent, check_spawn_result
 - control: task_create, task_update, task_list, task_get, slash_command, exit_plan_mode
@@ -69,7 +69,7 @@ def register_all_builtins(
     Args:
         catalog: The tool catalog to register into.
         shell_enabled: When False (default), shell and system tools
-            (bash_exec, bash_output, kill_shell, run_command) are
+            (bash_exec, bash_output, bash_stop, task_stop, kill_shell, run_command) are
             not registered. get_env is always registered but requires
             confirmation.
         web_search_enabled: Register web_search tool (default True).
@@ -90,7 +90,9 @@ def register_all_builtins(
     from agent_framework.tools.builtin.spawn_agent import spawn_agent, check_spawn_result
     from agent_framework.tools.builtin.code_edit import edit_file  # notebook_edit: niche, use write_file
     from agent_framework.tools.builtin.search import grep_search, glob_files
-    from agent_framework.tools.builtin.shell import bash_exec, bash_output, kill_shell
+    from agent_framework.tools.builtin.shell import (
+        bash_exec, bash_output, bash_stop, task_stop, kill_shell,
+    )
     from agent_framework.tools.builtin.web import web_fetch, web_search
     from agent_framework.tools.builtin.task_manager import (
         task_create, task_update, task_list, task_get,
@@ -128,7 +130,7 @@ def register_all_builtins(
 
     # Shell/system tools — bash_exec is the primary shell interface
     if shell_enabled:
-        builtins.extend([bash_exec, bash_output, kill_shell])
+        builtins.extend([bash_exec, bash_output, bash_stop, task_stop, kill_shell])
 
     # Control tools (optional, enabled by default)
     if control_tools_enabled:

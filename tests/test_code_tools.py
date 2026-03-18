@@ -306,7 +306,7 @@ class TestBashExec:
             bg = await bash_exec("echo bg_done", run_in_background=True)
             task_id = bg["task_id"]
             await asyncio.sleep(2)
-            return bash_output(task_id)
+            return await bash_output(task_id)
 
         result = asyncio.run(_run())
         assert "bg_done" in result.get("output", "")
@@ -326,6 +326,22 @@ class TestKillShell:
 
         msg = asyncio.run(_run())
         assert "terminated" in msg.lower()
+
+
+class TestTaskStop:
+    def test_task_stop_aliases_single_background_stop(self) -> None:
+        from agent_framework.tools.builtin.shell import (
+            bash_exec, task_stop, ShellSessionManager as _ShellSessionManager,
+        )
+        _ShellSessionManager._sessions.clear()
+
+        async def _run():
+            bg = await bash_exec("sleep 30", run_in_background=True)
+            return task_stop(bg["task_id"])
+
+        result = asyncio.run(_run())
+        assert result["cancelled"] is True
+        assert "stopped" in result["output"].lower()
 
 
 # ── web_fetch ──────────────────────────────────────────────

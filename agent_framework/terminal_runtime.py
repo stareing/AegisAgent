@@ -241,10 +241,11 @@ def build_framework(
 
     framework = AgentFramework(config=config)
     mock_model: InteractiveMockModel | None = None
-    if use_mock or (config_path is None and not config.model.api_key):
+    use_mock_final = use_mock or (config_path is None and not config.model.api_key)
+    if use_mock_final:
         mock_model = InteractiveMockModel()
-        framework.setup(auto_approve_tools=auto_approve)
-        framework._deps.model_adapter = mock_model
+        # Mock模式下直接传入adapter，避免初始化不必要的默认适配器
+        framework.setup(auto_approve_tools=auto_approve, model_adapter=mock_model)
     else:
         framework.setup(auto_approve_tools=auto_approve)
 
@@ -508,6 +509,11 @@ async def _cmd_help(fw: AgentFramework, mock: InteractiveMockModel | None, state
             usage_hint = f" {_dim(usage)}" if usage else ""
             print(f"    {_cyan('/' + name):24s} {desc}{usage_hint}")
         print()
+    print(f"  {_bold(_yellow('[ Tool Examples ]'))}")
+    print(f"    {_dim('持久任务图: task_create → task_update(in_progress/completed) → task_list/task_get')}")
+    print(f"    {_dim('后台 shell 任务: bash_exec(run_in_background=True) → bash_output(task_id) → task_stop(task_id)')}")
+    print(f"    {_dim('注意: task_stop 只用于后台 shell 的字符串 task_id，不用于持久任务图的整数 task_id。')}")
+    print()
     print(f"  {_dim('直接输入文本与 Agent 对话。所有命令均以 / 开头。')}")
 
 

@@ -50,6 +50,38 @@ python -m agent_framework.main --config config/deepseek.json
 - **8 categories**: filesystem, code, system, network, delegation, control, memory_admin, reasoning
 - **Sub-agent safety**: `SUBAGENT_SAFE` / `SUBAGENT_BLOCKED` / `HIGH_RISK` category sets enforce tool isolation
 
+#### Task Graph vs Background Tasks
+
+The framework exposes two different task concepts:
+
+- **Persistent task graph**: `task_create`, `task_update`, `task_list`, `task_get`
+  - Stored on disk in `.tasks/tasks.json`
+  - Supports `active_form`, `metadata`, dependencies, `owner`, and `deleted` status
+  - Use for multi-step planning and progress tracking
+- **Background shell tasks**: `bash_exec(..., run_in_background=True)`, `bash_output`, `bash_stop`, `task_stop`
+  - `task_stop(task_id)` is a compatibility alias for `bash_stop(task_id)`
+  - Use only with the string `task_id` returned by `bash_exec(run_in_background=True)`
+  - Does not modify the persistent task graph
+
+Example:
+
+```python
+# Persistent task graph
+task = task_create(
+    subject="Refactor auth flow",
+    description="Split validator, session service, and tests",
+    active_form="Refactoring auth flow",
+    metadata={"priority": "p1"},
+)
+task_update(task_id=1, status="in_progress")
+task_update(task_id=1, status="completed")
+
+# Background shell task
+bg = await bash_exec("pytest -q", run_in_background=True)
+await bash_output(bg["task_id"], block=True, timeout_ms=30_000)
+task_stop(bg["task_id"])
+```
+
 ### Tool Categories & Security
 
 | Category | Examples | Sub-agent Access |

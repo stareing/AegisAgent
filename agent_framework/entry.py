@@ -93,6 +93,7 @@ class AgentFramework:
         self,
         agent: Any = None,
         auto_approve_tools: bool = False,
+        model_adapter: BaseModelAdapter | None = None,
     ) -> None:
         """Initialize all components and wire dependencies."""
         configure_logging(self.config.logging)
@@ -137,7 +138,7 @@ class AgentFramework:
         ))
 
         # Model adapter
-        model_adapter = self._create_model_adapter()
+        model_adapter = model_adapter or self._create_model_adapter()
 
         # Apply session mode from config
         if hasattr(model_adapter, "_session_mode_config"):

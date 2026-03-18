@@ -257,7 +257,12 @@ class AgentConfig(BaseModel):
 
     agent_id: str = "default"
     model_name: str = "gpt-3.5-turbo"
-    system_prompt: str = "You are a helpful assistant."
+    system_prompt: str = (
+        "You are a helpful coding assistant. "
+        "For complex multi-step tasks, use task_create to plan steps first, "
+        "then task_update to mark each in_progress/completed as you work. "
+        "Prefer tools over prose."
+    )
     temperature: float = 1.0
     max_output_tokens: int = 4096
     max_iterations: int = 20

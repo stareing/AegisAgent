@@ -295,6 +295,41 @@ class BashSession:
             return self._background_results.pop(task_id, task.result())
         return None
 
+    def stop_background_task(self, task_id: str) -> dict:
+        """Stop a single background task by its ID.
+
+        Cancels the asyncio task (which triggers SIGKILL on the subprocess
+        via the CancelledError handler in _run_independent).
+
+        Returns the task result if already completed, or a cancelled status.
+        """
+        # Already completed?
+        if task_id in self._background_results:
+            result = self._background_results.pop(task_id)
+            self._background_tasks.pop(task_id, None)
+            self._background_pids.pop(task_id, None)
+            return result
+
+        task = self._background_tasks.get(task_id)
+        if task is None:
+            raise ValueError(f"Unknown background task: {task_id}")
+
+        if task.done():
+            self._background_tasks.pop(task_id, None)
+            self._background_pids.pop(task_id, None)
+            return self._background_results.pop(task_id, task.result())
+
+        # Cancel the running task — triggers SIGKILL in CancelledError handler
+        task.cancel()
+        self._background_tasks.pop(task_id, None)
+        self._background_pids.pop(task_id, None)
+        return {
+            "output": f"Background task {task_id} stopped",
+            "exit_code": -1,
+            "timed_out": False,
+            "cancelled": True,
+        }
+
     async def kill(self) -> str:
         """Kill the persistent shell process and all background tasks.
 

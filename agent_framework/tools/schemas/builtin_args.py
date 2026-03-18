@@ -146,6 +146,21 @@ class BashExecArgs(BaseModel):
 class BashOutputArgs(BaseModel):
     """Parameters for bash_output tool."""
     task_id: str = Field(description="Task ID from bash_exec background execution")
+    block: bool = Field(
+        default=False,
+        description="Wait for completion before returning",
+    )
+    timeout_ms: int = Field(
+        default=30000,
+        description="Maximum wait time in milliseconds when block=True",
+    )
+
+
+class TaskStopArgs(BaseModel):
+    """Parameters for task_stop tool."""
+    task_id: str = Field(
+        description="Background task ID returned by bash_exec(run_in_background=True)",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -221,11 +236,19 @@ class NotebookEditArgs(BaseModel):
 
 class TaskCreateArgs(BaseModel):
     """Parameters for task_create tool."""
-    subject: str = Field(description="Short task title")
+    subject: str = Field(description="Short task title (imperative form)")
     description: str = Field(default="", description="Detailed task description")
     blocked_by: list[int] | None = Field(
         default=None,
         description="Task IDs that must complete before this task can start",
+    )
+    active_form: str = Field(
+        default="",
+        description="Present continuous form shown when in_progress (e.g. 'Running tests')",
+    )
+    metadata: dict | None = Field(
+        default=None,
+        description="Arbitrary key-value pairs to attach to the task",
     )
 
 
@@ -234,10 +257,14 @@ class TaskUpdateArgs(BaseModel):
     task_id: int = Field(description="ID of the task to update")
     status: str | None = Field(
         default=None,
-        description="New status: 'pending', 'in_progress', or 'completed'",
+        description="New status: 'pending', 'in_progress', 'completed', or 'deleted'",
     )
     subject: str | None = Field(default=None, description="New subject text")
     description: str | None = Field(default=None, description="New description")
+    active_form: str | None = Field(
+        default=None,
+        description="Present continuous form for spinner display",
+    )
     add_blocked_by: list[int] | None = Field(
         default=None,
         description="Task IDs to add as upstream dependencies",
@@ -247,6 +274,10 @@ class TaskUpdateArgs(BaseModel):
         description="Task IDs to add as downstream dependents",
     )
     owner: str | None = Field(default=None, description="Agent/user who owns this task")
+    metadata: dict | None = Field(
+        default=None,
+        description="Keys to merge into metadata. Set a key to null to delete it.",
+    )
 
 
 class TaskGetArgs(BaseModel):

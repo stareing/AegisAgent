@@ -44,6 +44,9 @@ Adapters → adapters/model/ | Infra → infra/
 - **#38-39** 终止条件6层闭环 + 全链路日志50+事件
 - **#40-52** 架构审查+收口 (v2.5.1→v2.6.5): RunCoordinator三层拆分, Hook/Decision分离, TerminationKind, CommitSequencer, SubAgent状态机, SessionSnapshot, 重试版本链, 架构守卫43项, 700 tests
 - **#53** 记忆+上下文闭环修复 (详见下方)
+- **s03-s08** 任务系统 + 后台执行: 持久化任务 DAG (.tasks/), 依赖图自动解锁, 独立 subprocess 后台并发, 跨 run 通知持续, SIGKILL 进程组取消链, 对齐 Claude Code TaskCreate/Update/List/Get/Output/Stop 全 API
+- **Graph** LangGraph 兼容编译式图引擎: StateGraph/CompiledGraph/InMemorySaver, 条件路由, fan-out/fan-in, 3 种 stream mode
+- **TUI** 流式渲染修复: #active-stream 实时 partial line, 移除 per-token sleep(0) 抖动
 
 ### #53 记忆+上下文管理闭环修复
 

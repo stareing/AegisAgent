@@ -306,6 +306,68 @@ class TestCrossRunPersistence:
 # ══════════════════════════════════════════════════════════════════
 
 
+class TestBashStopSingleTask:
+    """bash_stop terminates a single background task, not the whole session."""
+
+    @pytest.mark.asyncio
+    async def test_stop_running_task(self):
+        from agent_framework.tools.shell.shell_manager import BashSession
+
+        session = BashSession()
+        try:
+            tid = await session.execute_background("sleep 300", 600)
+            await asyncio.sleep(0.3)
+
+            result = session.stop_background_task(tid)
+            assert result.get("cancelled") is True
+            assert tid not in session._background_tasks
+        finally:
+            await session.kill()
+
+    @pytest.mark.asyncio
+    async def test_stop_completed_task(self):
+        from agent_framework.tools.shell.shell_manager import BashSession
+
+        session = BashSession()
+        try:
+            tid = await session.execute_background("echo done", 10)
+            await asyncio.sleep(1.0)
+
+            result = session.stop_background_task(tid)
+            # Already completed — returns the real result, not cancelled
+            assert "done" in result.get("output", "")
+        finally:
+            await session.kill()
+
+    @pytest.mark.asyncio
+    async def test_stop_unknown_task_raises(self):
+        from agent_framework.tools.shell.shell_manager import BashSession
+
+        session = BashSession()
+        with pytest.raises(ValueError, match="Unknown"):
+            session.stop_background_task("nonexistent")
+
+    @pytest.mark.asyncio
+    async def test_stop_does_not_kill_other_tasks(self):
+        from agent_framework.tools.shell.shell_manager import BashSession
+
+        session = BashSession()
+        try:
+            tid1 = await session.execute_background("sleep 300", 600)
+            tid2 = await session.execute_background("sleep 300", 600)
+            await asyncio.sleep(0.3)
+
+            # Stop only tid1
+            session.stop_background_task(tid1)
+
+            # tid2 should still be running
+            assert tid2 in session._background_tasks
+            r2 = session.get_background_result(tid2)
+            assert r2 is None  # still running
+        finally:
+            await session.kill()
+
+
 class TestKillShellBackgroundOnly:
     """kill_shell must cancel background tasks even without a foreground session."""
 
