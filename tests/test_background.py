@@ -159,13 +159,14 @@ class TestCoordinatorIntegration:
         assert "<background-results>" in msgs[0].content
         assert "Noted" in msgs[1].content
 
-    def test_no_drain_when_no_pending(self):
+    @pytest.mark.asyncio
+    async def test_no_drain_when_no_pending(self):
         from agent_framework.agent.coordinator import RunCoordinator
         from agent_framework.models.session import SessionState
 
         coordinator = RunCoordinator()
         session = SessionState()
-        coordinator._drain_background_notifications(session)
+        await coordinator._drain_background_notifications(session)
         assert len(session.get_messages()) == 0
 
     def test_notifier_is_instance_level(self):

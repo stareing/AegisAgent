@@ -9,6 +9,9 @@ from agent_framework.models.subagent import (
     SubAgentHandle,
     SubAgentResult,
     SubAgentSpec,
+    SubAgentStatus,
+    SubAgentSuspendInfo,
+    SubAgentSuspendReason,
     SubAgentTaskStatus,
 )
 from agent_framework.subagent.factory import SubAgentFactory
@@ -370,19 +373,163 @@ class SubAgentRuntime:
             if h.parent_run_id == parent_run_id
         ]
 
-    async def cancel_all(self, parent_run_id: str) -> int:
-        """Cancel all active sub-agents for a given parent run.
+    async def resume(
+        self,
+        spawn_id: str,
+        resume_payload: dict,
+        parent_agent: Any,
+    ) -> SubAgentResult:
+        """Resume a suspended/waiting sub-agent with additional input.
 
-        Runtime executes actual cancellation and updates final status.
-        Scheduler only issues cancel commands.
+        The resume_payload is injected as context for the next execution phase.
+        If the sub-agent is not in a resumable state, returns an error result.
+
+        Boundary §7: This is true resume only if the runtime has preserved
+        the execution context. If the original run completed/failed, this
+        creates a follow-up run with resume_payload as task context.
         """
+        handle = self._active.get(spawn_id)
+
+        # If there's no active handle, the agent already completed or was never spawned
+        if handle is None:
+            logger.warning(
+                "subagent.resume.not_found",
+                spawn_id=spawn_id,
+            )
+            return SubAgentResult(
+                spawn_id=spawn_id,
+                success=False,
+                error=f"No active sub-agent with spawn_id={spawn_id} to resume",
+            )
+
+        # Check if the sub-agent is in a resumable state
+        resumable_statuses = {
+            SubAgentStatus.WAITING_PARENT,
+            SubAgentStatus.WAITING_USER,
+            SubAgentStatus.SUSPENDED,
+        }
+        if handle.status not in resumable_statuses:
+            logger.warning(
+                "subagent.resume.not_resumable",
+                spawn_id=spawn_id,
+                current_status=handle.status.value if hasattr(handle.status, "value") else str(handle.status),
+            )
+            return SubAgentResult(
+                spawn_id=spawn_id,
+                success=False,
+                error=f"Cannot resume sub-agent in status {handle.status}",
+            )
+
+        handle.status = SubAgentStatus.RESUMING
+        logger.info(
+            "subagent.resuming",
+            spawn_id=spawn_id,
+            resume_keys=list(resume_payload.keys()),
+        )
+
+        # Build a follow-up task with resume context
+        resume_task = resume_payload.get("answer", resume_payload.get("input", str(resume_payload)))
+
+        coordinator = self._coordinator
+        if coordinator is None:
+            from agent_framework.agent.coordinator import RunCoordinator
+            coordinator = RunCoordinator()
+
+        # Re-create sub-agent for the resume phase
+        original_spec = SubAgentSpec(
+            parent_run_id=handle.parent_run_id,
+            spawn_id=spawn_id,
+            task_input=f"[Resume from previous phase] {resume_task}",
+        )
+
+        try:
+            sub_agent, sub_deps = self._factory.create_agent_and_deps(
+                original_spec,
+                parent_agent,
+            )
+        except Exception as e:
+            handle.status = SubAgentStatus.FAILED
+            return SubAgentResult(
+                spawn_id=spawn_id,
+                success=False,
+                error=f"Failed to create sub-agent for resume: {e}",
+            )
+
+        handle.status = SubAgentStatus.RUNNING
+
+        try:
+            run_result = await coordinator.run(
+                sub_agent,
+                sub_deps,
+                original_spec.task_input,
+            )
+            final_status = SubAgentStatus.COMPLETED if run_result.success else SubAgentStatus.FAILED
+            handle.status = final_status
+
+            result = SubAgentResult(
+                spawn_id=spawn_id,
+                success=run_result.success,
+                final_status=final_status,
+                final_answer=run_result.final_answer,
+                error=run_result.error,
+                usage=run_result.usage,
+                iterations_used=run_result.iterations_used,
+            )
+        except Exception as e:
+            handle.status = SubAgentStatus.FAILED
+            result = SubAgentResult(
+                spawn_id=spawn_id,
+                success=False,
+                final_status=SubAgentStatus.FAILED,
+                error=f"Resume execution failed: {e}",
+            )
+        finally:
+            self._active.pop(spawn_id, None)
+
+        logger.info(
+            "subagent.resume_completed",
+            spawn_id=spawn_id,
+            success=result.success,
+        )
+        return result
+
+    async def cancel(self, spawn_id: str) -> None:
+        """Cancel a single sub-agent by spawn_id.
+
+        Boundary §9: cancel is cooperative. The scheduler issues the cancel
+        command; the actual task may take time to reach CANCELLED state,
+        passing through CANCELLING first for non-preemptable operations.
+        """
+        handle = self._active.get(spawn_id)
+        if handle is None:
+            logger.warning("subagent.cancel.not_found", spawn_id=spawn_id)
+            return
+
+        logger.info("subagent.cancelling", spawn_id=spawn_id)
+        handle.status = SubAgentStatus.CANCELLING
+
+        success = await self._scheduler.cancel(spawn_id)
+        if success:
+            handle.status = SubAgentStatus.CANCELLED
+            logger.info("subagent.cancelled", spawn_id=spawn_id)
+        else:
+            # Task already completed or not found in scheduler
+            logger.warning(
+                "subagent.cancel.scheduler_miss",
+                spawn_id=spawn_id,
+                hint="Task may have already completed",
+            )
+
+        # Clean up from active set
+        self._active.pop(spawn_id, None)
+
+    async def cancel_all(self, parent_run_id: str) -> int:
+        """Cancel all active sub-agents for a given parent run."""
         cancelled = 0
         for spawn_id, handle in list(self._active.items()):
             if handle.parent_run_id == parent_run_id:
-                success = await self._scheduler.cancel(spawn_id)
-                if success:
-                    handle.status = "CANCELLED"
-                    cancelled += 1
+                await self.cancel(spawn_id)
+                cancelled += 1
         logger.info(
             "subagent.cancel_all",
             parent_run_id=parent_run_id,

@@ -162,6 +162,26 @@ def instructions_loaded_payload(skills_loaded: int, tools_registered: int) -> di
     return {"skills_loaded": skills_loaded, "tools_registered": tools_registered}
 
 
+def delegation_resume_payload(
+    spawn_id: str, resume_keys: list[str],
+) -> dict[str, Any]:
+    return {"spawn_id": spawn_id, "resume_payload_keys": resume_keys}
+
+
+def delegation_cancel_payload(spawn_id: str) -> dict[str, Any]:
+    return {"spawn_id": spawn_id}
+
+
+def delegation_hitl_payload(
+    request_id: str, spawn_id: str, request_type: str,
+) -> dict[str, Any]:
+    return {
+        "request_id": request_id,
+        "spawn_id": spawn_id,
+        "request_type": request_type,
+    }
+
+
 def artifact_produced_payload(artifact: dict, source_tool: str) -> dict[str, Any]:
     return {"artifact": artifact, "source_tool": source_tool}
 

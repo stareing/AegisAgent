@@ -162,11 +162,24 @@ class AgentFramework:
         else:
             confirmation = CLIConfirmationHandler()
 
+        # Interaction channel for long-term parent-child delegation (v3.1)
+        from agent_framework.subagent.interaction_channel import InMemoryInteractionChannel
+        from agent_framework.tools.hitl import QueueHITLHandler
+
+        self._interaction_channel = InMemoryInteractionChannel(
+            max_events_per_spawn=self.config.long_interaction.max_delegation_events_per_subagent,
+        )
+        self._hitl_handler = QueueHITLHandler(
+            max_pending_per_run=self.config.long_interaction.max_pending_hitl_requests_per_run,
+        )
+
         # Delegation executor (placeholder, wired after subagent runtime)
         delegation_executor = DelegationExecutor(
             sub_agent_runtime=None,
             hook_executor=self._hook_executor,
             confirmation_handler=confirmation,
+            interaction_channel=self._interaction_channel,
+            hitl_handler=self._hitl_handler,
         )
 
         # Tool executor
@@ -297,6 +310,12 @@ class AgentFramework:
         set_memory_context(memory_manager, self._agent.agent_id)
 
         self._coordinator = RunCoordinator()
+
+        # Wire interaction channel into coordinator's notification channel (v3.1)
+        self._coordinator._notification_channel.set_interaction_channel(
+            self._interaction_channel
+        )
+
         self._setup_done = True
 
         logger.info(

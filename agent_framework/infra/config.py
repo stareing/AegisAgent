@@ -89,6 +89,17 @@ class TodoConfig(BaseModel):
     inject_reminder: bool = True
 
 
+class LongInteractionConfig(BaseModel):
+    """Configuration for long-term parent-child agent interaction (PRD §15)."""
+
+    enable_interactive_subagents: bool = True
+    enable_suspend_resume: bool = True
+    max_pending_hitl_requests_per_run: int = 5
+    max_delegation_events_per_subagent: int = 200
+    max_interactive_rounds_per_subagent: int = 20
+    delegation_event_summary_limit: int = 10
+
+
 class SubAgentConfig(BaseModel):
     """Sub-agent configuration.
 
@@ -190,6 +201,7 @@ class FrameworkConfig(BaseSettings):
     tools: ToolConfig = Field(default_factory=ToolConfig)
     todo: TodoConfig = Field(default_factory=TodoConfig)
     subagent: SubAgentConfig = Field(default_factory=SubAgentConfig)
+    long_interaction: LongInteractionConfig = Field(default_factory=LongInteractionConfig)
     skills: SkillsConfig = Field(default_factory=SkillsConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     a2a: A2AConfig = Field(default_factory=A2AConfig)

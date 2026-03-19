@@ -17,6 +17,7 @@ from agent_framework.hooks.payloads import (
 )
 from agent_framework.agent.capability_policy import apply_capability_policy
 from agent_framework.tools.background import BackgroundNotifier
+from agent_framework.tools.notification_channel import RuntimeNotificationChannel
 from agent_framework.agent.commit_sequencer import CommitSequencer
 from agent_framework.agent.loop import AgentLoop, AgentLoopDeps
 from agent_framework.agent.run_policy import RunPolicyResolver
@@ -111,9 +112,12 @@ class RunCoordinator:
         self._cached_tools_schema: list[dict] | None = None
         # Dispatcher for hook dispatch (created per-run from deps.hook_executor)
         self._dispatcher: HookDispatchService | None = None
-        # Background task auto-notification (s08) — instance-level, survives across runs
-        # so tasks that outlive one run are still drained in the next.
+        # Unified notification channel (v3.1) — instance-level, survives across runs.
+        # Handles both background bash tasks AND delegation events.
         self._bg_notifier = BackgroundNotifier()
+        self._notification_channel = RuntimeNotificationChannel(
+            bg_notifier=self._bg_notifier,
+        )
 
     def _build_user_message(
         self,
@@ -302,7 +306,7 @@ class RunCoordinator:
                     break
 
                 # Drain background task notifications before LLM call (s08)
-                self._drain_background_notifications(session_state)
+                await self._drain_background_notifications(session_state, deps)
 
                 # Prepare LLM request
                 # Give executor a fresh session snapshot so spawn can build context seed.
@@ -650,7 +654,7 @@ class RunCoordinator:
                     break
 
                 # Drain background task notifications before LLM call (s08)
-                self._drain_background_notifications(session_state)
+                await self._drain_background_notifications(session_state, deps)
 
                 if hasattr(deps.tool_executor, "set_current_session_messages"):
                     maybe = deps.tool_executor.set_current_session_messages(
@@ -916,7 +920,11 @@ class RunCoordinator:
     # ------------------------------------------------------------------
 
     def _register_background_tasks(self, iteration_result: IterationResult) -> None:
-        """Detect bash_exec(run_in_background=True) results and register task_ids."""
+        """Detect bash_exec(run_in_background=True) and spawn_agent(async) results.
+
+        Registers background bash tasks for polling, and monitors spawn_ids
+        for delegation event draining.
+        """
         for tr in iteration_result.tool_results:
             if tr.tool_name == "bash_exec" and tr.success:
                 output = tr.output
@@ -924,15 +932,35 @@ class RunCoordinator:
                     task_id = output.get("task_id", "")
                     if task_id:
                         self._bg_notifier.register(task_id)
+            # Monitor async spawns for delegation event draining
+            if tr.tool_name == "spawn_agent" and tr.success:
+                output = tr.output
+                if isinstance(output, dict):
+                    spawn_id = output.get("spawn_id", "")
+                    if spawn_id:
+                        self._notification_channel.monitor_spawn(spawn_id)
 
-    def _drain_background_notifications(self, session_state: SessionState) -> None:
-        """Drain completed background tasks and inject as messages."""
-        if not self._bg_notifier.has_pending:
+    async def _drain_background_notifications(
+        self, session_state: SessionState, deps: AgentRuntimeDeps | None = None,
+    ) -> None:
+        """Drain all pending notifications (background tasks + delegation events).
+
+        Pipeline:
+        1. drain_all() — polls bg tasks + delegation events, ack → RECEIVED
+        2. Format and inject into session as user message + assistant ack
+        3. Advance delegation events to PROJECTED (boundary §4)
+        4. Auto-forward HITL events: QUESTION/CONFIRMATION_REQUEST →
+           event_to_hitl_request → forward_hitl_request → resume_subagent,
+           then advance to HANDLED (boundary §6)
+        """
+        if not self._notification_channel.has_pending:
             return
-        notifications = self._bg_notifier.drain()
+
+        notifications = self._notification_channel.drain_all()
         if not notifications:
             return
-        text = BackgroundNotifier.format_notifications(notifications)
+
+        text = RuntimeNotificationChannel.format_notifications(notifications)
         # Inject as user message + assistant ack (standard message pair)
         self._state_ctrl.append_user_message(
             session_state,
@@ -942,6 +970,100 @@ class RunCoordinator:
             session_state,
             [Message(role="assistant", content="Noted background results.")],
         )
+
+        # Advance delegation events to PROJECTED + auto-forward HITL (boundary §4/§6)
+        delegation_executor = deps.delegation_executor if deps else None
+        for n in notifications:
+            if n.notification_type.value != "delegation_event":
+                continue
+
+            spawn_id = n.payload.get("spawn_id", "")
+            event_id = n.payload.get("event_id", "")
+            event_type = n.payload.get("event_type", "")
+
+            if spawn_id and event_id:
+                self._notification_channel.mark_projected(spawn_id, event_id)
+
+            # Auto-forward HITL events to the delegation executor (boundary §6)
+            if event_type in ("QUESTION", "CONFIRMATION_REQUEST") and delegation_executor:
+                await self._handle_hitl_event(
+                    delegation_executor, n, spawn_id, event_id,
+                )
+
+    async def _handle_hitl_event(
+        self,
+        delegation_executor: Any,
+        notification: Any,
+        spawn_id: str,
+        event_id: str,
+    ) -> None:
+        """Convert a HITL delegation event to HITLRequest, forward, and resume.
+
+        Full chain: event → event_to_hitl_request → forward_hitl_request
+        → HITLResponse → resume_subagent → mark_handled
+        """
+        try:
+            from agent_framework.tools.hitl import event_to_hitl_request
+            from agent_framework.models.subagent import DelegationEvent, DelegationEventType
+
+            # Reconstruct a minimal DelegationEvent from the notification payload
+            payload = notification.payload
+            event_type_str = payload.get("event_type", "")
+            event_type = DelegationEventType(event_type_str)
+            event = DelegationEvent(
+                event_id=event_id,
+                spawn_id=spawn_id,
+                parent_run_id=payload.get("parent_run_id", ""),
+                event_type=event_type,
+                payload=payload.get("data", {}),
+            )
+
+            hitl_request = event_to_hitl_request(event)
+            if hitl_request is None:
+                return
+
+            logger.info(
+                "coordinator.hitl.auto_forward",
+                spawn_id=spawn_id,
+                event_id=event_id,
+                request_type=hitl_request.request_type,
+            )
+
+            response = await delegation_executor.forward_hitl_request(hitl_request)
+            if response is None:
+                # No HITL handler configured — leave at PROJECTED
+                return
+
+            # Resume the sub-agent with the user's response
+            resume_payload: dict = {}
+            if response.response_type == "answer":
+                resume_payload["answer"] = response.answer or response.selected_option or ""
+            elif response.response_type == "confirm":
+                resume_payload["confirmed"] = True
+            elif response.response_type in ("deny", "cancel"):
+                resume_payload["denied"] = True
+
+            await delegation_executor.resume_subagent(
+                spawn_id, resume_payload, None,
+            )
+
+            # Advance to HANDLED — business processing complete (boundary §4)
+            self._notification_channel.mark_handled(spawn_id, event_id)
+
+            logger.info(
+                "coordinator.hitl.completed",
+                spawn_id=spawn_id,
+                event_id=event_id,
+                response_type=response.response_type,
+            )
+
+        except Exception as e:
+            logger.warning(
+                "coordinator.hitl.auto_forward_failed",
+                spawn_id=spawn_id,
+                event_id=event_id,
+                error=str(e),
+            )
 
     @staticmethod
     def _collect_runtime_info(

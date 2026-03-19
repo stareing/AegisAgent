@@ -6,6 +6,7 @@ from agent_framework.subagent.memory_scope import (
 from agent_framework.subagent.factory import SubAgentFactory
 from agent_framework.subagent.scheduler import SubAgentScheduler
 from agent_framework.subagent.runtime import SubAgentRuntime
+from agent_framework.subagent.interaction_channel import InMemoryInteractionChannel
 
 __all__ = [
     "IsolatedMemoryManager",
@@ -14,4 +15,5 @@ __all__ = [
     "SubAgentFactory",
     "SubAgentScheduler",
     "SubAgentRuntime",
+    "InMemoryInteractionChannel",
 ]

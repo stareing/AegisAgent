@@ -1765,14 +1765,14 @@ class TestV264RedLines:
         assert resolve_delegation_status(result) == SubAgentStatus.COMPLETED
 
     def test_resolve_delegation_status_timeout(self):
-        """TIMEOUT error must resolve to FAILED (§44)."""
+        """TIMEOUT error must resolve to TIMEOUT (v3.1 unified status)."""
         from agent_framework.models.subagent import (
             DelegationErrorCode, SubAgentResult, SubAgentStatus,
             resolve_delegation_status,
         )
         result = SubAgentResult(spawn_id="s1", success=False, error="timed out")
         status = resolve_delegation_status(result, DelegationErrorCode.TIMEOUT)
-        assert status == SubAgentStatus.FAILED
+        assert status == SubAgentStatus.TIMEOUT
 
     def test_resolve_delegation_status_quota(self):
         """QUOTA_EXCEEDED must resolve to REJECTED, not FAILED (§44)."""
@@ -1804,7 +1804,7 @@ class TestV264RedLines:
 
         failed = SubAgentResult(spawn_id="s1", success=False, error="timed out")
         summary2 = DelegationExecutor.summarize_result(failed)
-        assert summary2.status == SubAgentStatus.FAILED.value
+        assert summary2.status == SubAgentStatus.TIMEOUT.value
 
     def test_error_code_to_status_mapping_complete(self):
         """All DelegationErrorCodes must have a status mapping (§44)."""

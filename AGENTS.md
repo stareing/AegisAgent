@@ -32,6 +32,34 @@
 - 以“完成度 + 一致性”双指标驱动开发节奏。
 - 先修边界与数据流，再补功能体验与性能优化。
 
+## Project Structure
+
+```
+agent_framework/
+├── agent/           # Agent loop, coordinator, state, skills
+├── graph/           # Compiled graph engine (StateGraph, CompiledGraph)
+├── tools/           # Tool decorator, registry, executor, delegation
+│   ├── builtin/     # Built-in tools (8 categories)
+│   ├── schemas/     # Parameter models & ToolCategory constants
+│   └── shell/       # BashSession, ShellSessionManager (isolated)
+├── memory/          # Saved memory manager, SQLite store
+├── context/         # Context engineering, compression, 5-slot builder
+├── subagent/        # Sub-agent factory, scheduler, runtime
+├── hooks/           # Hook registry, executor, builtin hooks
+├── plugins/         # Plugin manifest, loader, lifecycle, permissions
+├── models/          # Pydantic v2 data models (incl. hook & plugin)
+├── protocols/       # MCP client, A2A client
+├── adapters/model/  # LLM adapters (11 providers)
+├── infra/           # Config, logging, event bus, tracing
+├── entry.py         # Framework facade
+├── cli.py           # CLI entry point
+└── main.py          # Interactive terminal
+config/              # Model configuration files (JSON)
+tests/               # 1120 tests across 29 files
+```
+
+---
+
 ## 2. 当前完成度快照（2026-03-13）
 
 - 基础设施层（Config/Logger/EventBus/DiskStore）：`已实现`。
