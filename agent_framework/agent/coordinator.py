@@ -29,8 +29,8 @@ from agent_framework.models.memory import RunSessionOutcome
 from agent_framework.models.message import ContentPart, Message, TokenUsage
 from agent_framework.models.session import SessionState
 from agent_framework.models.subagent import Artifact
-from agent_framework.tools.background import BackgroundNotifier
-from agent_framework.tools.notification_channel import \
+from agent_framework.notification.background import BackgroundNotifier
+from agent_framework.notification.channel import \
     RuntimeNotificationChannel
 
 # Default global run timeout (5 minutes). Prevents hangs from slow models.
@@ -979,7 +979,7 @@ class RunCoordinator:
         try:
             from agent_framework.models.subagent import (DelegationEvent,
                                                          DelegationEventType)
-            from agent_framework.tools.hitl import event_to_hitl_request
+            from agent_framework.subagent.hitl import event_to_hitl_request
 
             # Reconstruct a minimal DelegationEvent from the notification payload
             payload = notification.payload

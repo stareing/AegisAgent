@@ -1,6 +1,6 @@
 # AGENTS.md
 
-本文件定义本仓库协作开发规则，基于当前代码实现与《架构开发文档 v2.3》的一致性审查结果。
+本文件定义本仓库协作开发规则。
 * **单一职责**：一个模块、类、函数只负责一类清晰职责。
 * **禁止重复造轮子**：优先复用成熟开源方案，非核心能力不自研。
 * **导入前置**：`import` 原则上统一放在文件头部。
@@ -18,114 +18,105 @@
 * **禁止魔法值**：重复使用的常量必须提取命名。
 * **配置外置**：可变参数放配置，不写死在逻辑中。
 * **副作用集中**：I/O、网络、数据库调用集中在边界层。
-* **注释解释原因**：注释优先说明“为什么”，不是重复“做什么”。
+* **注释解释原因**：注释优先说明"为什么"，不是重复"做什么"。
 * **兼容性优先**：公共接口变更必须考虑向后兼容。
 * **测试友好**：设计必须便于 mock、替换和单元测试。
 * **边界清晰**：跨层调用必须通过正式接口，禁止越层访问。
 * **一处定义**：同一规则、常量、协议只保留一个权威定义。
-* **记忆进度**：热跟新AGENTS.md
-* **代码审核**：将由cladue code排查代码是否和需求一致
-
-## 1. 使用目标
-
-- 以 `架构开发文档.md` 为架构基线。
-- 以“完成度 + 一致性”双指标驱动开发节奏。
-- 先修边界与数据流，再补功能体验与性能优化。
+* **代码审核**：由 codex / claude code 排查代码是否和需求一致
 
 ## Project Structure
 
 ```
 agent_framework/
-├── agent/           # Agent loop, coordinator, state, skills
-├── graph/           # Compiled graph engine (StateGraph, CompiledGraph)
-├── tools/           # Tool decorator, registry, executor, delegation
-│   ├── builtin/     # Built-in tools (8 categories)
-│   ├── schemas/     # Parameter models & ToolCategory constants
-│   └── shell/       # BashSession, ShellSessionManager (isolated)
-├── memory/          # Saved memory manager, SQLite store
+├── agent/           # Agent loop, coordinator, state, prompt templates, skills
+├── adapters/model/  # 20 LLM adapters (OpenAI/Anthropic/Google/OpenRouter/Groq/Together/...)
 ├── context/         # Context engineering, compression, 5-slot builder
-├── subagent/        # Sub-agent factory, scheduler, runtime
-├── hooks/           # Hook registry, executor, builtin hooks
+├── graph/           # LangGraph-compatible compiled graph engine (StateGraph/CompiledGraph)
+├── hooks/           # Hook registry, executor, 3 builtin hooks, payloads
+├── infra/           # Config, logging, event bus, tracing (OpenTelemetry)
+├── memory/          # Memory manager + 4 store backends (SQLite/PostgreSQL/MongoDB/Neo4j)
+├── models/          # Pydantic v2 data models (message/tool/agent/subagent/hook/plugin)
 ├── plugins/         # Plugin manifest, loader, lifecycle, permissions
-├── models/          # Pydantic v2 data models (incl. hook & plugin)
-├── protocols/       # MCP client, A2A client
-├── adapters/model/  # LLM adapters (11 providers)
-├── infra/           # Config, logging, event bus, tracing
-├── entry.py         # Framework facade
+├── protocols/       # Core protocols + MCP client + A2A client adapter
+├── skills/          # Skill loader, preprocessor, SKILL.md discovery
+├── subagent/        # Factory, scheduler, runtime, delegation, HITL, interaction channel, lead collector
+├── tools/           # Tool executor, catalog, registry, decorator, confirmation
+│   ├── builtin/     # 12 built-in tools (read/write/edit/grep/glob/web/task/spawn/think/skill/shell/memory)
+│   ├── schemas/     # Parameter models & validation
+│   └── shell/       # BashSession, ShellSessionManager (process isolation)
+├── entry.py         # AgentFramework facade
 ├── cli.py           # CLI entry point
-└── main.py          # Interactive terminal
-config/              # Model configuration files (JSON)
-tests/               # 1120 tests across 29 files
+├── main.py          # Interactive terminal
+├── terminal_runtime.py  # Rich terminal display
+└── textual_cli.py       # Textual TUI
+config/              # Model & collection strategy JSON configs (20+ presets)
+tests/               # 1358+ tests across 35+ files
 ```
 
----
+## Key Subsystems
 
-## 2. 当前完成度快照（2026-03-13）
+### 1. Agent Execution Chain
+```
+CLI → AgentFramework.run() → RunCoordinator.run() → AgentLoop.execute_iteration()
+  → LLM call → tool_calls → ToolExecutor.batch_execute() → route by source
+  → IterationResult → RunStateController → SessionState → next iteration
+```
+- RunCoordinator: orchestration (WHEN) | AgentLoop: execution (HOW, zero writes)
+- AgentLoop returns immutable IterationResult; only RunStateController writes state.
 
-- 基础设施层（Config/Logger/EventBus/DiskStore）：`已实现`。
-- 模型层（models/*）：`已实现`。
-- Agent 主流程（Coordinator + Loop + ToolExecutor）：`可运行`。
-- 记忆层（Base/Default/SQLite）：`可运行`。
-- 上下文层（Source/Builder/Engineer）：`可运行`。
-- 子 Agent（Factory/Scheduler/Runtime）：`部分完成`（存在权限边界缺口）。
-- 协议层（MCP/A2A）：`部分完成`（实现存在接线缺口）。
-- 测试：`基础集成测试已覆盖`，边界与协议关键路径覆盖不足。
+### 2. Sub-Agent + Long-term Interaction (v3.1)
+- **15-state status machine**: PENDING→QUEUED→SCHEDULED→RUNNING→PAUSED/TERMINAL + CANCELLING
+- **PauseReason (orthogonal)**: WAIT_PARENT_INPUT / WAIT_USER_INPUT / WAIT_EXTERNAL_EVENT / CHECKPOINT_PAUSE
+- **DelegationEvent channel**: append-only, sequence_no monotonic, AckLevel 4-tier (NONE→RECEIVED→PROJECTED→HANDLED)
+- **HITL chain**: sub-agent QUESTION → DelegationExecutor → HITLHandler → user → resume_subagent → mark_handled
+- **DelegationCapabilities**: A2A agents declare what they support; capability-aware result downgrade on mismatch
+- **CheckpointLevel**: NONE / COORDINATION_ONLY / PHASE_RESTARTABLE / STEP_RESUMABLE
 
-## 3. 当前一致性结论（必须知晓）
+### 3. Three Collection Strategies (v3.1)
+| Strategy | Behavior | Use When |
+|----------|----------|----------|
+| **SEQUENTIAL** | Pull 1 completed per call, decision window after each | Dependent tasks, need mid-course correction |
+| **BATCH_ALL** | Wait for all (asyncio.gather), return all at once | Independent tasks, only merged result matters |
+| **HYBRID** (default) | Pull all currently-completed (≥1) per call | Independent tasks, want early problem detection |
 
-以下问题在修复前，视为“架构未达标”：
+Config: `subagent.default_collection_strategy` / `collection_poll_interval_ms`
+LLM override: `spawn_agent(wait=false, collection_strategy="SEQUENTIAL", label="Agent A")`
+Collect: `check_spawn_result(batch_pull=true)` → `BatchResult{results, total_spawned, still_running, is_final_batch}`
 
-1. 子 Agent 权限与递归防护链路存在绕过风险（Critical）。
-2. Skill override 对真实模型调用参数未完全生效（Critical）。
-3. A2A 路由已注册但接线不完整，默认不可用（High）。
-4. CapabilityPolicy 未进入真实执行链（High）。
-5. ContextCompressor 未纳入主流程（Medium）。
-6. 运行异常路径清理不完整（Medium）。
+### 4. LLM Adapters (20 providers)
+Native: `openai` `anthropic` `google` | Fallback: `litellm`
+International: `openrouter` `together` `groq` `fireworks` `mistral` `perplexity`
+Chinese: `deepseek` `doubao` `qwen` `zhipu` `minimax` `siliconflow` `moonshot` `baichuan` `yi`
+Generic: `custom` (any OpenAI-compatible endpoint)
+All support multimodal (vision) via `ContentPart` → adapter-specific conversion.
 
-## 4. 开发优先级（固定顺序）
+## Boundary Rules
 
-1. 安全边界：子 Agent 最小权限、不可递归、能力上界必须真实生效。
-2. 运行一致性：Skill 生命周期、effective config、生效边界可验证。
-3. 协议可用性：MCP/A2A 接线必须端到端可执行。
-4. 上下文质量：压缩策略接入、统计与行为一致。
-5. 扩展体验：示例、CLI、文档补强。
+### execution_mode vs collection_strategy
+- `execution_mode="progressive"`: INTRA-iteration tool result streaming (single LLM turn)
+- `collection_strategy`: INTER-iteration spawn result batching (across LLM turns)
+- They coexist: LLM explicit `wait=false` enables collection_strategy even in progressive mode
 
-## 5. 强制约束（实施中必须满足）
+### Sub-agent boundaries
+- Sub-agents are delegation objects under parent run's control plane, NOT independent run systems
+- Parent LLM only sees DelegationSummary (Layer 2), never raw child sessions
+- HITL pending queue belongs to parent run control plane
+- cancel is cooperative (CANCELLING → CANCELLED), not instant
+- resume_token is a handle, not a full state snapshot; CheckpointLevel declares actual capability
 
-- 不允许“文档写了但调用链未接通”。
-- 不允许通过共享对象破坏隔离（尤其是 ToolExecutor / Memory / Skill 状态）。
-- 不允许让下层机制突破上层权限约束。
-- 高风险工具必须显式确认或有明确拒绝策略。
-- 子 Agent 返回给 LLM 仅允许摘要化结果，不返回完整内部 trace。
+## Testing
+```bash
+pip install -e ".[dev]"
+pytest tests/                     # 1358+ tests
+pytest tests/ -k "collection"     # Collection strategy tests (72)
+pytest tests/ -k "long_interaction"  # Long-term interaction tests (109)
+```
 
-## 6. 测试门槛（合并前）
-
-- 任何边界修复必须附带回归测试。
-- 涉及下列模块的改动，必须新增/更新集成测试：
-  - CapabilityPolicy + ScopedToolRegistry + hook 联合生效
-  - Skill override 的生效与 run 结束失效
-  - SubAgent 递归防护、配额、权限隔离
-  - A2A/MCP 注册、路由与执行
-- 若因环境无法执行测试，必须在交付说明中写明未验证项与风险。
-
-## 7. 变更与提交要求
-
-- 单次提交只做一个目标（如“修复子 Agent 权限链路”）。
-- 提交说明必须包含：修复点、影响范围、验证方式。
-- 禁止提交临时调试产物（如日志、缓存、`__pycache__`、临时脚本）。
-
-## 8. 交付给用户的输出格式
-
-- 先结论（是否达标），再问题清单（按严重度），最后给改动与验证。
-- 审查输出必须包含具体文件与行号。
-- 对未完成项必须给出：原因、阻塞条件、下一步。
-
-## 9. Definition of Done（本项目）
-
-满足以下条件才可标记“与架构文档一致”：
-
-1. 权限优先级链真实生效并有测试证明。
-2. Skill override 生命周期符合“仅当前 run”规则并有测试证明。
-3. SubAgent 默认最小权限且不可递归绕过。
-4. A2A/MCP 至少各有一条端到端通过路径。
-5. 关键数据流（run -> iteration -> tool -> session -> memory）与文档一致。
+## Config Examples
+```bash
+python -m agent_framework.main --config config/deepseek.json              # DeepSeek
+python -m agent_framework.main --config config/collection_sequential.json  # Mode A
+python -m agent_framework.main --config config/collection_batch.json       # Mode B
+python -m agent_framework.main --config config/collection_hybrid.json      # Mode C (default)
+```

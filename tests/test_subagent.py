@@ -523,7 +523,7 @@ class TestAsyncSpawn:
     @pytest.mark.asyncio
     async def test_delegation_executor_async_flow(self):
         """DelegationExecutor async spawn + collect produces DelegationSummary."""
-        from agent_framework.tools.delegation import DelegationExecutor
+        from agent_framework.subagent.delegation import DelegationExecutor
 
         mock_runtime = AsyncMock()
         mock_runtime.spawn_async = AsyncMock(return_value="sp_123")

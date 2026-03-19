@@ -24,7 +24,7 @@ from agent_framework.models.subagent import (ArtifactRef, DelegationErrorCode,
                                              SubAgentSuspendInfo,
                                              SubAgentSuspendReason,
                                              resolve_delegation_status)
-from agent_framework.tools.delegation_hooks import (
+from agent_framework.subagent.delegation_hooks import (
     _DelegationConfirmationDenied, apply_pre_delegation_hooks)
 
 if TYPE_CHECKING:

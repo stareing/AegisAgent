@@ -54,7 +54,7 @@ from agent_framework.models.session import SessionState
 from agent_framework.tools.catalog import GlobalToolCatalog
 from agent_framework.tools.confirmation import (AutoApproveConfirmationHandler,
                                                 CLIConfirmationHandler)
-from agent_framework.tools.delegation import DelegationExecutor
+from agent_framework.subagent.delegation import DelegationExecutor
 from agent_framework.tools.executor import ToolExecutor
 from agent_framework.tools.registry import ToolRegistry
 
@@ -166,7 +166,7 @@ class AgentFramework:
         # Interaction channel for long-term parent-child delegation (v3.1)
         from agent_framework.subagent.interaction_channel import \
             InMemoryInteractionChannel
-        from agent_framework.tools.hitl import QueueHITLHandler
+        from agent_framework.subagent.hitl import QueueHITLHandler
 
         self._interaction_channel = InMemoryInteractionChannel(
             max_events_per_spawn=self.config.long_interaction.max_delegation_events_per_subagent,

@@ -23,7 +23,7 @@ from agent_framework.tools.confirmation import (AutoApproveConfirmationHandler,
                                                 CLIConfirmationHandler)
 from agent_framework.tools.decorator import (_build_parameters_model,
                                              _extract_description, tool)
-from agent_framework.tools.delegation import DelegationExecutor
+from agent_framework.subagent.delegation import DelegationExecutor
 from agent_framework.tools.executor import ToolExecutor
 from agent_framework.tools.registry import (ScopedToolRegistry, ToolRegistry,
                                             _qualified_name)

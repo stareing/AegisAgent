@@ -348,7 +348,7 @@ class TestRuntimeNotificationChannel:
                                                      RuntimeNotificationType)
         from agent_framework.subagent.interaction_channel import \
             InMemoryInteractionChannel
-        from agent_framework.tools.notification_channel import \
+        from agent_framework.notification.channel import \
             RuntimeNotificationChannel
 
         ch = InMemoryInteractionChannel()
@@ -366,7 +366,7 @@ class TestRuntimeNotificationChannel:
         from agent_framework.models.subagent import DelegationEventType
         from agent_framework.subagent.interaction_channel import \
             InMemoryInteractionChannel
-        from agent_framework.tools.notification_channel import \
+        from agent_framework.notification.channel import \
             RuntimeNotificationChannel
 
         ch = InMemoryInteractionChannel()
@@ -383,7 +383,7 @@ class TestRuntimeNotificationChannel:
     def test_format_notifications(self):
         from agent_framework.models.subagent import (RuntimeNotification,
                                                      RuntimeNotificationType)
-        from agent_framework.tools.notification_channel import \
+        from agent_framework.notification.channel import \
             RuntimeNotificationChannel
 
         notifs = [
@@ -407,7 +407,7 @@ class TestRuntimeNotificationChannel:
         from agent_framework.models.subagent import (RuntimeNotification,
                                                      RuntimeNotificationType,
                                                      SubAgentStatus)
-        from agent_framework.tools.notification_channel import \
+        from agent_framework.notification.channel import \
             RuntimeNotificationChannel
 
         notifs = [
@@ -435,7 +435,7 @@ class TestRuntimeNotificationChannel:
         from agent_framework.models.subagent import DelegationEventType
         from agent_framework.subagent.interaction_channel import \
             InMemoryInteractionChannel
-        from agent_framework.tools.notification_channel import \
+        from agent_framework.notification.channel import \
             RuntimeNotificationChannel
 
         ch = InMemoryInteractionChannel()
@@ -478,7 +478,7 @@ class TestDelegationExecutorResume:
     def executor(self, mock_runtime):
         from agent_framework.subagent.interaction_channel import \
             InMemoryInteractionChannel
-        from agent_framework.tools.delegation import DelegationExecutor
+        from agent_framework.subagent.delegation import DelegationExecutor
         ch = InMemoryInteractionChannel()
         ex = DelegationExecutor(
             sub_agent_runtime=mock_runtime,
@@ -529,7 +529,7 @@ class TestDelegationExecutorResume:
                                                      SubAgentSuspendReason)
         from agent_framework.subagent.interaction_channel import \
             InMemoryInteractionChannel
-        from agent_framework.tools.delegation import DelegationExecutor
+        from agent_framework.subagent.delegation import DelegationExecutor
 
         mock_runtime.spawn = AsyncMock(return_value=MagicMock(
             spawn_id="sp1", success=False,
@@ -553,7 +553,7 @@ class TestDelegationExecutorResume:
 
     @pytest.mark.asyncio
     async def test_resume_no_runtime_returns_error(self):
-        from agent_framework.tools.delegation import DelegationExecutor
+        from agent_framework.subagent.delegation import DelegationExecutor
         ex = DelegationExecutor(sub_agent_runtime=None)
         result = await ex.resume_subagent("sp1", {}, None)
         assert not result.success
@@ -561,14 +561,14 @@ class TestDelegationExecutorResume:
 
     @pytest.mark.asyncio
     async def test_cancel_no_runtime_raises(self):
-        from agent_framework.tools.delegation import DelegationExecutor
+        from agent_framework.subagent.delegation import DelegationExecutor
         ex = DelegationExecutor(sub_agent_runtime=None)
         with pytest.raises(RuntimeError, match="not configured"):
             await ex.cancel_subagent("sp1")
 
     @pytest.mark.asyncio
     async def test_resume_a2a_no_adapter(self):
-        from agent_framework.tools.delegation import DelegationExecutor
+        from agent_framework.subagent.delegation import DelegationExecutor
         ex = DelegationExecutor()
         result = await ex.resume_a2a("remote_1", {"input": "test"})
         assert not result.success
@@ -585,7 +585,7 @@ class TestHITLHandlers:
     @pytest.mark.asyncio
     async def test_callback_handler(self):
         from agent_framework.models.subagent import HITLRequest, HITLResponse
-        from agent_framework.tools.hitl import CallbackHITLHandler
+        from agent_framework.subagent.hitl import CallbackHITLHandler
 
         async def auto_answer(req: HITLRequest) -> HITLResponse:
             return HITLResponse(
@@ -604,7 +604,7 @@ class TestHITLHandlers:
     @pytest.mark.asyncio
     async def test_queue_handler_flow(self):
         from agent_framework.models.subagent import HITLRequest, HITLResponse
-        from agent_framework.tools.hitl import QueueHITLHandler
+        from agent_framework.subagent.hitl import QueueHITLHandler
 
         handler = QueueHITLHandler(timeout_seconds=5.0)
 
@@ -626,7 +626,7 @@ class TestHITLHandlers:
     @pytest.mark.asyncio
     async def test_queue_handler_timeout(self):
         from agent_framework.models.subagent import HITLRequest
-        from agent_framework.tools.hitl import QueueHITLHandler
+        from agent_framework.subagent.hitl import QueueHITLHandler
 
         handler = QueueHITLHandler(timeout_seconds=0.1)
         resp = await handler.handle_hitl_request(HITLRequest(
@@ -637,7 +637,7 @@ class TestHITLHandlers:
     @pytest.mark.asyncio
     async def test_queue_submit_nonexistent_request(self):
         from agent_framework.models.subagent import HITLResponse
-        from agent_framework.tools.hitl import QueueHITLHandler
+        from agent_framework.subagent.hitl import QueueHITLHandler
 
         handler = QueueHITLHandler()
         ok = await handler.submit_response(HITLResponse(
@@ -648,7 +648,7 @@ class TestHITLHandlers:
     def test_event_to_hitl_request_question(self):
         from agent_framework.models.subagent import (DelegationEvent,
                                                      DelegationEventType)
-        from agent_framework.tools.hitl import event_to_hitl_request
+        from agent_framework.subagent.hitl import event_to_hitl_request
 
         event = DelegationEvent(
             event_id="e1", spawn_id="sp1", parent_run_id="run1",
@@ -668,7 +668,7 @@ class TestHITLHandlers:
     def test_event_to_hitl_request_confirmation(self):
         from agent_framework.models.subagent import (DelegationEvent,
                                                      DelegationEventType)
-        from agent_framework.tools.hitl import event_to_hitl_request
+        from agent_framework.subagent.hitl import event_to_hitl_request
 
         event = DelegationEvent(
             event_type=DelegationEventType.CONFIRMATION_REQUEST,
@@ -684,7 +684,7 @@ class TestHITLHandlers:
     def test_event_to_hitl_request_non_hitl_returns_none(self):
         from agent_framework.models.subagent import (DelegationEvent,
                                                      DelegationEventType)
-        from agent_framework.tools.hitl import event_to_hitl_request
+        from agent_framework.subagent.hitl import event_to_hitl_request
 
         event = DelegationEvent(event_type=DelegationEventType.PROGRESS)
         assert event_to_hitl_request(event) is None
@@ -692,8 +692,8 @@ class TestHITLHandlers:
     @pytest.mark.asyncio
     async def test_delegation_executor_forward_hitl(self):
         from agent_framework.models.subagent import HITLRequest, HITLResponse
-        from agent_framework.tools.delegation import DelegationExecutor
-        from agent_framework.tools.hitl import CallbackHITLHandler
+        from agent_framework.subagent.delegation import DelegationExecutor
+        from agent_framework.subagent.hitl import CallbackHITLHandler
 
         async def approve(req: HITLRequest) -> HITLResponse:
             return HITLResponse(request_id=req.request_id, response_type="confirm")
@@ -712,7 +712,7 @@ class TestHITLHandlers:
     @pytest.mark.asyncio
     async def test_delegation_executor_forward_hitl_no_handler(self):
         from agent_framework.models.subagent import HITLRequest
-        from agent_framework.tools.delegation import DelegationExecutor
+        from agent_framework.subagent.delegation import DelegationExecutor
 
         ex = DelegationExecutor()
         resp = await ex.forward_hitl_request(HITLRequest(
@@ -731,7 +731,7 @@ class TestDelegationSummarization:
     def test_summarize_success(self):
         from agent_framework.models.subagent import (SubAgentResult,
                                                      SubAgentStatus)
-        from agent_framework.tools.delegation import DelegationExecutor
+        from agent_framework.subagent.delegation import DelegationExecutor
         result = SubAgentResult(spawn_id="s1", success=True, final_answer="Done")
         summary = DelegationExecutor.summarize_result(result)
         assert summary.status == SubAgentStatus.COMPLETED.value
@@ -742,7 +742,7 @@ class TestDelegationSummarization:
                                                      SubAgentStatus,
                                                      SubAgentSuspendInfo,
                                                      SubAgentSuspendReason)
-        from agent_framework.tools.delegation import DelegationExecutor
+        from agent_framework.subagent.delegation import DelegationExecutor
         result = SubAgentResult(
             spawn_id="s1", success=False,
             suspend_info=SubAgentSuspendInfo(
@@ -759,7 +759,7 @@ class TestDelegationSummarization:
     def test_summarize_timeout(self):
         from agent_framework.models.subagent import (SubAgentResult,
                                                      SubAgentStatus)
-        from agent_framework.tools.delegation import DelegationExecutor
+        from agent_framework.subagent.delegation import DelegationExecutor
         result = SubAgentResult(spawn_id="s1", success=False, error="operation timed out")
         summary = DelegationExecutor.summarize_result(result)
         assert summary.status == SubAgentStatus.TIMEOUT.value
@@ -768,7 +768,7 @@ class TestDelegationSummarization:
     def test_summarize_failed(self):
         from agent_framework.models.subagent import (SubAgentResult,
                                                      SubAgentStatus)
-        from agent_framework.tools.delegation import DelegationExecutor
+        from agent_framework.subagent.delegation import DelegationExecutor
         result = SubAgentResult(spawn_id="s1", success=False, error="internal error")
         summary = DelegationExecutor.summarize_result(result)
         assert summary.status == SubAgentStatus.FAILED.value
@@ -921,7 +921,7 @@ class TestFaultInjection:
     @pytest.mark.asyncio
     async def test_resume_after_cancel(self):
         """Resume after cancel should still work at runtime level (runtime decides)."""
-        from agent_framework.tools.delegation import DelegationExecutor
+        from agent_framework.subagent.delegation import DelegationExecutor
 
         runtime = AsyncMock()
         runtime.resume = AsyncMock(return_value=MagicMock(
@@ -1247,7 +1247,7 @@ class TestA2ACapabilities:
         from agent_framework.models.subagent import (DelegationCapabilities,
                                                      SubAgentResult,
                                                      SubAgentStatus)
-        from agent_framework.tools.delegation import DelegationExecutor
+        from agent_framework.subagent.delegation import DelegationExecutor
         result = SubAgentResult(
             spawn_id="sp1", success=False,
             final_status=SubAgentStatus.WAITING_USER,
@@ -1262,7 +1262,7 @@ class TestA2ACapabilities:
         from agent_framework.models.subagent import (DelegationCapabilities,
                                                      SubAgentResult,
                                                      SubAgentStatus)
-        from agent_framework.tools.delegation import DelegationExecutor
+        from agent_framework.subagent.delegation import DelegationExecutor
         result = SubAgentResult(
             spawn_id="sp1", success=False,
             final_status=SubAgentStatus.WAITING_USER,
@@ -1276,7 +1276,7 @@ class TestA2ACapabilities:
         from agent_framework.models.subagent import (DelegationCapabilities,
                                                      SubAgentResult,
                                                      SubAgentStatus)
-        from agent_framework.tools.delegation import DelegationExecutor
+        from agent_framework.subagent.delegation import DelegationExecutor
         result = SubAgentResult(
             spawn_id="sp1", success=False,
             final_status=SubAgentStatus.SUSPENDED,
@@ -1296,7 +1296,7 @@ class TestAckLevelConsumptionChain:
                                                      DelegationEventType)
         from agent_framework.subagent.interaction_channel import \
             InMemoryInteractionChannel
-        from agent_framework.tools.notification_channel import \
+        from agent_framework.notification.channel import \
             RuntimeNotificationChannel
 
         ch = InMemoryInteractionChannel()
@@ -1320,7 +1320,7 @@ class TestAckLevelConsumptionChain:
                                                      DelegationEventType)
         from agent_framework.subagent.interaction_channel import \
             InMemoryInteractionChannel
-        from agent_framework.tools.notification_channel import \
+        from agent_framework.notification.channel import \
             RuntimeNotificationChannel
 
         ch = InMemoryInteractionChannel()
@@ -1340,7 +1340,7 @@ class TestAckLevelConsumptionChain:
                                                      DelegationEventType)
         from agent_framework.subagent.interaction_channel import \
             InMemoryInteractionChannel
-        from agent_framework.tools.notification_channel import \
+        from agent_framework.notification.channel import \
             RuntimeNotificationChannel
 
         ch = InMemoryInteractionChannel()
@@ -1361,7 +1361,7 @@ class TestAckLevelConsumptionChain:
                                                      DelegationEventType)
         from agent_framework.subagent.interaction_channel import \
             InMemoryInteractionChannel
-        from agent_framework.tools.notification_channel import \
+        from agent_framework.notification.channel import \
             RuntimeNotificationChannel
 
         ch = InMemoryInteractionChannel()
@@ -1397,7 +1397,7 @@ class TestHITLRunScoped:
     @pytest.mark.asyncio
     async def test_per_run_limit_enforced(self):
         from agent_framework.models.subagent import HITLRequest
-        from agent_framework.tools.hitl import QueueHITLHandler
+        from agent_framework.subagent.hitl import QueueHITLHandler
 
         handler = QueueHITLHandler(timeout_seconds=0.1, max_pending_per_run=2)
 
@@ -1432,7 +1432,7 @@ class TestHITLRunScoped:
     @pytest.mark.asyncio
     async def test_run_pending_count_tracking(self):
         from agent_framework.models.subagent import HITLRequest, HITLResponse
-        from agent_framework.tools.hitl import QueueHITLHandler
+        from agent_framework.subagent.hitl import QueueHITLHandler
 
         handler = QueueHITLHandler(timeout_seconds=5.0, max_pending_per_run=5)
 
@@ -1466,7 +1466,7 @@ class TestProductionWiring:
     def test_coordinator_has_notification_channel(self):
         """RunCoordinator must have RuntimeNotificationChannel, not just BackgroundNotifier."""
         from agent_framework.agent.coordinator import RunCoordinator
-        from agent_framework.tools.notification_channel import \
+        from agent_framework.notification.channel import \
             RuntimeNotificationChannel
         coord = RunCoordinator()
         assert hasattr(coord, '_notification_channel')
@@ -1491,7 +1491,7 @@ class TestProductionWiring:
     def test_framework_wires_hitl_handler(self):
         """AgentFramework.setup() must create and wire QueueHITLHandler."""
         from agent_framework.entry import AgentFramework
-        from agent_framework.tools.hitl import QueueHITLHandler
+        from agent_framework.subagent.hitl import QueueHITLHandler
         fw = AgentFramework()
         fw.setup()
         assert hasattr(fw, '_hitl_handler')
@@ -1582,7 +1582,7 @@ class TestProductionWiring:
         """DelegationExecutor must have _apply_capability_downgrade method."""
         import inspect
 
-        from agent_framework.tools.delegation import DelegationExecutor
+        from agent_framework.subagent.delegation import DelegationExecutor
         assert hasattr(DelegationExecutor, '_apply_capability_downgrade')
         source = inspect.getsource(DelegationExecutor._apply_capability_downgrade)
         assert 'WAITING_USER' in source
@@ -1608,8 +1608,8 @@ class TestE2EHITLChain:
                                                      HITLRequest, HITLResponse)
         from agent_framework.subagent.interaction_channel import \
             InMemoryInteractionChannel
-        from agent_framework.tools.delegation import DelegationExecutor
-        from agent_framework.tools.hitl import CallbackHITLHandler
+        from agent_framework.subagent.delegation import DelegationExecutor
+        from agent_framework.subagent.hitl import CallbackHITLHandler
 
         # 1. Setup: coordinator + interaction channel + delegation executor + HITL handler
         channel = InMemoryInteractionChannel()
@@ -1696,8 +1696,8 @@ class TestE2EHITLChain:
                                                      HITLRequest, HITLResponse)
         from agent_framework.subagent.interaction_channel import \
             InMemoryInteractionChannel
-        from agent_framework.tools.delegation import DelegationExecutor
-        from agent_framework.tools.hitl import CallbackHITLHandler
+        from agent_framework.subagent.delegation import DelegationExecutor
+        from agent_framework.subagent.hitl import CallbackHITLHandler
 
         channel = InMemoryInteractionChannel()
         coordinator = RunCoordinator()
@@ -1757,7 +1757,7 @@ class TestE2EHITLChain:
                                                      DelegationEventType)
         from agent_framework.subagent.interaction_channel import \
             InMemoryInteractionChannel
-        from agent_framework.tools.delegation import DelegationExecutor
+        from agent_framework.subagent.delegation import DelegationExecutor
 
         channel = InMemoryInteractionChannel()
         coordinator = RunCoordinator()
@@ -1796,7 +1796,7 @@ class TestE2EHITLChain:
                                                      DelegationEventType)
         from agent_framework.subagent.interaction_channel import \
             InMemoryInteractionChannel
-        from agent_framework.tools.delegation import DelegationExecutor
+        from agent_framework.subagent.delegation import DelegationExecutor
 
         channel = InMemoryInteractionChannel()
         coordinator = RunCoordinator()

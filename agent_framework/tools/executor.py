@@ -402,7 +402,7 @@ class ToolExecutor:
             skill_id=args.get("skill_id"),
         )
         # Unified delegation summary — same protocol as local subagent
-        from agent_framework.tools.delegation import DelegationExecutor
+        from agent_framework.subagent.delegation import DelegationExecutor
         return DelegationExecutor.summarize_result(result).model_dump()
 
     async def _route_subagent(self, entry: ToolEntry, args: dict) -> Any:
@@ -516,7 +516,7 @@ class ToolExecutor:
             iterations_used=result.iterations_used,
             answer_preview=(result.final_answer or result.error or "")[:120],
         )
-        from agent_framework.tools.delegation import DelegationExecutor
+        from agent_framework.subagent.delegation import DelegationExecutor
         return DelegationExecutor.summarize_result(result).model_dump()
 
     async def _subagent_collect(self, args: dict) -> dict:
@@ -537,7 +537,7 @@ class ToolExecutor:
                 if r is None:
                     # Return sentinel-marked dict so LeadCollector knows it's still running
                     return {"spawn_id": sid, "status": "RUNNING", "_still_running": True}
-                from agent_framework.tools.delegation import DelegationExecutor
+                from agent_framework.subagent.delegation import DelegationExecutor
                 return DelegationExecutor.summarize_result(r).model_dump()
 
             batch_result = await self._lead_collector.pull(_collect_fn)
@@ -549,7 +549,7 @@ class ToolExecutor:
         result = await self._delegation.collect_subagent_result(spawn_id, wait=wait)
         if result is None:
             return {"spawn_id": spawn_id, "status": "RUNNING"}
-        from agent_framework.tools.delegation import DelegationExecutor
+        from agent_framework.subagent.delegation import DelegationExecutor
         return DelegationExecutor.summarize_result(result).model_dump()
 
     def _ensure_lead_collector(self, strategy_str: str) -> None:

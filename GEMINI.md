@@ -17,90 +17,148 @@
 * **禁止魔法值**：重复使用的常量必须提取命名。
 * **配置外置**：可变参数放配置，不写死在逻辑中。
 * **副作用集中**：I/O、网络、数据库调用集中在边界层。
-* **注释解释原因**：注释优先说明“为什么”，不是重复“做什么”。
+* **注释解释原因**：注释优先说明"为什么"，不是重复"做什么"。
 * **兼容性优先**：公共接口变更必须考虑向后兼容。
 * **测试友好**：设计必须便于 mock、替换和单元测试。
 * **边界清晰**：跨层调用必须通过正式接口，禁止越层访问。
 * **一处定义**：同一规则、常量、协议只保留一个权威定义。
-* **记忆进度**：热跟新GEMINI.md
-* **代码审核**：将由codex、claude 排查代码是否和需求一致
-* 
+* **代码审核**：由 codex / claude 排查代码是否和需求一致
+
 ## Project Overview
-**Agent Framework** is an offline-first, highly extensible AI Agent runtime built with Python 3.11+. It is designed to be a robust foundation for building autonomous agents that can interact with various LLM providers, use local and remote tools (via MCP), and coordinate with other agents (via A2A).
+**Agent Framework** is an offline-first, extensible AI Agent runtime built with Python 3.11+ / pydantic v2. It provides a robust foundation for autonomous agents with multi-model LLM support, local and remote tool execution (MCP), agent-to-agent delegation (A2A), and long-term parent-child interaction.
 
-### Key Features:
-- **Layered Architecture:** Follows a strict Protocol/Base/Default pattern for all extensible modules.
-- **Multi-Model Support:** Built-in adapters for LiteLLM, OpenAI, Anthropic, and Google GenAI.
-- **Offline-First Memory:** Persistent memory storage using SQLite with automatic extraction and merging rules.
-- **Extensible Tooling:** Supports local Python tools (@tool decorator), Model Context Protocol (MCP) servers, and Agent-to-Agent (A2A) delegation.
-- **Sub-Agent Runtime:** Capabilities for spawning child agents with isolated or inherited memory scopes and resource quotas.
-- **Context Engineering:** Advanced context management with multi-slot building (System -> Skills -> Memories -> History -> Input) and compression.
-- **ReAct & Default Agents:** Built-in support for standard completion loops and ReAct (Reason+Act) strategies.
+### Key Features
+- **Layered Architecture**: Protocol → Base → Default three-layer pattern for all extensible modules
+- **20 LLM Adapters**: OpenAI, Anthropic, Google, OpenRouter, Together, Groq, Fireworks, Mistral, Perplexity, DeepSeek, Doubao, Qwen, Zhipu, MiniMax, SiliconFlow, Moonshot, Baichuan, Yi, LiteLLM, Custom
+- **Multimodal**: ContentPart model supports text/image_url/image_base64/audio/file across all adapters
+- **Offline-First Memory**: SQLite (default) + PostgreSQL + MongoDB + Neo4j backends
+- **Tool Ecosystem**: 12 built-in tools + MCP server integration + A2A remote agent delegation
+- **Sub-Agent Runtime**: Factory/Scheduler/Runtime with 15-state status machine, HITL, checkpointing
+- **Three Collection Strategies**: SEQUENTIAL (Mode A) / BATCH_ALL (Mode B) / HYBRID (Mode C) for multi-agent orchestration
+- **Context Engineering**: 5-slot builder (System → Skills → Memories → History → Input) + LLM compression
+- **Graph Engine**: LangGraph-compatible StateGraph/CompiledGraph with conditional routing and fan-out/fan-in
+- **1358+ Tests**: Comprehensive coverage across 35+ test modules
 
-### Architecture Layers (Bottom to Top):
-1.  **Infrastructure:** Config management, structured logging, event bus, and disk storage.
-2.  **Models:** Pydantic v2 models for messages, tools, agents, sessions, and memory.
-3.  **Adapters:** Unified interface for different LLM providers.
-4.  **Protocols:** Standardized interfaces for MCP and A2A communication.
-5.  **Memory:** SQLite-backed long-term memory management.
-6.  **Context:** Logic for assembling, compressing, and engineering LLM prompts.
-7.  **Tools:** Discovery, registration, and execution of local and remote capabilities.
-8.  **Agent:** Core runtime, agent loops, coordinators, and skill routing.
-9.  **Entry/CLI:** High-level facade and REPL interface for interacting with the framework.
-
----
+### Architecture Layers
+```
+agent_framework/
+├── agent/           # 15 files — Agent loop, coordinator, state, prompt templates
+├── adapters/model/  #  8 files — 20 LLM provider adapters + fallback chain
+├── context/         #  8 files — Context engineering, compression, prefix cache
+├── graph/           #  7 files — LangGraph-compatible compiled graph engine
+├── hooks/           # 12 files — Hook system + 3 builtin hooks
+├── infra/           #  5 files — Config, logging, event bus, telemetry
+├── memory/          #  8 files — Manager + 4 store backends
+├── models/          # 12 files — Pydantic v2 data models
+├── plugins/         #  7 files — Dynamic plugin system
+├── protocols/       #  6 files — Core protocols + MCP + A2A
+├── skills/          #  3 files — Skill loading from SKILL.md files
+├── subagent/        # 10 files — Sub-agent orchestration + delegation + HITL
+├── tools/           # 18 files — Execution engine + 12 builtin tools + shell
+├── entry.py         # AgentFramework facade (setup + run + run_stream)
+├── cli.py           # CLI entry: agent-cli, agent-interactive
+└── main.py          # Interactive REPL terminal
+```
 
 ## Building and Running
 
 ### Prerequisites
-- Python 3.11 or higher.
-- (Optional) API Keys for OpenAI, Anthropic, or Google GenAI (can be set via environment variables).
+- Python 3.11+
+- (Optional) API keys for LLM providers via environment variables
 
 ### Installation
 ```bash
-# Clone the repository and install in editable mode with dev dependencies
 pip install -e ".[all,dev]"
 ```
 
-### Running the Demo
-A comprehensive demo script is provided to showcase various framework features:
+### Running
 ```bash
-python run_demo.py
-```
+# Interactive mode (mock model, no API key needed)
+python -m agent_framework.main
 
-### Using the CLI
-The framework includes a REPL CLI for direct interaction:
-```bash
-# Start the agent CLI (requires configuration or environment variables)
-agent-cli
-```
+# With real model
+python -m agent_framework.main --config config/deepseek.json
 
-### Running Tests
-The project uses `pytest` for unit and integration testing:
-```bash
+# With specific collection strategy
+python -m agent_framework.main --config config/collection_sequential.json
+
+# Run tests
 pytest tests/
 ```
 
----
+## Core Execution Chain
+
+```
+User Input
+  → AgentFramework.run(task)
+    → RunCoordinator.run(agent, deps, task)
+      │
+      │  while not stop:
+      │    ① drain RuntimeNotificationChannel (bg tasks + delegation events)
+      │    ② prepare LLM request (context engineering)
+      │    ③ AgentLoop.execute_iteration() → LLM call → tool dispatch
+      │    ④ RunStateController.apply_iteration_result() (sole write port)
+      │    ⑤ track tasks + register background/spawn monitors
+      │    ⑥ check stop conditions (6-layer)
+      │
+    → AgentRunResult(final_answer, usage, artifacts)
+```
+
+**Key invariants:**
+- AgentLoop is zero-write (returns immutable IterationResult)
+- Only RunStateController modifies AgentState/SessionState
+- Tool results maintain input order via asyncio.gather
+
+## Sub-Agent Long-term Interaction (v3.1)
+
+### Status Machine (15 states)
+```
+PENDING → QUEUED → SCHEDULED → RUNNING
+RUNNING → WAITING_PARENT | WAITING_USER | SUSPENDED  (paused variants)
+PAUSED → RESUMING → RUNNING
+RUNNING → CANCELLING → CANCELLED  (cooperative cancel)
+RUNNING → COMPLETED | FAILED | TIMEOUT | DEGRADED  (terminal)
+```
+- PauseReason (orthogonal): WAIT_PARENT_INPUT / WAIT_USER_INPUT / WAIT_EXTERNAL_EVENT / CHECKPOINT_PAUSE
+- DegradationReason: READ_ONLY_FALLBACK / NO_INTERACTIVE_SUPPORT / QUOTA_LIMITED / TOOL_UNAVAILABLE
+
+### Event Channel
+- DelegationEvent: append-only, per-spawn_id sequence_no strictly monotonic
+- AckLevel: NONE → RECEIVED (on drain) → PROJECTED (on inject) → HANDLED (on HITL complete)
+- HITL chain: QUESTION event → HITLRequest → handler → HITLResponse → resume_subagent
+
+### Collection Strategies
+```json
+{"subagent": {"default_collection_strategy": "HYBRID", "collection_poll_interval_ms": 500}}
+```
+| Strategy | Behavior | Pull count |
+|----------|----------|------------|
+| SEQUENTIAL | 1 result per pull, decision window after each | N pulls for N agents |
+| BATCH_ALL | asyncio.gather all, return everything | 1 pull |
+| HYBRID | All currently-completed per pull (≥1) | 1~N pulls (adaptive) |
+
+### Boundary Rules
+- Sub-agents are delegation objects, not independent run systems
+- Parent only sees DelegationSummary, never raw child sessions
+- HITL pending queue belongs to parent run control plane
+- A2A agents must declare DelegationCapabilities; unsupported states are downgraded
+- execution_mode (intra-iteration) and collection_strategy (inter-iteration) coexist without conflict
 
 ## Development Conventions
 
 ### Coding Style
-- **Type Safety:** Use Python type hints for all public interfaces and internal logic.
-- **Pydantic v2:** All data models must inherit from `pydantic.BaseModel`.
-- **Async First:** I/O bound operations (LLM calls, tool execution, MCP/A2A) should be `async`.
-- **Structured Logging:** Use `structlog` for all logging; avoid standard `print()` in framework code.
+- **Type Safety**: Python type hints for all public interfaces
+- **Pydantic v2**: All data models inherit from `pydantic.BaseModel`
+- **Async First**: I/O-bound operations are `async`
+- **Structured Logging**: `structlog` for all logging; no `print()` in framework code
 
 ### Architectural Rules
-- **Layer Integrity:** Higher layers can call lower layers, but lower layers should not depend on higher ones. Use Protocols for abstraction.
-- **Surgical Changes:** Only modify what is necessary. Adhere to existing patterns (e.g., the Protocol/Base/Default pattern).
-- **Configuration:** Use `FrameworkConfig` (pydantic-settings) for all tunable parameters. Never hardcode magic values.
+- **Layer Integrity**: Higher layers call lower layers; use Protocols for abstraction
+- **Config-driven**: `FrameworkConfig` (pydantic-settings) for all tunable parameters
+- **Three-layer pattern**: Protocol → Base → Default for extensible modules
 
-### Testing Practices
-- **Integration Tests:** New features should be accompanied by integration tests in `tests/test_integration.py` using `MockModelAdapter`.
-- **Regression Testing:** Always run existing tests before submitting changes to ensure no regressions are introduced.
-
-### Tool Development
-- Use the `@tool` decorator for local functions.
-- Ensure tools are registered in the `GlobalToolCatalog` to be discoverable by agents.
-- Categorize tools (e.g., "system", "network") for fine-grained permission control via `CapabilityPolicy`.
+### Testing
+- 1358+ tests across 35+ modules
+- Matrix tests for collection strategies (72 tests across 3×8 dimensions)
+- Architecture guard tests verify invariants (status transitions, error mappings)
+- Integration tests use MockModelAdapter (no API keys needed)

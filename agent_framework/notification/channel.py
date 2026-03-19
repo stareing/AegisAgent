@@ -23,7 +23,7 @@ from agent_framework.models.subagent import (AckLevel, DelegationEventSummary,
                                              RuntimeNotification,
                                              RuntimeNotificationType,
                                              SubAgentStatus)
-from agent_framework.tools.background import (BackgroundNotification,
+from agent_framework.notification.background import (BackgroundNotification,
                                               BackgroundNotifier)
 
 if TYPE_CHECKING:

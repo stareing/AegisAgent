@@ -1813,7 +1813,7 @@ class TestV264RedLines:
         """DelegationSummary.status must use SubAgentStatus values (§44)."""
         from agent_framework.models.subagent import (SubAgentResult,
                                                      SubAgentStatus)
-        from agent_framework.tools.delegation import DelegationExecutor
+        from agent_framework.subagent.delegation import DelegationExecutor
         result = SubAgentResult(spawn_id="s1", success=True, final_answer="ok")
         summary = DelegationExecutor.summarize_result(result)
         assert summary.status == SubAgentStatus.COMPLETED.value
