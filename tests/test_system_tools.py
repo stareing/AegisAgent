@@ -50,8 +50,10 @@ class TestToolMetadata:
             assert meta.namespace == SYSTEM_NAMESPACE
 
     def test_shell_tools_category(self) -> None:
-        from agent_framework.tools.builtin.shell import bash_exec, bash_output, kill_shell
-        for fn in (bash_exec, bash_output, kill_shell):
+        from agent_framework.tools.builtin.shell import (
+            bash_exec, bash_output, bash_stop, task_stop, kill_shell,
+        )
+        for fn in (bash_exec, bash_output, bash_stop, task_stop, kill_shell):
             meta = self._get_meta(fn)
             assert meta.category == ToolCategory.SYSTEM
             assert "shell" in meta.tags
@@ -439,6 +441,8 @@ class TestRegistration:
         count = register_all_builtins(catalog, shell_enabled=True)
         assert self._has(catalog, "bash_exec")
         assert self._has(catalog, "bash_output")
+        assert self._has(catalog, "bash_stop")
+        assert self._has(catalog, "task_stop")
         assert self._has(catalog, "kill_shell")
 
     def test_register_without_web_search(self) -> None:

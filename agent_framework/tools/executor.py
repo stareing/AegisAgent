@@ -349,6 +349,8 @@ class ToolExecutor:
                     args.get("subject", ""),
                     args.get("description", ""),
                     args.get("blocked_by"),
+                    args.get("active_form", ""),
+                    args.get("metadata"),
                 )
             elif name == "task_update":
                 return mgr.update(
@@ -356,9 +358,11 @@ class ToolExecutor:
                     status=args.get("status"),
                     subject=args.get("subject"),
                     description=args.get("description"),
+                    active_form=args.get("active_form"),
                     add_blocked_by=args.get("add_blocked_by"),
                     add_blocks=args.get("add_blocks"),
                     owner=args.get("owner"),
+                    metadata=args.get("metadata"),
                 )
             elif name == "task_list":
                 return mgr.list_all()

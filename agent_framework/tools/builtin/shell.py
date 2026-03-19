@@ -26,7 +26,7 @@ _ENV_WHITELIST = ENV_WHITELIST
 _ShellSessionManager = ShellSessionManager
 
 __all__ = [
-    "bash_exec", "bash_output", "kill_shell",
+    "bash_exec", "bash_output", "bash_stop", "task_stop", "kill_shell",
     "ShellSessionManager", "build_safe_env", "check_banned",
     "ENV_WHITELIST", "DEFAULT_TIMEOUT",
 ]
@@ -78,26 +78,95 @@ async def bash_exec(
 
 @tool(
     name="bash_output",
-    description="Check the output of a background bash command by task_id.",
+    description=(
+        "Get the output of a background bash command by task_id. "
+        "Set block=True to wait for completion, or block=False for non-blocking check."
+    ),
     category="system",
     require_confirm=False,
     tags=["system", "shell"],
     namespace=SYSTEM_NAMESPACE,
 )
-def bash_output(task_id: str) -> dict:
+async def bash_output(
+    task_id: str,
+    block: bool = False,
+    timeout_ms: int = 30000,
+) -> dict:
     """Get the result of a background bash command.
+
+    Args:
+        task_id: The task ID returned by bash_exec with run_in_background=True.
+        block: If True, wait for the task to complete before returning.
+        timeout_ms: Max wait time in milliseconds when block=True (default 30s).
+
+    Returns:
+        The command result if finished, or status 'running' if still executing.
+    """
+    import asyncio
+
+    session = ShellSessionManager.get("default")
+
+    if block:
+        # Poll until done or timeout
+        deadline = asyncio.get_event_loop().time() + timeout_ms / 1000
+        while asyncio.get_event_loop().time() < deadline:
+            result = session.get_background_result(task_id)
+            if result is not None:
+                return result
+            await asyncio.sleep(0.2)
+        # Timeout — return current status
+        return {"status": "running", "task_id": task_id, "timed_out": True}
+
+    result = session.get_background_result(task_id)
+    if result is None:
+        return {"status": "running", "task_id": task_id}
+    return result
+
+
+@tool(
+    name="bash_stop",
+    description="Stop a single background bash task by its task_id.",
+    category="system",
+    require_confirm=False,
+    tags=["system", "shell"],
+    namespace=SYSTEM_NAMESPACE,
+)
+def bash_stop(task_id: str) -> dict:
+    """Stop a specific background task.
 
     Args:
         task_id: The task ID returned by bash_exec with run_in_background=True.
 
     Returns:
-        The command result if finished, or status 'running' if still executing.
+        The task result if already completed, or a cancelled confirmation.
     """
     session = ShellSessionManager.get("default")
-    result = session.get_background_result(task_id)
-    if result is None:
-        return {"status": "running", "task_id": task_id}
-    return result
+    return session.stop_background_task(task_id)
+
+
+@tool(
+    name="task_stop",
+    description=(
+        "Stop a single background shell task by its task_id. "
+        "This is a compatibility alias for bash_stop. "
+        "Use only with task IDs returned by bash_exec(run_in_background=True)."
+    ),
+    category="system",
+    require_confirm=False,
+    tags=["system", "shell", "background", "task"],
+    namespace=SYSTEM_NAMESPACE,
+)
+def task_stop(task_id: str) -> dict:
+    """Compatibility alias for stopping one background shell task.
+
+    Args:
+        task_id: The background task ID returned by bash_exec with
+            run_in_background=True.
+
+    Returns:
+        The task result if already completed, or a cancelled confirmation.
+    """
+    return bash_stop(task_id)
 
 
 @tool(

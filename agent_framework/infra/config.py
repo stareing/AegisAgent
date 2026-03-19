@@ -80,6 +80,15 @@ class ToolConfig(BaseModel):
     shell_enabled: bool = False  # High-risk: must be explicitly enabled
 
 
+class TodoConfig(BaseModel):
+    """Task/Todo system configuration (PRD §12)."""
+
+    enabled: bool = True
+    max_items: int = 20
+    reminder_threshold_rounds: int = 3
+    inject_reminder: bool = True
+
+
 class SubAgentConfig(BaseModel):
     """Sub-agent configuration.
 
@@ -179,6 +188,7 @@ class FrameworkConfig(BaseSettings):
     context: ContextConfig = Field(default_factory=ContextConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     tools: ToolConfig = Field(default_factory=ToolConfig)
+    todo: TodoConfig = Field(default_factory=TodoConfig)
     subagent: SubAgentConfig = Field(default_factory=SubAgentConfig)
     skills: SkillsConfig = Field(default_factory=SkillsConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)

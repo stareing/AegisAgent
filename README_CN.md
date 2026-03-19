@@ -50,6 +50,38 @@ python -m agent_framework.main --config config/deepseek.json
 - 确认处理器（自动放行或 CLI 交互确认）
 - 能力策略白名单交集语义（只能收窄，不能扩权）
 
+#### 持久任务图 vs 后台任务
+
+框架里有两套不同的 task 概念：
+
+- **持久任务图**：`task_create`、`task_update`、`task_list`、`task_get`
+  - 落盘到 `.tasks/tasks.json`
+  - 支持 `active_form`、`metadata`、依赖、`owner`、`deleted` 状态
+  - 适合多步规划与进度跟踪
+- **后台 shell 任务**：`bash_exec(..., run_in_background=True)`、`bash_output`、`bash_stop`、`task_stop`
+  - `task_stop(task_id)` 是 `bash_stop(task_id)` 的兼容别名
+  - 只接受 `bash_exec(run_in_background=True)` 返回的字符串 `task_id`
+  - 不会修改持久任务图
+
+示例：
+
+```python
+# 持久任务图
+task = task_create(
+    subject="重构认证流程",
+    description="拆分校验器、会话服务和测试",
+    active_form="正在重构认证流程",
+    metadata={"priority": "p1"},
+)
+task_update(task_id=1, status="in_progress")
+task_update(task_id=1, status="completed")
+
+# 后台 shell 任务
+bg = await bash_exec("pytest -q", run_in_background=True)
+await bash_output(bg["task_id"], block=True, timeout_ms=30_000)
+task_stop(bg["task_id"])
+```
+
 ### 上下文工程（5 槽模型）
 
 | 槽位 | 内容 | 预算 |

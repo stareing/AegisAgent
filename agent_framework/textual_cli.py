@@ -312,6 +312,14 @@ class AegisAgentApp(App[None]):
         padding: 0 1;
     }}
 
+    #active-stream {{
+        margin: 0 1;
+        padding: 0 1;
+        background: {_BG_PANEL};
+        color: {_FG};
+        height: auto;
+    }}
+
     #busy-line {{
         height: 1;
         margin: 0 1;
@@ -356,6 +364,7 @@ class AegisAgentApp(App[None]):
         self._prompt: Input | None = None
         self._busy_line: Static | None = None
         self._follow_output = True
+        self._active_stream: Static | None = None
         self._line_buffer: str = ""
         self._text_buffer: list[str] = []
         self._pending_updates: list[tuple[str, bool]] = []
@@ -371,6 +380,7 @@ class AegisAgentApp(App[None]):
             auto_scroll=True,
             max_lines=_MAX_CHAT_LINES,
         )
+        yield Static("", id="active-stream")
         yield Static("", id="busy-line")
         with Horizontal(id="input-bar"):
             yield Input(placeholder="Ask anything...  /=cmds  ^P=palette  ^L=clear  ^N=new  F6=chat  Esc=input  F10=quit", id="prompt")
@@ -384,6 +394,7 @@ class AegisAgentApp(App[None]):
         self._project_id = Path.cwd().name
         self._header = self.query_one("#hdr", AegisHeader)
         self._chat = self.query_one("#chat", RichLog)
+        self._active_stream = self.query_one("#active-stream", Static)
         self._prompt = self.query_one("#prompt", Input)
         self._busy_line = self.query_one("#busy-line", Static)
         self._prompt.focus()
@@ -487,9 +498,6 @@ class AegisAgentApp(App[None]):
                 self._fw, self._mock, self._state, text,
                 cancel_event=cancel_event,
             ):
-                # Yield control to the main event loop to ensure UI repaints
-                await asyncio.sleep(0)
-                
                 if event.type == StreamEventType.TOKEN:
                     token_text = event.data.get("text", "")
                     if token_text:
@@ -728,7 +736,13 @@ class AegisAgentApp(App[None]):
             self.set_timer(0.04, self._flush_updates)
 
     def _flush_updates(self) -> None:
-        """Batch-write buffered updates to RichLog — O(1) per write, no document rebuild."""
+        """Batch-write buffered updates to RichLog and stream active line.
+
+        Completed lines (containing \\n) go to the permanent RichLog.
+        The trailing partial line is rendered in real-time via #active-stream,
+        eliminating the visual freeze when models output long paragraphs
+        without newlines.
+        """
         self._flush_pending = False
         if not self._pending_updates or self._chat is None:
             return
@@ -743,23 +757,21 @@ class AegisAgentApp(App[None]):
             else:
                 self._line_buffer += "\n" + text
 
-        # Split completed lines and flush them
-        if "\n" not in self._line_buffer:
-            return  # All content is still partial — wait for next flush
+        # Split completed lines and flush them to RichLog
+        if "\n" in self._line_buffer:
+            parts = self._line_buffer.split("\n")
+            # Last segment is the incomplete line — keep in buffer
+            self._line_buffer = parts[-1]
+            completed_lines = parts[:-1]
 
-        parts = self._line_buffer.split("\n")
-        # Last segment is the incomplete line — keep in buffer
-        self._line_buffer = parts[-1]
-        completed_lines = parts[:-1]
+            block = "\n".join(completed_lines)
+            if block:
+                self._text_buffer.append(block)
+                self._chat.write(block, scroll_end=self._follow_output)
 
-        if not completed_lines:
-            return
-
-        # Write completed lines as a single block (one RichLog.write = one render)
-        block = "\n".join(completed_lines)
-        if block:
-            self._text_buffer.append(block)
-            self._chat.write(block, scroll_end=self._follow_output)
+        # Real-time display of the partial line in #active-stream
+        if self._active_stream is not None:
+            self._active_stream.update(self._line_buffer)
 
     def _flush_line_buffer(self) -> None:
         """Force-flush any remaining partial line (call at end of agent turn)."""
@@ -767,6 +779,9 @@ class AegisAgentApp(App[None]):
             self._text_buffer.append(self._line_buffer)
             self._chat.write(self._line_buffer, scroll_end=self._follow_output)
             self._line_buffer = ""
+        # Clear the real-time stream display
+        if self._active_stream is not None:
+            self._active_stream.update("")
 
     def _append_chat_block(self, lines: list[str]) -> None:
         normalized_lines = [line.replace("\r\n", "\n").replace("\r", "\n") for line in lines]
@@ -778,6 +793,8 @@ class AegisAgentApp(App[None]):
         self._line_buffer = ""
         self._text_buffer.clear()
         self._set_follow_output(True)
+        if self._active_stream is not None:
+            self._active_stream.update("")
 
     def _show_status(self, message: str, timeout: float = 2.0) -> None:
         if self._busy:

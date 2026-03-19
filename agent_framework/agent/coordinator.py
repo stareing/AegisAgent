@@ -16,6 +16,7 @@ from agent_framework.hooks.payloads import (
     artifact_finalize_payload,
 )
 from agent_framework.agent.capability_policy import apply_capability_policy
+from agent_framework.tools.background import BackgroundNotifier
 from agent_framework.agent.commit_sequencer import CommitSequencer
 from agent_framework.agent.loop import AgentLoop, AgentLoopDeps
 from agent_framework.agent.run_policy import RunPolicyResolver
@@ -110,6 +111,9 @@ class RunCoordinator:
         self._cached_tools_schema: list[dict] | None = None
         # Dispatcher for hook dispatch (created per-run from deps.hook_executor)
         self._dispatcher: HookDispatchService | None = None
+        # Background task auto-notification (s08) — instance-level, survives across runs
+        # so tasks that outlive one run are still drained in the next.
+        self._bg_notifier = BackgroundNotifier()
 
     def _build_user_message(
         self,
@@ -297,6 +301,9 @@ class RunCoordinator:
                     )
                     break
 
+                # Drain background task notifications before LLM call (s08)
+                self._drain_background_notifications(session_state)
+
                 # Prepare LLM request
                 # Give executor a fresh session snapshot so spawn can build context seed.
                 if hasattr(deps.tool_executor, "set_current_session_messages"):
@@ -363,6 +370,8 @@ class RunCoordinator:
 
                 # Track task tool calls for reminder injection
                 self._track_todo_round(deps, iteration_result)
+                # Register any new background tasks from this iteration (s08)
+                self._register_background_tasks(iteration_result)
 
                 # Check stop (returns StopDecision, not bare bool)
                 stop_decision = agent.should_stop(iteration_result, agent_state)
@@ -374,6 +383,8 @@ class RunCoordinator:
                     break
 
             # Post-run
+            # NOTE: Do NOT clear _bg_notifier here — tasks may outlive this run.
+            # Pending background tasks are drained at the start of the next run.
             self._state_ctrl.mark_finished(agent_state)
             commit_decision = deps.memory_manager.record_turn(
                 task, final_answer, agent_state.iteration_history
@@ -563,6 +574,8 @@ class RunCoordinator:
         )
 
         self._cached_tools_schema = None
+        # NOTE: Do NOT recreate _bg_notifier here — it's instance-level,
+        # so background tasks from previous runs are still tracked.
         if hasattr(deps.context_engineer, "reset_compressor"):
             deps.context_engineer.reset_compressor()
 
@@ -635,6 +648,9 @@ class RunCoordinator:
                         message="Run cancelled by external signal",
                     )
                     break
+
+                # Drain background task notifications before LLM call (s08)
+                self._drain_background_notifications(session_state)
 
                 if hasattr(deps.tool_executor, "set_current_session_messages"):
                     maybe = deps.tool_executor.set_current_session_messages(
@@ -743,6 +759,8 @@ class RunCoordinator:
 
                 # Track task tool calls for reminder injection
                 self._track_todo_round(deps, iteration_result)
+                # Register any new background tasks from this iteration (s08)
+                self._register_background_tasks(iteration_result)
 
                 stop_decision = agent.should_stop(iteration_result, agent_state)
                 if stop_decision.should_stop:
@@ -752,6 +770,8 @@ class RunCoordinator:
                     break
 
             # Post-run
+            # NOTE: Do NOT clear _bg_notifier here — tasks may outlive this run.
+            # Pending background tasks are drained at the start of the next run.
             self._state_ctrl.mark_finished(agent_state)
             deps.memory_manager.record_turn(
                 task, final_answer, agent_state.iteration_history
@@ -877,18 +897,51 @@ class RunCoordinator:
         iteration_result: IterationResult,
     ) -> None:
         """Check if this iteration called any task tool and update the TaskManager."""
-        try:
-            todo_svc = getattr(deps.tool_executor, "_todo_service", None)
-            run_id = getattr(deps.tool_executor, "_current_run_id", "")
-            if todo_svc is None or not run_id:
-                return
-            wrote_task = any(
-                tr.tool_name in RunCoordinator._TASK_WRITE_TOOLS and tr.success
-                for tr in iteration_result.tool_results
-            )
-            todo_svc.get(run_id).mark_round(wrote_task)
-        except Exception:
-            pass  # Graceful degradation when executor is mocked
+        from agent_framework.tools.todo import TaskService
+        executor = deps.tool_executor
+        todo_svc = getattr(executor, "_todo_service", None)
+        if not isinstance(todo_svc, TaskService):
+            return
+        run_id = getattr(executor, "_current_run_id", "")
+        if not run_id:
+            return
+        wrote_task = any(
+            tr.tool_name in RunCoordinator._TASK_WRITE_TOOLS and tr.success
+            for tr in iteration_result.tool_results
+        )
+        todo_svc.get(run_id).mark_round(wrote_task)
+
+    # ------------------------------------------------------------------
+    # Background task auto-notification (s08)
+    # ------------------------------------------------------------------
+
+    def _register_background_tasks(self, iteration_result: IterationResult) -> None:
+        """Detect bash_exec(run_in_background=True) results and register task_ids."""
+        for tr in iteration_result.tool_results:
+            if tr.tool_name == "bash_exec" and tr.success:
+                output = tr.output
+                if isinstance(output, dict) and output.get("status") == "running":
+                    task_id = output.get("task_id", "")
+                    if task_id:
+                        self._bg_notifier.register(task_id)
+
+    def _drain_background_notifications(self, session_state: SessionState) -> None:
+        """Drain completed background tasks and inject as messages."""
+        if not self._bg_notifier.has_pending:
+            return
+        notifications = self._bg_notifier.drain()
+        if not notifications:
+            return
+        text = BackgroundNotifier.format_notifications(notifications)
+        # Inject as user message + assistant ack (standard message pair)
+        self._state_ctrl.append_user_message(
+            session_state,
+            Message(role="user", content=text),
+        )
+        self._state_ctrl.append_projected_messages(
+            session_state,
+            [Message(role="assistant", content="Noted background results.")],
+        )
 
     @staticmethod
     def _collect_runtime_info(
@@ -970,12 +1023,13 @@ class RunCoordinator:
                 "implementation files and distinguish verified facts from inference."
             )
 
-        # Todo state injection — run-scoped via TodoService
+        # Task state injection — run-scoped via TaskService
         if deps:
-            try:
-                todo_svc = getattr(deps.tool_executor, "_todo_service", None)
+            from agent_framework.tools.todo import TaskService
+            todo_svc = getattr(deps.tool_executor, "_todo_service", None)
+            if isinstance(todo_svc, TaskService):
                 run_id = getattr(deps.tool_executor, "_current_run_id", "")
-                if todo_svc is not None and run_id:
+                if run_id:
                     mgr = todo_svc.get(run_id)
                     summary = mgr.summary_text()
                     if summary:
@@ -986,8 +1040,6 @@ class RunCoordinator:
                             "Consider using task_update to mark progress, "
                             "complete finished tasks, or add new tasks with task_create."
                         )
-            except Exception:
-                pass  # Graceful degradation when executor is mocked
 
         return info
 

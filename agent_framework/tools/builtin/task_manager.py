@@ -2,7 +2,7 @@
 
 Four tools for the persistent task DAG:
 - ``task_create``: Create a task with optional dependencies
-- ``task_update``: Update status / add dependencies / assign owner
+- ``task_update``: Update status / add dependencies / assign owner / merge metadata
 - ``task_list``:   List all tasks with ready/blocked/completed summary
 - ``task_get``:    Get a single task by ID
 
@@ -12,6 +12,8 @@ These functions serve as schema source and standalone fallback.
 
 from __future__ import annotations
 
+from typing import Any
+
 from agent_framework.tools.decorator import tool
 from agent_framework.tools.schemas.builtin_args import SYSTEM_NAMESPACE
 
@@ -20,8 +22,9 @@ from agent_framework.tools.schemas.builtin_args import SYSTEM_NAMESPACE
     name="task_create",
     description=(
         "Create a new task in the persistent task graph. "
-        "Use for multi-step work that benefits from structured tracking. "
-        "Do NOT use for simple questions or single-action requests. "
+        "USE PROACTIVELY when: the task requires 3+ steps, "
+        "the user asks for a plan/todo, or multiple tasks are given. "
+        "Mark in_progress before starting, completed when done. "
         "Supports dependencies via blocked_by to define execution order."
     ),
     category="control",
@@ -33,27 +36,35 @@ def task_create(
     subject: str,
     description: str = "",
     blocked_by: list[int] | None = None,
+    active_form: str = "",
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     """Create a new task.
 
     Args:
-        subject: Short task title.
-        description: Detailed task description.
-        blocked_by: List of task IDs that must complete before this task can start.
+        subject: Short task title (imperative form, e.g. "Fix auth bug").
+        description: Detailed description with context and acceptance criteria.
+        blocked_by: Task IDs that must complete before this task can start.
+        active_form: Present continuous form shown when in_progress
+            (e.g. "Fixing auth bug"). Falls back to subject if empty.
+        metadata: Arbitrary key-value pairs to attach to the task.
 
     Returns:
         JSON string of the created task.
     """
     from agent_framework.tools.todo import TaskManager
     mgr = TaskManager()
-    return mgr.create(subject, description, blocked_by)
+    return mgr.create(subject, description, blocked_by, active_form, metadata)
 
 
 @tool(
     name="task_update",
     description=(
-        "Update an existing task: change status, add dependencies, or assign owner. "
-        "Setting status to 'completed' auto-unblocks downstream dependent tasks."
+        "Update a task's status or details. "
+        "MUST set to 'in_progress' before starting work on a task, "
+        "and 'completed' immediately after finishing. "
+        "Setting 'completed' auto-unblocks dependent tasks. "
+        "Setting 'deleted' removes the task permanently."
     ),
     category="control",
     require_confirm=False,
@@ -65,37 +76,42 @@ def task_update(
     status: str | None = None,
     subject: str | None = None,
     description: str | None = None,
+    active_form: str | None = None,
     add_blocked_by: list[int] | None = None,
     add_blocks: list[int] | None = None,
     owner: str | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     """Update a task.
 
     Args:
         task_id: ID of the task to update.
-        status: New status ('pending', 'in_progress', 'completed').
+        status: New status ('pending', 'in_progress', 'completed', 'deleted').
         subject: New subject text.
         description: New description.
+        active_form: Present continuous form for spinner display.
         add_blocked_by: Task IDs to add as upstream dependencies.
         add_blocks: Task IDs to add as downstream dependents.
         owner: Agent/user who owns this task.
+        metadata: Keys to merge into metadata. Set a key to null to delete it.
 
     Returns:
-        JSON string of the updated task.
+        JSON string of the updated task, or {"id":N,"status":"deleted"}.
     """
     from agent_framework.tools.todo import TaskManager
     mgr = TaskManager()
     return mgr.update(
         task_id, status=status, subject=subject, description=description,
-        add_blocked_by=add_blocked_by, add_blocks=add_blocks, owner=owner,
+        active_form=active_form, add_blocked_by=add_blocked_by,
+        add_blocks=add_blocks, owner=owner, metadata=metadata,
     )
 
 
 @tool(
     name="task_list",
     description=(
-        "List all tasks with dependency graph and status summary. "
-        "Shows ready (can start now), blocked (waiting), in-progress, and completed tasks."
+        "List all tasks with status summary. "
+        "Call after completing a task to find the next one to work on."
     ),
     category="control",
     require_confirm=False,

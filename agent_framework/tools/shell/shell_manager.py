@@ -84,6 +84,20 @@ def truncate_output(text: str) -> str:
     return text
 
 
+def _kill_proc(proc: asyncio.subprocess.Process | None) -> None:
+    """Kill a subprocess and its entire process group. Safe to call with None."""
+    if proc is None:
+        return
+    try:
+        if proc.pid:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, OSError):
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+
+
 class BashSession:
     """Manages a persistent bash subprocess.
 
@@ -96,6 +110,7 @@ class BashSession:
         self._lock = asyncio.Lock()
         self._background_tasks: dict[str, asyncio.Task[dict]] = {}
         self._background_results: dict[str, dict] = {}
+        self._background_pids: dict[str, int] = {}  # task_id → OS pid
 
     async def _ensure_started(self) -> asyncio.subprocess.Process:
         if self._proc is None or self._proc.returncode is not None:
@@ -206,15 +221,63 @@ class BashSession:
             }
 
     async def execute_background(self, command: str, timeout_seconds: int) -> str:
-        """Launch a command in the background and return a task ID."""
+        """Launch a command as an independent subprocess (not through the session lock).
+
+        Unlike execute(), this spawns a separate process so multiple background
+        tasks truly run in parallel without blocking the persistent session.
+        """
         task_id = uuid.uuid4().hex[:12]
 
-        async def _run() -> dict:
-            result = await self.execute(command, timeout_seconds)
+        async def _run_independent() -> dict:
+            proc = None
+            try:
+                proc = await asyncio.create_subprocess_shell(
+                    command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                    env=build_safe_env(),
+                    start_new_session=True,
+                )
+                if proc.pid:
+                    self._background_pids[task_id] = proc.pid
+                try:
+                    stdout, _ = await asyncio.wait_for(
+                        proc.communicate(), timeout=timeout_seconds,
+                    )
+                    output = stdout.decode(errors="replace") if stdout else ""
+                    result = {
+                        "output": truncate_output(output),
+                        "exit_code": proc.returncode or 0,
+                        "timed_out": False,
+                    }
+                except asyncio.TimeoutError:
+                    _kill_proc(proc)
+                    result = {
+                        "output": f"Error: Timeout ({timeout_seconds}s)",
+                        "exit_code": -1,
+                        "timed_out": True,
+                    }
+            except asyncio.CancelledError:
+                # task.cancel() from kill_shell — must kill the OS process
+                _kill_proc(proc)
+                result = {
+                    "output": "Cancelled by kill_shell",
+                    "exit_code": -1,
+                    "timed_out": False,
+                    "cancelled": True,
+                }
+                self._background_results[task_id] = result
+                raise  # re-raise so asyncio marks the task as cancelled
+            except Exception as exc:
+                result = {
+                    "output": f"Error: {exc}",
+                    "exit_code": -1,
+                    "timed_out": False,
+                }
             self._background_results[task_id] = result
             return result
 
-        t = asyncio.create_task(_run())
+        t = asyncio.create_task(_run_independent())
         self._background_tasks[task_id] = t
         return task_id
 
@@ -232,14 +295,60 @@ class BashSession:
             return self._background_results.pop(task_id, task.result())
         return None
 
+    def stop_background_task(self, task_id: str) -> dict:
+        """Stop a single background task by its ID.
+
+        Cancels the asyncio task (which triggers SIGKILL on the subprocess
+        via the CancelledError handler in _run_independent).
+
+        Returns the task result if already completed, or a cancelled status.
+        """
+        # Already completed?
+        if task_id in self._background_results:
+            result = self._background_results.pop(task_id)
+            self._background_tasks.pop(task_id, None)
+            self._background_pids.pop(task_id, None)
+            return result
+
+        task = self._background_tasks.get(task_id)
+        if task is None:
+            raise ValueError(f"Unknown background task: {task_id}")
+
+        if task.done():
+            self._background_tasks.pop(task_id, None)
+            self._background_pids.pop(task_id, None)
+            return self._background_results.pop(task_id, task.result())
+
+        # Cancel the running task — triggers SIGKILL in CancelledError handler
+        task.cancel()
+        self._background_tasks.pop(task_id, None)
+        self._background_pids.pop(task_id, None)
+        return {
+            "output": f"Background task {task_id} stopped",
+            "exit_code": -1,
+            "timed_out": False,
+            "cancelled": True,
+        }
+
     async def kill(self) -> str:
-        """Kill the persistent shell process and all background tasks."""
-        if self._proc is None:
-            return "No active shell session"
+        """Kill the persistent shell process and all background tasks.
+
+        Background tasks are always cancelled first, even if no persistent
+        shell session exists (background tasks run as independent subprocesses).
+        """
+        # Always cancel background tasks — they are independent subprocesses
+        bg_count = len(self._background_tasks)
         for _tid, task in list(self._background_tasks.items()):
             task.cancel()
         self._background_tasks.clear()
         self._background_results.clear()
+        self._background_pids.clear()
+
+        # Kill the persistent shell process (if any)
+        if self._proc is None:
+            if bg_count > 0:
+                return f"Cancelled {bg_count} background task(s) (no active shell session)"
+            return "No active shell session"
         try:
             if self._proc.pid:
                 os.killpg(os.getpgid(self._proc.pid), signal.SIGKILL)
@@ -250,4 +359,7 @@ class BashSession:
         except ProcessLookupError:
             pass
         self._proc = None
-        return "Shell session terminated"
+        msg = "Shell session terminated"
+        if bg_count > 0:
+            msg += f" + {bg_count} background task(s) cancelled"
+        return msg
