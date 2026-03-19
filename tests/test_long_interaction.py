@@ -27,9 +27,9 @@ import pytest
 class TestSubAgentStatusMachine:
     """12-state unified status machine (PRD §5)."""
 
-    def test_enum_has_15_states(self):
+    def test_enum_has_16_states(self):
         from agent_framework.models.subagent import SubAgentStatus
-        assert len(SubAgentStatus) == 15  # includes CANCELLING (boundary §9)
+        assert len(SubAgentStatus) == 16  # CANCELLING (§9) + IDLE (LONG_LIVED)
 
     def test_all_scheduler_states_exist(self):
         from agent_framework.models.subagent import SubAgentStatus

@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import time
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from agent_framework.infra.logger import get_logger
-from agent_framework.models.subagent import (SubAgentHandle, SubAgentResult,
-                                             SubAgentSpec, SubAgentStatus,
+from agent_framework.models.message import Message
+from agent_framework.models.subagent import (SpawnMode, SubAgentHandle,
+                                             SubAgentResult, SubAgentSpec,
+                                             SubAgentStatus,
                                              SubAgentSuspendInfo,
                                              SubAgentSuspendReason,
                                              SubAgentTaskStatus)
@@ -17,8 +21,26 @@ if TYPE_CHECKING:
     from agent_framework.agent.base_agent import BaseAgent
     from agent_framework.agent.coordinator import RunCoordinator
     from agent_framework.agent.runtime_deps import AgentRuntimeDeps
+    from agent_framework.models.session import SessionState
 
 logger = get_logger(__name__)
+
+
+@dataclass
+class _LiveAgent:
+    """LONG_LIVED agent kept alive between interactions.
+
+    Holds the full runtime context so send_message can resume
+    without recreating agent/deps/session.
+    """
+
+    agent: Any  # BaseAgent
+    deps: Any  # AgentRuntimeDeps
+    session_messages: list[Message] = field(default_factory=list)
+    handle: SubAgentHandle = field(default_factory=SubAgentHandle)
+    parent_agent: Any = None
+    last_active: float = field(default_factory=time.monotonic)
+    interaction_count: int = 0
 
 
 class SubAgentRuntime:
@@ -48,8 +70,12 @@ class SubAgentRuntime:
         max_concurrent: int = 3,
         max_per_run: int = 5,
         max_spawn_depth: int = 1,
+        live_agent_ttl_seconds: int = 300,
+        max_live_agents_per_run: int = 3,
     ) -> None:
         self._factory = SubAgentFactory(parent_deps)
+        self._live_agent_ttl = live_agent_ttl_seconds
+        self._max_live_agents = max_live_agents_per_run
         self._scheduler = SubAgentScheduler(
             max_concurrent=max_concurrent,
             max_per_run=max_per_run,
@@ -57,6 +83,8 @@ class SubAgentRuntime:
         self._coordinator = coordinator
         self._parent_deps = parent_deps
         self._max_spawn_depth = max_spawn_depth
+        # LONG_LIVED agent pool — agents kept alive between interactions
+        self._live_agents: dict[str, _LiveAgent] = {}
         # active_children truth source — only SubAgentRuntime maintains this
         self._active: dict[str, SubAgentHandle] = {}  # spawn_id -> handle
 
@@ -153,6 +181,21 @@ class SubAgentRuntime:
             max_concurrent=quota["max_concurrent"],
         )
 
+        # LONG_LIVED: restore session from previous interaction
+        is_long_lived = spec.mode == SpawnMode.LONG_LIVED
+        if is_long_lived and spec.spawn_id in self._live_agents:
+            live = self._live_agents[spec.spawn_id]
+            initial_session_messages = list(live.session_messages)
+            sub_agent = live.agent
+            sub_deps = live.deps
+            live.interaction_count += 1
+            logger.info(
+                "subagent.long_lived.resumed",
+                spawn_id=spec.spawn_id,
+                interaction=live.interaction_count,
+                history_messages=len(initial_session_messages),
+            )
+
         # Schedule execution — runtime wraps the actual run
         async def _run() -> SubAgentResult:
             child_run_id = str(uuid.uuid4())
@@ -177,6 +220,25 @@ class SubAgentRuntime:
                 else SubAgentTaskStatus.FAILED
             )
 
+            # LONG_LIVED: save session for next interaction
+            if is_long_lived:
+                saved_messages = list(initial_session_messages)
+                saved_messages.append(Message(role="user", content=spec.task_input))
+                if run_result.final_answer:
+                    saved_messages.append(Message(role="assistant", content=run_result.final_answer))
+                self._live_agents[spec.spawn_id] = _LiveAgent(
+                    agent=sub_agent,
+                    deps=sub_deps,
+                    session_messages=saved_messages,
+                    handle=handle,
+                    parent_agent=parent_agent,
+                    last_active=time.monotonic(),
+                    interaction_count=getattr(
+                        self._live_agents.get(spec.spawn_id, None),
+                        "interaction_count", 0,
+                    ) + 1,
+                )
+
             logger.info(
                 "subagent.run_finished",
                 spawn_id=spec.spawn_id,
@@ -184,6 +246,7 @@ class SubAgentRuntime:
                 success=run_result.success,
                 iterations_used=run_result.iterations_used,
                 total_tokens=run_result.usage.total_tokens,
+                long_lived=is_long_lived,
             )
             return SubAgentResult(
                 spawn_id=spec.spawn_id,
@@ -199,12 +262,16 @@ class SubAgentRuntime:
                 task_record=task_record,
             )
         finally:
-            # Remove from active_children after completion (runtime cleanup)
+            # Remove from active_children after completion
             self._active.pop(spec.spawn_id, None)
 
         # Handle cancellation status from scheduler
         if handle.status == "CANCELLED":
             task_record.status = SubAgentTaskStatus.CANCELLED
+
+        # LONG_LIVED: set IDLE instead of terminal status
+        if is_long_lived and result.success:
+            handle.status = SubAgentStatus.IDLE
 
         logger.info(
             "subagent.spawn_completed",
@@ -214,6 +281,7 @@ class SubAgentRuntime:
             iterations_used=result.iterations_used,
             task_status=task_record.status.value,
             answer_preview=(result.final_answer or result.error or "")[:120],
+            long_lived_idle=is_long_lived and result.success,
         )
         return result
 
@@ -532,3 +600,163 @@ class SubAgentRuntime:
             cancelled=cancelled,
         )
         return cancelled
+
+    # ------------------------------------------------------------------
+    # LONG_LIVED: send_message / close / cleanup
+    # ------------------------------------------------------------------
+
+    async def send_message(
+        self, spawn_id: str, message: str, parent_agent: Any = None,
+    ) -> SubAgentResult:
+        """Send a message to a LONG_LIVED agent in IDLE state.
+
+        The agent wakes up with the full prior conversation + new message,
+        runs to completion, then returns to IDLE.
+        """
+        live = self._live_agents.get(spawn_id)
+        if live is None:
+            return SubAgentResult(
+                spawn_id=spawn_id, success=False,
+                error=f"No LONG_LIVED agent with spawn_id={spawn_id}. "
+                      "Use spawn_agent(mode='LONG_LIVED') first.",
+            )
+
+        live.last_active = time.monotonic()
+
+        logger.info(
+            "subagent.send_message",
+            spawn_id=spawn_id,
+            interaction=live.interaction_count + 1,
+            history_messages=len(live.session_messages),
+            message_preview=message[:100],
+        )
+
+        # Build spec to reuse spawn() with the existing session
+        spec = SubAgentSpec(
+            parent_run_id=live.handle.parent_run_id,
+            spawn_id=spawn_id,
+            mode=SpawnMode.LONG_LIVED,
+            task_input=message,
+            max_iterations=10,
+        )
+
+        # Temporarily re-register in _active for the run
+        live.handle.status = SubAgentStatus.RUNNING
+        self._active[spawn_id] = live.handle
+
+        coordinator = self._coordinator
+        if coordinator is None:
+            from agent_framework.agent.coordinator import RunCoordinator
+            coordinator = RunCoordinator()
+
+        try:
+            run_result = await coordinator.run(
+                live.agent,
+                live.deps,
+                message,
+                initial_session_messages=list(live.session_messages),
+            )
+
+            # Update session: append this exchange
+            live.session_messages.append(Message(role="user", content=message))
+            if run_result.final_answer:
+                live.session_messages.append(
+                    Message(role="assistant", content=run_result.final_answer)
+                )
+            live.interaction_count += 1
+            live.last_active = time.monotonic()
+            live.handle.status = SubAgentStatus.IDLE
+
+            logger.info(
+                "subagent.send_message.completed",
+                spawn_id=spawn_id,
+                success=run_result.success,
+                interaction=live.interaction_count,
+                total_messages=len(live.session_messages),
+            )
+
+            return SubAgentResult(
+                spawn_id=spawn_id,
+                success=run_result.success,
+                final_answer=run_result.final_answer,
+                error=run_result.error,
+                usage=run_result.usage,
+                iterations_used=run_result.iterations_used,
+            )
+        except Exception as e:
+            live.handle.status = SubAgentStatus.IDLE  # Return to IDLE even on error
+            logger.error(
+                "subagent.send_message.failed",
+                spawn_id=spawn_id, error=str(e),
+            )
+            return SubAgentResult(
+                spawn_id=spawn_id, success=False,
+                error=f"send_message failed: {e}",
+            )
+        finally:
+            self._active.pop(spawn_id, None)
+
+    def close_live_agent(self, spawn_id: str) -> bool:
+        """Explicitly close a LONG_LIVED agent, releasing all resources."""
+        live = self._live_agents.pop(spawn_id, None)
+        if live is None:
+            return False
+        logger.info(
+            "subagent.long_lived.closed",
+            spawn_id=spawn_id,
+            interactions=live.interaction_count,
+            messages=len(live.session_messages),
+        )
+        return True
+
+    def cleanup_live_agents(self, parent_run_id: str | None = None) -> int:
+        """Clean up IDLE LONG_LIVED agents. Called when parent run ends.
+
+        If parent_run_id is specified, only clean agents under that run.
+        Otherwise clean all.
+        """
+        to_remove = []
+        for spawn_id, live in self._live_agents.items():
+            if parent_run_id is None or live.handle.parent_run_id == parent_run_id:
+                to_remove.append(spawn_id)
+
+        for spawn_id in to_remove:
+            self._live_agents.pop(spawn_id, None)
+
+        if to_remove:
+            logger.info(
+                "subagent.long_lived.cleanup",
+                parent_run_id=parent_run_id,
+                cleaned=len(to_remove),
+            )
+        return len(to_remove)
+
+    def evict_expired_live_agents(self) -> int:
+        """Evict LONG_LIVED agents that exceeded TTL. Called during drain."""
+        now = time.monotonic()
+        expired = [
+            sid for sid, live in self._live_agents.items()
+            if (now - live.last_active) > self._live_agent_ttl
+        ]
+        for sid in expired:
+            self._live_agents.pop(sid, None)
+        if expired:
+            logger.info(
+                "subagent.long_lived.evicted",
+                count=len(expired),
+                ttl_seconds=self._live_agent_ttl,
+            )
+        return len(expired)
+
+    def get_live_agent_status(self, spawn_id: str) -> dict | None:
+        """Get status of a LONG_LIVED agent."""
+        live = self._live_agents.get(spawn_id)
+        if live is None:
+            return None
+        return {
+            "spawn_id": spawn_id,
+            "status": live.handle.status.value if hasattr(live.handle.status, "value") else str(live.handle.status),
+            "interaction_count": live.interaction_count,
+            "session_messages": len(live.session_messages),
+            "idle_seconds": int(time.monotonic() - live.last_active),
+        }

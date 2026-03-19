@@ -147,6 +147,9 @@ class SubAgentStatus(str, Enum):
     RESUMING = "RESUMING"
     CANCELLING = "CANCELLING"  # §9: cooperative cancel in progress
 
+    # LONG_LIVED: task done but agent alive, awaiting send_message
+    IDLE = "IDLE"
+
     # Terminal
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
@@ -215,6 +218,7 @@ _ACTIVE_STATES: frozenset[SubAgentStatus] = frozenset({
     SubAgentStatus.SUSPENDED,
     SubAgentStatus.RESUMING,
     SubAgentStatus.CANCELLING,
+    SubAgentStatus.IDLE,
 })
 
 # Allowed state transitions (from -> set of valid targets)
@@ -235,6 +239,7 @@ _ALLOWED_TRANSITIONS: dict[SubAgentStatus, frozenset[SubAgentStatus]] = {
         SubAgentStatus.COMPLETED, SubAgentStatus.FAILED,
         SubAgentStatus.TIMEOUT, SubAgentStatus.DEGRADED,
         SubAgentStatus.CANCELLING, SubAgentStatus.CANCELLED,
+        SubAgentStatus.IDLE,  # LONG_LIVED: task done but agent alive
     }),
     SubAgentStatus.WAITING_PARENT: frozenset({
         SubAgentStatus.RESUMING, SubAgentStatus.CANCELLING,
@@ -251,6 +256,11 @@ _ALLOWED_TRANSITIONS: dict[SubAgentStatus, frozenset[SubAgentStatus]] = {
     SubAgentStatus.RESUMING: frozenset({
         SubAgentStatus.RUNNING, SubAgentStatus.CANCELLING,
         SubAgentStatus.CANCELLED, SubAgentStatus.FAILED,
+    }),
+    SubAgentStatus.IDLE: frozenset({
+        SubAgentStatus.RUNNING,     # send_message wakes up
+        SubAgentStatus.CANCELLING,  # close_agent
+        SubAgentStatus.CANCELLED,   # direct cancel
     }),
     SubAgentStatus.CANCELLING: frozenset({
         SubAgentStatus.CANCELLED, SubAgentStatus.FAILED,

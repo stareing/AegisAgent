@@ -8,7 +8,7 @@ Tool categories (aligned with system tools spec):
               glob_files, grep_search, notebook_edit
 - system: bash_exec, bash_output, bash_stop, task_stop, kill_shell, run_command, get_env
 - network: web_fetch, web_search
-- delegation: spawn_agent, check_spawn_result
+- delegation: spawn_agent, check_spawn_result, send_message, close_agent
 - control: task_create, task_update, task_list, task_get, slash_command, exit_plan_mode
 - memory_admin: list_memories, forget_memory, clear_memories
 - reasoning: think
@@ -87,7 +87,7 @@ def register_all_builtins(
     # from agent_framework.tools.builtin.system import run_command, get_env
     #   run_command — redundant with bash_exec
     #   get_env — bash "echo $VAR" covers this
-    from agent_framework.tools.builtin.spawn_agent import spawn_agent, check_spawn_result
+    from agent_framework.tools.builtin.spawn_agent import spawn_agent, check_spawn_result, send_message, close_agent
     from agent_framework.tools.builtin.code_edit import edit_file  # notebook_edit: niche, use write_file
     from agent_framework.tools.builtin.search import grep_search, glob_files
     from agent_framework.tools.builtin.shell import (
@@ -117,7 +117,7 @@ def register_all_builtins(
         # Reasoning
         think,
         # Delegation
-        spawn_agent, check_spawn_result,
+        spawn_agent, check_spawn_result, send_message, close_agent,
         # Skills
         invoke_skill,
         # Memory admin (not exposed to Agent by default — requires capability policy)

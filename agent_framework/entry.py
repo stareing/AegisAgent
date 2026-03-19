@@ -282,6 +282,8 @@ class AgentFramework:
                 max_concurrent=self.config.subagent.max_concurrent_sub_agents,
                 max_per_run=self.config.subagent.max_sub_agents_per_run,
                 max_spawn_depth=self.config.subagent.max_spawn_depth,
+                live_agent_ttl_seconds=self.config.subagent.live_agent_ttl_seconds,
+                max_live_agents_per_run=self.config.subagent.max_live_agents_per_run,
             )
             self._deps.sub_agent_runtime = sub_runtime
             delegation_executor._sub_agent_runtime = sub_runtime

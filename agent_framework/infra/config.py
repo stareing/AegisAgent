@@ -141,6 +141,8 @@ class SubAgentConfig(BaseModel):
     execution_mode: str = "progressive"  # "parallel" | "progressive"
     default_collection_strategy: str = "HYBRID"  # "SEQUENTIAL" | "BATCH_ALL" | "HYBRID"
     collection_poll_interval_ms: int = 500
+    live_agent_ttl_seconds: int = 300  # LONG_LIVED agent IDLE timeout before auto-cleanup
+    max_live_agents_per_run: int = 3   # Max LONG_LIVED agents alive simultaneously
 
 
 class SkillConfig(BaseModel):

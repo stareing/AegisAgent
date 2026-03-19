@@ -344,6 +344,17 @@ class CheckSpawnResultArgs(BaseModel):
     )
 
 
+class SendMessageArgs(BaseModel):
+    """Parameters for send_message tool (LONG_LIVED agent interaction)."""
+    spawn_id: str = Field(description="Spawn ID of the LONG_LIVED agent")
+    message: str = Field(description="Message to send to the agent")
+
+
+class CloseAgentArgs(BaseModel):
+    """Parameters for close_agent tool."""
+    spawn_id: str = Field(description="Spawn ID of the LONG_LIVED agent to close")
+
+
 # ---------------------------------------------------------------------------
 # Memory admin tools
 # ---------------------------------------------------------------------------
