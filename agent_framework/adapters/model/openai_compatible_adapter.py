@@ -1,16 +1,26 @@
-"""OpenAI-compatible adapters for Chinese AI providers and custom endpoints.
+"""OpenAI-compatible adapters for LLM API providers.
 
 All these providers implement the OpenAI Chat Completions API format,
 so they share the same message/tool conversion logic from OpenAIAdapter.
 Differences are primarily: base_url, default model names, minor quirks.
 
 Supported providers:
-- DeepSeek  (https://api.deepseek.com)
-- Doubao/豆包 (Volcengine Ark — https://ark.cn-beijing.volces.com/api/v3)
+- OpenRouter  (https://openrouter.ai/api/v1) — multi-model router
+- Together AI (https://api.together.xyz/v1) — open-source model hosting
+- Groq        (https://api.groq.com/openai/v1) — fast inference
+- Fireworks   (https://api.fireworks.ai/inference/v1) — fast inference
+- Mistral     (https://api.mistral.ai/v1) — Mistral models
+- Perplexity  (https://api.perplexity.ai) — search-augmented models
+- DeepSeek    (https://api.deepseek.com)
+- Doubao/豆包  (Volcengine Ark — https://ark.cn-beijing.volces.com/api/v3)
 - Qwen/通义千问 (DashScope — https://dashscope.aliyuncs.com/compatible-mode/v1)
 - Zhipu/智谱GLM (https://open.bigmodel.cn/api/paas/v4)
-- MiniMax  (https://api.minimax.chat/v1)
-- Custom   (user-specified endpoint)
+- MiniMax     (https://api.minimax.chat/v1)
+- SiliconFlow (https://api.siliconflow.cn/v1) — Chinese multi-model
+- Moonshot/月之暗面 (https://api.moonshot.cn/v1)
+- Baichuan/百川 (https://api.baichuan-ai.com/v1)
+- Yi/零一万物  (https://api.lingyiwanwu.com/v1)
+- Custom      (user-specified endpoint)
 
 Install with:
     pip install agent-framework[openai]    # all use the openai SDK
@@ -97,6 +107,32 @@ def _parse_openai_response(raw: Any) -> Any:
 # ---------------------------------------------------------------------------
 
 PROVIDER_DEFAULTS: dict[str, dict[str, Any]] = {
+    # --- International providers ---
+    "openrouter": {
+        "api_base": "https://openrouter.ai/api/v1",
+        "default_model": "openai/gpt-4o",
+    },
+    "together": {
+        "api_base": "https://api.together.xyz/v1",
+        "default_model": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+    },
+    "groq": {
+        "api_base": "https://api.groq.com/openai/v1",
+        "default_model": "llama-3.3-70b-versatile",
+    },
+    "fireworks": {
+        "api_base": "https://api.fireworks.ai/inference/v1",
+        "default_model": "accounts/fireworks/models/llama-v3p3-70b-instruct",
+    },
+    "mistral": {
+        "api_base": "https://api.mistral.ai/v1",
+        "default_model": "mistral-large-latest",
+    },
+    "perplexity": {
+        "api_base": "https://api.perplexity.ai",
+        "default_model": "sonar-pro",
+    },
+    # --- Chinese providers ---
     "deepseek": {
         "api_base": "https://api.deepseek.com",
         "default_model": "deepseek-chat",
@@ -116,6 +152,22 @@ PROVIDER_DEFAULTS: dict[str, dict[str, Any]] = {
     "minimax": {
         "api_base": "https://api.minimax.chat/v1",
         "default_model": "abab6.5s-chat",
+    },
+    "siliconflow": {
+        "api_base": "https://api.siliconflow.cn/v1",
+        "default_model": "deepseek-ai/DeepSeek-V3",
+    },
+    "moonshot": {
+        "api_base": "https://api.moonshot.cn/v1",
+        "default_model": "moonshot-v1-8k",
+    },
+    "baichuan": {
+        "api_base": "https://api.baichuan-ai.com/v1",
+        "default_model": "Baichuan4",
+    },
+    "yi": {
+        "api_base": "https://api.lingyiwanwu.com/v1",
+        "default_model": "yi-large",
     },
 }
 
@@ -237,6 +289,13 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
     def supports_parallel_tool_calls(self) -> bool:
         return True
 
+    def supports_vision(self) -> bool:
+        """Most OpenAI-compatible providers support vision on their larger models.
+
+        Provider subclasses override to False if vision is not supported.
+        """
+        return True
+
     # ------------------------------------------------------------------
     # Internal — mirrors OpenAIAdapter with minor adjustments
     # ------------------------------------------------------------------
@@ -323,6 +382,125 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# International providers
+# ---------------------------------------------------------------------------
+
+
+class OpenRouterAdapter(OpenAICompatibleAdapter):
+    """OpenRouter (https://openrouter.ai) — unified API for 200+ models.
+
+    Models: openai/gpt-4o, anthropic/claude-sonnet-4, meta-llama/llama-3.3-70b-instruct,
+            google/gemini-2.0-flash, deepseek/deepseek-chat, mistralai/mistral-large
+    API key: OpenRouter API key (OPENROUTER_API_KEY).
+    Pricing: pay-per-token, varies by model. Free tier available for some models.
+
+    Extra headers (HTTP-Referer, X-Title) recommended by OpenRouter for ranking.
+    """
+
+    _provider = "openrouter"
+
+    def __init__(
+        self,
+        model_name: str | None = None,
+        api_key: str | None = None,
+        api_base: str | None = None,
+        timeout_ms: int = 60_000,
+        max_retries: int = 3,
+        temperature: float = 0.0,
+        max_output_tokens: int | None = None,
+        extra_headers: dict[str, str] | None = None,
+        site_url: str | None = None,
+        site_name: str | None = None,
+    ) -> None:
+        # OpenRouter recommends HTTP-Referer and X-Title headers
+        headers = dict(extra_headers or {})
+        if site_url:
+            headers.setdefault("HTTP-Referer", site_url)
+        if site_name:
+            headers.setdefault("X-Title", site_name)
+
+        super().__init__(
+            model_name=model_name,
+            api_key=api_key,
+            api_base=api_base,
+            timeout_ms=timeout_ms,
+            max_retries=max_retries,
+            temperature=temperature,
+            max_output_tokens=max_output_tokens,
+            extra_headers=headers or None,
+        )
+
+
+class TogetherAdapter(OpenAICompatibleAdapter):
+    """Together AI (https://api.together.xyz) — open-source model hosting.
+
+    Models: meta-llama/Llama-3.3-70B-Instruct-Turbo, mistralai/Mixtral-8x22B-Instruct-v0.1,
+            Qwen/Qwen2.5-72B-Instruct-Turbo, deepseek-ai/DeepSeek-V3
+    API key: Together API key (TOGETHER_API_KEY).
+    """
+
+    _provider = "together"
+
+
+class GroqAdapter(OpenAICompatibleAdapter):
+    """Groq (https://groq.com) — ultra-fast LPU inference.
+
+    Models: llama-3.3-70b-versatile, llama-3.1-8b-instant, mixtral-8x7b-32768,
+            gemma2-9b-it, deepseek-r1-distill-llama-70b
+    API key: Groq API key (GROQ_API_KEY).
+    Note: Very fast inference but limited context windows on some models.
+    """
+
+    _provider = "groq"
+
+
+class FireworksAdapter(OpenAICompatibleAdapter):
+    """Fireworks AI (https://fireworks.ai) — fast inference + fine-tuning.
+
+    Models: accounts/fireworks/models/llama-v3p3-70b-instruct,
+            accounts/fireworks/models/mixtral-8x22b-instruct,
+            accounts/fireworks/models/qwen2p5-72b-instruct
+    API key: Fireworks API key (FIREWORKS_API_KEY).
+    """
+
+    _provider = "fireworks"
+
+
+class MistralAdapter(OpenAICompatibleAdapter):
+    """Mistral AI (https://mistral.ai) — Mistral native API.
+
+    Models: mistral-large-latest, mistral-medium-latest, mistral-small-latest,
+            open-mistral-nemo, codestral-latest
+    API key: Mistral API key (MISTRAL_API_KEY).
+    Note: Also available via OpenRouter/Together. Use this for direct access.
+    """
+
+    _provider = "mistral"
+
+
+class PerplexityAdapter(OpenAICompatibleAdapter):
+    """Perplexity (https://perplexity.ai) — search-augmented generation.
+
+    Models: sonar-pro, sonar, sonar-reasoning-pro, sonar-reasoning
+    API key: Perplexity API key (PERPLEXITY_API_KEY).
+    Note: Responses include inline citations from web search.
+    """
+
+    _provider = "perplexity"
+
+    def supports_parallel_tool_calls(self) -> bool:
+        return False
+
+    def supports_vision(self) -> bool:
+        return False  # Perplexity models don't accept image inputs
+
+
+# ---------------------------------------------------------------------------
+# Chinese providers
+# ---------------------------------------------------------------------------
+
+
 class DeepSeekAdapter(OpenAICompatibleAdapter):
     """DeepSeek (https://api.deepseek.com).
 
@@ -368,6 +546,54 @@ class MiniMaxAdapter(OpenAICompatibleAdapter):
     """
 
     _provider = "minimax"
+
+
+class SiliconFlowAdapter(OpenAICompatibleAdapter):
+    """SiliconFlow/硅基流动 (https://siliconflow.cn) — Chinese multi-model platform.
+
+    Models: deepseek-ai/DeepSeek-V3, Qwen/Qwen2.5-72B-Instruct,
+            meta-llama/Meta-Llama-3.1-70B-Instruct, THUDM/glm-4-9b-chat
+    API key: SiliconFlow API key.
+    Note: Offers free tier for several models. Good for testing.
+    """
+
+    _provider = "siliconflow"
+
+
+class MoonshotAdapter(OpenAICompatibleAdapter):
+    """Moonshot/月之暗面 Kimi (https://api.moonshot.cn).
+
+    Models: moonshot-v1-8k, moonshot-v1-32k, moonshot-v1-128k
+    API key: Moonshot API key (MOONSHOT_API_KEY).
+    Note: Strong long-context support (128k tokens).
+    """
+
+    _provider = "moonshot"
+
+
+class BaichuanAdapter(OpenAICompatibleAdapter):
+    """Baichuan/百川智能 (https://api.baichuan-ai.com).
+
+    Models: Baichuan4, Baichuan3-Turbo, Baichuan3-Turbo-128k
+    API key: Baichuan API key.
+    """
+
+    _provider = "baichuan"
+
+
+class YiAdapter(OpenAICompatibleAdapter):
+    """Yi/零一万物 (https://api.lingyiwanwu.com).
+
+    Models: yi-large, yi-large-turbo, yi-medium, yi-spark
+    API key: Yi API key (YI_API_KEY).
+    """
+
+    _provider = "yi"
+
+
+# ---------------------------------------------------------------------------
+# Custom / Generic
+# ---------------------------------------------------------------------------
 
 
 class CustomAdapter(OpenAICompatibleAdapter):

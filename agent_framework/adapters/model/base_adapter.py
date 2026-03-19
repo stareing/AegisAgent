@@ -121,6 +121,33 @@ class BaseModelAdapter(ABC):
     def supports_parallel_tool_calls(self) -> bool:
         return False
 
+    def supports_vision(self) -> bool:
+        """Whether this adapter/model supports image inputs (vision).
+
+        Override in subclasses to reflect actual provider capabilities.
+        Callers should check this before sending content_parts with images.
+        """
+        return False
+
+    def supports_audio(self) -> bool:
+        """Whether this adapter/model supports audio inputs.
+
+        Currently only OpenAI gpt-4o-audio-preview supports this natively.
+        """
+        return False
+
+    def supported_modalities(self) -> list[str]:
+        """Return list of supported input modalities: ["text", "image", "audio"].
+
+        Convenience method aggregating all supports_* checks.
+        """
+        modalities = ["text"]
+        if self.supports_vision():
+            modalities.append("image")
+        if self.supports_audio():
+            modalities.append("audio")
+        return modalities
+
     def supports_stateful_session(self) -> bool:
         """Returns True if stateful mode is enabled via config.
 

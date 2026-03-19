@@ -134,11 +134,15 @@ class FallbackModelAdapter(BaseModelAdapter):
         return self._primary.count_tokens(messages)
 
     def supports_parallel_tool_calls(self) -> bool:
-        """Delegate to primary adapter."""
         return self._primary.supports_parallel_tool_calls()
 
+    def supports_vision(self) -> bool:
+        return self._primary.supports_vision()
+
+    def supports_audio(self) -> bool:
+        return self._primary.supports_audio()
+
     def supports_stateful_session(self) -> bool:
-        """Delegate to primary adapter."""
         return self._primary.supports_stateful_session()
 
     def begin_session(self, session_id: str = "") -> None:

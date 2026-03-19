@@ -425,6 +425,26 @@ class AgentFramework:
                 from agent_framework.adapters.model.google_adapter import GoogleAdapter
                 common.pop("api_base", None)
                 return GoogleAdapter(**common)
+            # --- International OpenAI-compatible providers ---
+            case "openrouter":
+                from agent_framework.adapters.model.openai_compatible_adapter import OpenRouterAdapter
+                return OpenRouterAdapter(**common)
+            case "together":
+                from agent_framework.adapters.model.openai_compatible_adapter import TogetherAdapter
+                return TogetherAdapter(**common)
+            case "groq":
+                from agent_framework.adapters.model.openai_compatible_adapter import GroqAdapter
+                return GroqAdapter(**common)
+            case "fireworks":
+                from agent_framework.adapters.model.openai_compatible_adapter import FireworksAdapter
+                return FireworksAdapter(**common)
+            case "mistral":
+                from agent_framework.adapters.model.openai_compatible_adapter import MistralAdapter
+                return MistralAdapter(**common)
+            case "perplexity":
+                from agent_framework.adapters.model.openai_compatible_adapter import PerplexityAdapter
+                return PerplexityAdapter(**common)
+            # --- Chinese providers ---
             case "deepseek":
                 from agent_framework.adapters.model.openai_compatible_adapter import DeepSeekAdapter
                 return DeepSeekAdapter(**common)
@@ -440,6 +460,18 @@ class AgentFramework:
             case "minimax":
                 from agent_framework.adapters.model.openai_compatible_adapter import MiniMaxAdapter
                 return MiniMaxAdapter(**common)
+            case "siliconflow":
+                from agent_framework.adapters.model.openai_compatible_adapter import SiliconFlowAdapter
+                return SiliconFlowAdapter(**common)
+            case "moonshot":
+                from agent_framework.adapters.model.openai_compatible_adapter import MoonshotAdapter
+                return MoonshotAdapter(**common)
+            case "baichuan":
+                from agent_framework.adapters.model.openai_compatible_adapter import BaichuanAdapter
+                return BaichuanAdapter(**common)
+            case "yi":
+                from agent_framework.adapters.model.openai_compatible_adapter import YiAdapter
+                return YiAdapter(**common)
             case "custom":
                 from agent_framework.adapters.model.openai_compatible_adapter import CustomAdapter
                 return CustomAdapter(**common)

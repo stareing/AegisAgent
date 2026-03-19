@@ -112,6 +112,9 @@ class AnthropicAdapter(BaseModelAdapter):
     def supports_parallel_tool_calls(self) -> bool:
         return True
 
+    def supports_vision(self) -> bool:
+        return True  # All Claude 3+ models support vision
+
     # ------------------------------------------------------------------
     # Message & tool conversion (Anthropic format)
     # ------------------------------------------------------------------

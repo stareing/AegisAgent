@@ -49,21 +49,44 @@ except ImportError:
 try:
     from agent_framework.adapters.model.openai_compatible_adapter import (  # noqa: F401
         OpenAICompatibleAdapter,
+        # International
+        OpenRouterAdapter,
+        TogetherAdapter,
+        GroqAdapter,
+        FireworksAdapter,
+        MistralAdapter,
+        PerplexityAdapter,
+        # Chinese
         DeepSeekAdapter,
         DoubaoAdapter,
         QwenAdapter,
         ZhipuAdapter,
         MiniMaxAdapter,
+        SiliconFlowAdapter,
+        MoonshotAdapter,
+        BaichuanAdapter,
+        YiAdapter,
+        # Generic
         CustomAdapter,
     )
 
     __all__.extend([
         "OpenAICompatibleAdapter",
+        "OpenRouterAdapter",
+        "TogetherAdapter",
+        "GroqAdapter",
+        "FireworksAdapter",
+        "MistralAdapter",
+        "PerplexityAdapter",
         "DeepSeekAdapter",
         "DoubaoAdapter",
         "QwenAdapter",
         "ZhipuAdapter",
         "MiniMaxAdapter",
+        "SiliconFlowAdapter",
+        "MoonshotAdapter",
+        "BaichuanAdapter",
+        "YiAdapter",
         "CustomAdapter",
     ])
 except ImportError:

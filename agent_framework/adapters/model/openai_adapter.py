@@ -124,6 +124,13 @@ class OpenAIAdapter(BaseModelAdapter):
     def supports_parallel_tool_calls(self) -> bool:
         return True
 
+    def supports_vision(self) -> bool:
+        # gpt-4o, gpt-4-turbo, gpt-4o-mini all support vision
+        return True
+
+    def supports_audio(self) -> bool:
+        return "audio" in self.model_name.lower()
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
