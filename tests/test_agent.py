@@ -16,35 +16,24 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from agent_framework.agent.base_agent import BaseAgent
+from agent_framework.agent.coordinator import RunCoordinator
 from agent_framework.agent.default_agent import DefaultAgent
+from agent_framework.agent.loop import AgentLoop, AgentLoopDeps
 from agent_framework.agent.react_agent import ReActAgent
 from agent_framework.agent.skill_router import SkillRouter
-from agent_framework.agent.loop import AgentLoop, AgentLoopDeps
-from agent_framework.agent.coordinator import RunCoordinator
-from agent_framework.models.agent import (
-    AgentConfig,
-    AgentRunResult,
-    AgentState,
-    AgentStatus,
-    CapabilityPolicy,
-    ContextPolicy,
-    EffectiveRunConfig,
-    ErrorStrategy,
-    IterationResult,
-    MemoryPolicy,
-    Skill,
-    SpawnDecision,
-    StopDecision,
-    StopReason,
-    StopSignal,
-    TerminationKind,
-    ToolCallDecision,
-)
+from agent_framework.models.agent import (AgentConfig, AgentRunResult,
+                                          AgentState, AgentStatus,
+                                          CapabilityPolicy, ContextPolicy,
+                                          EffectiveRunConfig, ErrorStrategy,
+                                          IterationResult, MemoryPolicy, Skill,
+                                          SpawnDecision, StopDecision,
+                                          StopReason, StopSignal,
+                                          TerminationKind, ToolCallDecision)
 from agent_framework.models.context import LLMRequest
-from agent_framework.models.message import Message, ModelResponse, TokenUsage, ToolCallRequest
+from agent_framework.models.message import (Message, ModelResponse, TokenUsage,
+                                            ToolCallRequest)
 from agent_framework.models.stream import StreamEvent, StreamEventType
 from agent_framework.models.tool import ToolExecutionMeta, ToolResult
-
 
 # =====================================================================
 # BaseAgent
@@ -246,6 +235,7 @@ class TestOrchestratorAgent:
     def test_orchestrator_hard_exit_guard(self):
         """Orchestrator must force stop after N post-spawn iterations when enabled."""
         from agent_framework.agent.orchestrator_agent import OrchestratorAgent
+
         # Enable the guard via instance parameter (not global constant)
         agent = OrchestratorAgent(max_post_spawn_iterations=3)
         state = AgentState(
@@ -327,6 +317,7 @@ class TestOrchestratorAgent:
     def test_parent_run_id_uses_run_id_not_agent_id(self):
         """ToolExecutor must use _current_run_id as primary parent_run_id."""
         import inspect
+
         from agent_framework.tools.executor import ToolExecutor
         source = inspect.getsource(ToolExecutor._subagent_spawn)
         # Primary assignment uses _current_run_id
@@ -849,16 +840,14 @@ class TestRunCoordinator:
 
         mock_loop = AsyncMock(spec=AgentLoop)
         mock_loop.execute_iteration.side_effect = [first_iteration, final_iteration]
-        mock_loop._call_llm = AsyncMock(
-            return_value=ModelResponse(content="mid response", finish_reason="stop")
-        )
+        mock_loop._call_llm = AsyncMock()
         coordinator._loop = mock_loop
 
         result = await coordinator.run(agent, deps, "task")
 
         assert result.success is True
         assert result.final_answer == "final"
-        assert result.progressive_responses == ["mid response"]
+        assert result.progressive_responses == []
 
     @pytest.mark.asyncio
     async def test_skill_detection(self):
@@ -950,8 +939,10 @@ class TestArchitecturalRedLines:
 
     def test_agent_loop_does_not_import_runtime_deps(self):
         """AgentLoop module must not import AgentRuntimeDeps."""
-        import agent_framework.agent.loop as loop_mod
         import inspect
+
+        import agent_framework.agent.loop as loop_mod
+
         # Check actual imports, not docstring mentions
         source = inspect.getsource(loop_mod)
         # Should not have "from ... import AgentRuntimeDeps" or "import AgentRuntimeDeps"
@@ -1100,7 +1091,8 @@ class TestV252RedLines:
 
     def test_all_stop_reasons_mapped(self):
         """Every StopReason must have a TerminationKind mapping (§20)."""
-        from agent_framework.models.agent import _STOP_REASON_TO_TERMINATION_KIND
+        from agent_framework.models.agent import \
+            _STOP_REASON_TO_TERMINATION_KIND
         for reason in StopReason:
             assert reason in _STOP_REASON_TO_TERMINATION_KIND, (
                 f"StopReason.{reason.value} missing from termination kind mapping"
@@ -1164,6 +1156,7 @@ class TestV253RedLines:
     def test_agent_loop_does_not_mutate_agent_state_status(self):
         """AgentLoop must not directly set agent_state.status (必修1)."""
         import inspect
+
         import agent_framework.agent.loop as loop_mod
         source = inspect.getsource(loop_mod.AgentLoop)
         assert "agent_state.status" not in source, (
@@ -1176,6 +1169,7 @@ class TestV253RedLines:
         Reading for logging is permitted; writing (+=, =) is prohibited.
         """
         import inspect
+
         import agent_framework.agent.loop as loop_mod
         source = inspect.getsource(loop_mod.AgentLoop)
         # Prohibit assignment patterns: += or =
@@ -1189,6 +1183,7 @@ class TestV253RedLines:
     def test_agent_loop_does_not_import_agent_status(self):
         """AgentLoop module must not import AgentStatus (必修1)."""
         import inspect
+
         import agent_framework.agent.loop as loop_mod
         source = inspect.getsource(loop_mod)
         assert "import AgentStatus" not in source and "AgentStatus" not in source
@@ -1206,7 +1201,8 @@ class TestV253RedLines:
 
     def test_run_state_controller_has_snapshot(self):
         """RunStateController must have snapshot() (必修1)."""
-        from agent_framework.agent.run_state import RunStateController, AgentStateSnapshot
+        from agent_framework.agent.run_state import (AgentStateSnapshot,
+                                                     RunStateController)
         ctrl = RunStateController()
         state = ctrl.initialize_state("task", "run_1")
         snap = ctrl.snapshot(state)
@@ -1244,8 +1240,9 @@ class TestV253RedLines:
 
     def test_subagent_config_override_no_dict(self):
         """SubAgentSpec must use SubAgentConfigOverride, not dict (必修3)."""
-        from agent_framework.models.subagent import SubAgentSpec
         import inspect
+
+        from agent_framework.models.subagent import SubAgentSpec
         hints = inspect.get_annotations(SubAgentSpec)
         # config_override must be typed, not dict
         config_type = hints.get("config_override", "")
@@ -1289,8 +1286,9 @@ class TestV253RedLines:
         """All rejection decisions must contain a reason (建议测试断言)."""
         # SpawnDecision with allowed=False should have reason
         agent = BaseAgent(AgentConfig(allow_spawn_children=False))
-        from agent_framework.models.subagent import SubAgentSpec
         import asyncio
+
+        from agent_framework.models.subagent import SubAgentSpec
         decision = asyncio.get_event_loop().run_until_complete(
             agent.on_spawn_requested(SubAgentSpec(task_input="t"))
         )
@@ -1308,7 +1306,8 @@ class TestV261RedLines:
     def test_resolved_run_policy_bundle_exists(self):
         """ResolvedRunPolicyBundle must be the single config source (§30)."""
         from agent_framework.agent.run_policy import ResolvedRunPolicyBundle
-        from agent_framework.models.agent import CapabilityPolicy, ContextPolicy, MemoryPolicy
+        from agent_framework.models.agent import (CapabilityPolicy,
+                                                  ContextPolicy, MemoryPolicy)
         bundle = ResolvedRunPolicyBundle(
             effective_run_config=EffectiveRunConfig(),
             context_policy=ContextPolicy(),
@@ -1323,7 +1322,8 @@ class TestV261RedLines:
     def test_resolved_run_policy_bundle_frozen(self):
         """ResolvedRunPolicyBundle must be frozen after construction (§30)."""
         from agent_framework.agent.run_policy import ResolvedRunPolicyBundle
-        from agent_framework.models.agent import CapabilityPolicy, ContextPolicy, MemoryPolicy
+        from agent_framework.models.agent import (CapabilityPolicy,
+                                                  ContextPolicy, MemoryPolicy)
         bundle = ResolvedRunPolicyBundle(
             effective_run_config=EffectiveRunConfig(),
             context_policy=ContextPolicy(),
@@ -1350,7 +1350,8 @@ class TestV261RedLines:
 
     def test_decision_models_have_source_field(self):
         """All decision models must have a source field (§31)."""
-        from agent_framework.models.agent import StopDecision, ToolCallDecision, SpawnDecision
+        from agent_framework.models.agent import (SpawnDecision, StopDecision,
+                                                  ToolCallDecision)
         for cls in (StopDecision, ToolCallDecision, SpawnDecision):
             assert "source" in cls.model_fields, f"{cls.__name__} must have source field"
 
@@ -1396,8 +1397,9 @@ class TestV261RedLines:
 
     def test_tool_whitelist_cannot_expand_permissions(self):
         """tool_category_whitelist must only narrow, never expand (§33)."""
-        from agent_framework.subagent.factory import _resolve_effective_tool_names
         from agent_framework.models.tool import ToolEntry, ToolMeta
+        from agent_framework.subagent.factory import \
+            _resolve_effective_tool_names
 
         tools = [
             ToolEntry(meta=ToolMeta(name="calc", category="math", source="local")),
@@ -1414,8 +1416,9 @@ class TestV261RedLines:
 
     def test_tool_whitelist_narrows_from_safe_set(self):
         """whitelist only keeps intersection with safe tools (§33)."""
-        from agent_framework.subagent.factory import _resolve_effective_tool_names
         from agent_framework.models.tool import ToolEntry, ToolMeta
+        from agent_framework.subagent.factory import \
+            _resolve_effective_tool_names
 
         tools = [
             ToolEntry(meta=ToolMeta(name="calc", category="math", source="local")),
@@ -1452,6 +1455,7 @@ class TestV263RedLines:
     def test_scheduler_does_not_hold_active_children(self):
         """SubAgentScheduler must not maintain active child truth source (§39)."""
         import inspect
+
         from agent_framework.subagent.scheduler import SubAgentScheduler
         source = inspect.getsource(SubAgentScheduler)
         assert "_active" not in source, (
@@ -1468,6 +1472,7 @@ class TestV263RedLines:
     def test_runtime_is_active_children_truth_source(self):
         """SubAgentRuntime must be the sole truth source for active_children (§39)."""
         import inspect
+
         from agent_framework.subagent.runtime import SubAgentRuntime
         source = inspect.getsource(SubAgentRuntime)
         assert "_active" in source, "Runtime must own _active (active children truth source)"
@@ -1483,7 +1488,8 @@ class TestV263RedLines:
 
     def test_subagent_task_record_exists(self):
         """SubAgentTaskRecord must exist with correct fields (§39)."""
-        from agent_framework.models.subagent import SubAgentTaskRecord, SubAgentTaskStatus
+        from agent_framework.models.subagent import (SubAgentTaskRecord,
+                                                     SubAgentTaskStatus)
         record = SubAgentTaskRecord(
             subagent_task_id="task_abc",
             parent_run_id="run_1",
@@ -1496,6 +1502,7 @@ class TestV263RedLines:
     def test_runtime_does_not_do_quota(self):
         """SubAgentRuntime must not perform quota decisions (§39)."""
         import inspect
+
         from agent_framework.subagent.runtime import SubAgentRuntime
         source = inspect.getsource(SubAgentRuntime)
         assert "_enforce_quota" not in source, (
@@ -1506,7 +1513,8 @@ class TestV263RedLines:
 
     def test_transaction_group_index_exists(self):
         """TransactionGroupIndex must exist with correct structure (§40)."""
-        from agent_framework.context.transaction_group import TransactionGroupIndex
+        from agent_framework.context.transaction_group import \
+            TransactionGroupIndex
         idx = TransactionGroupIndex()
         assert hasattr(idx, "groups_by_id")
         assert hasattr(idx, "groups_by_iteration")
@@ -1515,7 +1523,9 @@ class TestV263RedLines:
     def test_source_provider_accepts_transaction_index(self):
         """collect_session_groups must accept transaction_index parameter (§40)."""
         import inspect
-        from agent_framework.context.source_provider import ContextSourceProvider
+
+        from agent_framework.context.source_provider import \
+            ContextSourceProvider
         sig = inspect.signature(ContextSourceProvider.collect_session_groups)
         assert "transaction_index" in sig.parameters, (
             "collect_session_groups must accept transaction_index"
@@ -1523,11 +1533,10 @@ class TestV263RedLines:
 
     def test_source_provider_consumes_index_without_rebuild(self):
         """When index is provided, provider must not generate new group IDs (§40)."""
-        from agent_framework.context.source_provider import ContextSourceProvider
+        from agent_framework.context.source_provider import \
+            ContextSourceProvider
         from agent_framework.context.transaction_group import (
-            ToolTransactionGroup,
-            TransactionGroupIndex,
-        )
+            ToolTransactionGroup, TransactionGroupIndex)
         from agent_framework.models.message import Message
         from agent_framework.models.session import SessionState
 
@@ -1553,7 +1562,9 @@ class TestV263RedLines:
     def test_source_provider_does_not_generate_group_ids_from_index(self):
         """ContextSourceProvider must not call uuid when consuming index (§40)."""
         import inspect
-        from agent_framework.context.source_provider import ContextSourceProvider
+
+        from agent_framework.context.source_provider import \
+            ContextSourceProvider
         source = inspect.getsource(ContextSourceProvider._consume_transaction_index)
         assert "uuid" not in source, (
             "_consume_transaction_index must not generate new IDs"
@@ -1698,7 +1709,9 @@ class TestV264RedLines:
 
     def test_tool_execution_outcome_exists(self):
         """ToolExecutionOutcome must exist with input_index (§43)."""
-        from agent_framework.models.tool import ToolExecutionOutcome, ToolResult, ToolExecutionMeta
+        from agent_framework.models.tool import (ToolExecutionMeta,
+                                                 ToolExecutionOutcome,
+                                                 ToolResult)
         outcome = ToolExecutionOutcome(
             tool_call_id="tc_1",
             input_index=2,
@@ -1734,6 +1747,7 @@ class TestV264RedLines:
     def test_batch_execute_documents_side_effect_boundary(self):
         """batch_execute must document side-effect commit boundary (§43)."""
         import inspect
+
         from agent_framework.tools.executor import ToolExecutor
         source = inspect.getsource(ToolExecutor.batch_execute)
         assert "side effect" in source.lower() or "side-effect" in source.lower()
@@ -1741,6 +1755,7 @@ class TestV264RedLines:
     def test_tool_threads_must_not_write_session(self):
         """batch_execute docstring must prohibit tool thread session writes (§43)."""
         import inspect
+
         from agent_framework.tools.executor import ToolExecutor
         doc = inspect.getdoc(ToolExecutor.batch_execute)
         assert "MUST NOT" in doc or "must not" in doc.lower()
@@ -1758,46 +1773,47 @@ class TestV264RedLines:
 
     def test_resolve_delegation_status_success(self):
         """Success result must resolve to COMPLETED (§44)."""
-        from agent_framework.models.subagent import (
-            SubAgentResult, SubAgentStatus, resolve_delegation_status,
-        )
+        from agent_framework.models.subagent import (SubAgentResult,
+                                                     SubAgentStatus,
+                                                     resolve_delegation_status)
         result = SubAgentResult(spawn_id="s1", success=True)
         assert resolve_delegation_status(result) == SubAgentStatus.COMPLETED
 
     def test_resolve_delegation_status_timeout(self):
         """TIMEOUT error must resolve to TIMEOUT (v3.1 unified status)."""
-        from agent_framework.models.subagent import (
-            DelegationErrorCode, SubAgentResult, SubAgentStatus,
-            resolve_delegation_status,
-        )
+        from agent_framework.models.subagent import (DelegationErrorCode,
+                                                     SubAgentResult,
+                                                     SubAgentStatus,
+                                                     resolve_delegation_status)
         result = SubAgentResult(spawn_id="s1", success=False, error="timed out")
         status = resolve_delegation_status(result, DelegationErrorCode.TIMEOUT)
         assert status == SubAgentStatus.TIMEOUT
 
     def test_resolve_delegation_status_quota(self):
         """QUOTA_EXCEEDED must resolve to REJECTED, not FAILED (§44)."""
-        from agent_framework.models.subagent import (
-            DelegationErrorCode, SubAgentResult, SubAgentStatus,
-            resolve_delegation_status,
-        )
+        from agent_framework.models.subagent import (DelegationErrorCode,
+                                                     SubAgentResult,
+                                                     SubAgentStatus,
+                                                     resolve_delegation_status)
         result = SubAgentResult(spawn_id="s1", success=False, error="quota")
         status = resolve_delegation_status(result, DelegationErrorCode.QUOTA_EXCEEDED)
         assert status == SubAgentStatus.REJECTED
 
     def test_resolve_delegation_status_permission(self):
         """PERMISSION_DENIED must resolve to REJECTED (§44)."""
-        from agent_framework.models.subagent import (
-            DelegationErrorCode, SubAgentResult, SubAgentStatus,
-            resolve_delegation_status,
-        )
+        from agent_framework.models.subagent import (DelegationErrorCode,
+                                                     SubAgentResult,
+                                                     SubAgentStatus,
+                                                     resolve_delegation_status)
         result = SubAgentResult(spawn_id="s1", success=False, error="denied")
         status = resolve_delegation_status(result, DelegationErrorCode.PERMISSION_DENIED)
         assert status == SubAgentStatus.REJECTED
 
     def test_delegation_summary_uses_unified_status(self):
         """DelegationSummary.status must use SubAgentStatus values (§44)."""
+        from agent_framework.models.subagent import (SubAgentResult,
+                                                     SubAgentStatus)
         from agent_framework.tools.delegation import DelegationExecutor
-        from agent_framework.models.subagent import SubAgentResult, SubAgentStatus
         result = SubAgentResult(spawn_id="s1", success=True, final_answer="ok")
         summary = DelegationExecutor.summarize_result(result)
         assert summary.status == SubAgentStatus.COMPLETED.value
@@ -1808,9 +1824,8 @@ class TestV264RedLines:
 
     def test_error_code_to_status_mapping_complete(self):
         """All DelegationErrorCodes must have a status mapping (§44)."""
-        from agent_framework.models.subagent import (
-            DelegationErrorCode, _ERROR_CODE_TO_STATUS,
-        )
+        from agent_framework.models.subagent import (_ERROR_CODE_TO_STATUS,
+                                                     DelegationErrorCode)
         for code in DelegationErrorCode:
             assert code in _ERROR_CODE_TO_STATUS, (
                 f"DelegationErrorCode.{code.name} has no status mapping"
@@ -1820,7 +1835,8 @@ class TestV264RedLines:
 
     def test_session_snapshot_exists(self):
         """SessionSnapshot must exist as immutable view (§45)."""
-        from agent_framework.models.session import SessionSnapshot, SessionState
+        from agent_framework.models.session import (SessionSnapshot,
+                                                    SessionState)
         session = SessionState(session_id="s1", run_id="r1")
         session.append_message(Message(role="user", content="hello"))
         snap = SessionSnapshot(session)
@@ -1830,7 +1846,8 @@ class TestV264RedLines:
 
     def test_session_snapshot_immutable_after_creation(self):
         """SessionSnapshot must not reflect SessionState changes after creation (§45)."""
-        from agent_framework.models.session import SessionSnapshot, SessionState
+        from agent_framework.models.session import (SessionSnapshot,
+                                                    SessionState)
         session = SessionState(session_id="s1")
         session.append_message(Message(role="user", content="before"))
         snap = SessionSnapshot(session)
@@ -1846,8 +1863,10 @@ class TestV264RedLines:
 
     def test_source_provider_accepts_session_snapshot(self):
         """collect_session_groups must accept SessionSnapshot (§45)."""
-        from agent_framework.context.source_provider import ContextSourceProvider
-        from agent_framework.models.session import SessionSnapshot, SessionState
+        from agent_framework.context.source_provider import \
+            ContextSourceProvider
+        from agent_framework.models.session import (SessionSnapshot,
+                                                    SessionState)
         session = SessionState()
         session.append_message(Message(role="user", content="test"))
         snap = SessionSnapshot(session)
@@ -1865,7 +1884,8 @@ class TestV264RedLines:
 
     def test_resolved_subagent_runtime_bundle_exists(self):
         """ResolvedSubAgentRuntimeBundle must exist (§46)."""
-        from agent_framework.models.subagent import ResolvedSubAgentRuntimeBundle
+        from agent_framework.models.subagent import \
+            ResolvedSubAgentRuntimeBundle
         bundle = ResolvedSubAgentRuntimeBundle(
             resolved_model_name="gpt-4",
             resolved_temperature=0.5,
@@ -1886,8 +1906,9 @@ class TestV264RedLines:
 
     def test_factory_does_not_import_capability_policy(self):
         """SubAgentFactory module must not import CapabilityPolicy (§46)."""
-        import agent_framework.subagent.factory as factory_mod
         import inspect
+
+        import agent_framework.subagent.factory as factory_mod
         source = inspect.getsource(factory_mod)
         # Check for actual imports, not docstring mentions
         assert "import CapabilityPolicy" not in source, (
@@ -1896,8 +1917,9 @@ class TestV264RedLines:
 
     def test_factory_does_not_import_effective_run_config(self):
         """SubAgentFactory module must not import EffectiveRunConfig (§46)."""
-        import agent_framework.subagent.factory as factory_mod
         import inspect
+
+        import agent_framework.subagent.factory as factory_mod
         source = inspect.getsource(factory_mod)
         assert "import EffectiveRunConfig" not in source, (
             "Factory must not import EffectiveRunConfig — use resolved bundle"
@@ -1949,6 +1971,7 @@ class TestV265RedLines:
     def test_auto_retry_requires_idempotency(self):
         """Auto-retry should require idempotency guarantee (§47)."""
         from agent_framework.models.tool import RetrySafety
+
         # Non-idempotent, no key → should not be auto-retried
         rs = RetrySafety(retryable=True, idempotent=False, idempotency_key=None)
         safe_for_auto = rs.idempotent or rs.idempotency_key is not None
@@ -2196,9 +2219,10 @@ class TestStreamingPipeline:
     @pytest.mark.asyncio
     async def test_run_stream_with_tool_calls(self):
         """run_stream yields TOOL_CALL_START and TOOL_CALL_DONE events."""
+        import json
+
         from agent_framework.adapters.model.base_adapter import ModelChunk
         from agent_framework.models.stream import StreamEventType
-        import json
 
         deps = self._make_deps()
         agent = DefaultAgent()
@@ -2241,6 +2265,7 @@ class TestStreamingPipeline:
     async def test_run_stream_cancel(self):
         """run_stream respects cancel_event."""
         import asyncio
+
         from agent_framework.adapters.model.base_adapter import ModelChunk
         from agent_framework.models.stream import StreamEventType
 

@@ -17,21 +17,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent_framework.memory.sqlite_store import SQLiteMemoryStore
 from agent_framework.memory.base_manager import BaseMemoryManager
 from agent_framework.memory.default_manager import DefaultMemoryManager
-from agent_framework.models.memory import (
-    MemoryCandidate,
-    MemoryKind,
-    MemoryRecord,
-    MemoryUpdateAction,
-)
-from agent_framework.subagent.memory_scope import (
-    InheritReadMemoryManager,
-    IsolatedMemoryManager,
-    SharedWriteMemoryManager,
-)
-
+from agent_framework.memory.sqlite_store import SQLiteMemoryStore
+from agent_framework.models.memory import (MemoryCandidate, MemoryKind,
+                                           MemoryRecord, MemoryUpdateAction)
+from agent_framework.subagent.memory_scope import (InheritReadMemoryManager,
+                                                   IsolatedMemoryManager,
+                                                   SharedWriteMemoryManager)
 
 # =====================================================================
 # Helpers
@@ -570,6 +563,7 @@ class TestMemoryPolicyApplication:
     def test_apply_policy_max_in_context(self):
         """max_in_context limits number of memories returned by select_for_context."""
         from agent_framework.models.agent import AgentState, MemoryPolicy
+
         # Insert 5 memories
         for i in range(5):
             c = MemoryCandidate(

@@ -7,14 +7,16 @@ from agent_framework.context.builder import ContextBuilder
 from agent_framework.context.compressor import ContextCompressor
 from agent_framework.context.prefix_manager import PromptPrefixManager
 from agent_framework.context.source_provider import ContextSourceProvider
-from agent_framework.models.context import ContextStats
 from agent_framework.hooks.dispatcher import HookDispatchService
-from agent_framework.hooks.payloads import context_pre_build_payload, context_post_build_payload
+from agent_framework.hooks.payloads import (context_post_build_payload,
+                                            context_pre_build_payload)
+from agent_framework.models.context import ContextStats
 from agent_framework.models.hook import HookPoint
 from agent_framework.models.message import Message
 
 if TYPE_CHECKING:
-    from agent_framework.models.agent import AgentConfig, AgentState, ContextPolicy, Skill
+    from agent_framework.models.agent import (AgentConfig, AgentState,
+                                              ContextPolicy, Skill)
     from agent_framework.models.memory import MemoryRecord
     from agent_framework.models.session import SessionSnapshot, SessionState
 

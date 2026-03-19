@@ -23,12 +23,9 @@ from collections.abc import Callable, Coroutine
 from typing import Any
 
 from agent_framework.infra.logger import get_logger
-from agent_framework.models.subagent import (
-    DelegationEvent,
-    DelegationEventType,
-    HITLRequest,
-    HITLResponse,
-)
+from agent_framework.models.subagent import (DelegationEvent,
+                                             DelegationEventType, HITLRequest,
+                                             HITLResponse)
 
 logger = get_logger(__name__)
 

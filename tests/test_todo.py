@@ -384,7 +384,8 @@ class TestContextInjection:
         assert mgr.summary_text() == ""
 
     def test_todo_state_in_system_core(self):
-        from agent_framework.context.source_provider import ContextSourceProvider
+        from agent_framework.context.source_provider import \
+            ContextSourceProvider
         from agent_framework.models.agent import AgentConfig
 
         provider = ContextSourceProvider()
@@ -399,7 +400,8 @@ class TestContextInjection:
         assert "<reminder>" in result
 
     def test_no_todo_state_without_info(self):
-        from agent_framework.context.source_provider import ContextSourceProvider
+        from agent_framework.context.source_provider import \
+            ContextSourceProvider
         from agent_framework.models.agent import AgentConfig
 
         provider = ContextSourceProvider()
@@ -492,6 +494,7 @@ class TestDiskPersistence:
 class TestToolExecutorRouting:
     def test_executor_has_task_service(self):
         from unittest.mock import MagicMock
+
         from agent_framework.tools.executor import ToolExecutor
 
         registry = MagicMock()
@@ -521,6 +524,7 @@ class TestModelDrivenPlanning:
 
     def test_task_tools_always_registered(self):
         from unittest.mock import MagicMock
+
         from agent_framework.tools.builtin import register_all_builtins
 
         catalog = MagicMock()

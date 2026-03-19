@@ -225,20 +225,59 @@ Delegate only when:
 
 ## Parallel delegation
 When parallel_tool_calls is true and sub-tasks are independent, call multiple \
-spawn_agent in a single response.
+spawn_agent in a single response with wait=false.
 
 ## Sequential delegation
-When sub-tasks depend on each other, spawn one at a time, read the result, \
-then spawn the next.
+When sub-tasks depend on each other, spawn one at a time with wait=true, \
+read the result, then spawn the next.
 
 ## spawn_agent parameters
 - task_input: Clear, specific instruction (be explicit about scope and \
 what information to return)
 - mode: "EPHEMERAL" (default) for most tasks
 - memory_scope: "ISOLATED" (default) | "INHERIT_READ" | "SHARED_WRITE"
+- wait: true (block) or false (async, collect later with check_spawn_result)
+- collection_strategy: Controls how results are collected (for async spawns):
+  - "SEQUENTIAL": Collect one at a time. You get a decision window after each.
+    Use when tasks have dependencies or you need mid-course correction.
+  - "BATCH_ALL": Wait for all to complete. Collect everything at once.
+    Use when tasks are fully independent and you only need the merged result.
+  - "HYBRID" (default): Each check_spawn_result(batch_pull=true) returns ALL \
+    currently-completed results. Best general-purpose mode.
+- label: Human-readable label (e.g. "Agent A — shell.py") for tracking.
+
+## Result collection workflow
+1. Announce: list all agents with labels + chosen collection_strategy
+2. Spawn N agents with wait=false, label="Agent X — description"
+3. Call check_spawn_result(batch_pull=true) to pull completed results
+4. For each batch, report:
+   - Which agents completed (use labels)
+   - Progress: "m/N done, K running"
+   - Change summary per agent
+   - Conflict check: this batch vs previously completed agents
+5. Repeat step 3-4 until is_final_batch=true
+6. Final synthesis: full cross-impact matrix + "Lead Final"
+
+### Mode-specific behavior
+- **SEQUENTIAL** (collection_strategy="SEQUENTIAL"):
+  Each check_spawn_result returns exactly 1 result.
+  Report as "Lead Report (m/N)". Decision window after each.
+  Use when: tasks have dependencies, need mid-course correction.
+
+- **BATCH_ALL** (collection_strategy="BATCH_ALL"):
+  Single check_spawn_result waits for ALL agents, returns all at once.
+  Report as structured summary table + full cross-impact check.
+  Use when: tasks fully independent, only merged result matters.
+
+- **HYBRID** (collection_strategy="HYBRID", default):
+  Each check_spawn_result returns ALL currently-completed (1..N).
+  Report as "Batch Report (done/N, K running)".
+  When 1 completes: behaves like SEQUENTIAL.
+  When all complete: behaves like BATCH_ALL.
+  Use when: independent tasks, want to surface problems early.
 
 ## Synthesis
-After collecting sub-agent results:
+After all agents complete:
 1. Combine into a coherent response
 2. If a sub-agent failed, explain what went wrong
 3. Do NOT re-run the same sub-task unless the user explicitly asks

@@ -7,30 +7,24 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from pydantic import ValidationError
 
+from agent_framework.agent.capability_policy import apply_capability_policy
+from agent_framework.hooks.dispatcher import HookDispatchService
+from agent_framework.hooks.errors import HookDeniedError
+from agent_framework.hooks.payloads import (artifact_produced_payload,
+                                            tool_error_payload,
+                                            tool_post_use_payload,
+                                            tool_pre_use_payload)
 from agent_framework.infra.logger import get_logger
 from agent_framework.infra.telemetry import get_tracing_manager
-from agent_framework.models.hook import HookPoint
-from agent_framework.hooks.errors import HookDeniedError
-from agent_framework.hooks.dispatcher import HookDispatchService
-from agent_framework.hooks.payloads import (
-    tool_pre_use_payload, tool_post_use_payload, tool_error_payload,
-    artifact_produced_payload,
-)
-from agent_framework.agent.capability_policy import apply_capability_policy
 from agent_framework.models.agent import CapabilityPolicy
+from agent_framework.models.hook import HookPoint
 from agent_framework.models.message import Message, ToolCallRequest
-from agent_framework.models.tool import (
-    FieldError,
-    ToolEntry,
-    ToolExecutionError,
-    ToolExecutionMeta,
-    ToolResult,
-)
-from agent_framework.protocols.core import (
-    ConfirmationHandlerProtocol,
-    DelegationExecutorProtocol,
-    ToolRegistryProtocol,
-)
+from agent_framework.models.tool import (FieldError, ToolEntry,
+                                         ToolExecutionError, ToolExecutionMeta,
+                                         ToolResult)
+from agent_framework.protocols.core import (ConfirmationHandlerProtocol,
+                                            DelegationExecutorProtocol,
+                                            ToolRegistryProtocol)
 from agent_framework.tools.todo import TaskService
 
 if TYPE_CHECKING:
@@ -73,6 +67,8 @@ class ToolExecutor:
         parent_agent_getter: Callable[[], Any | None] | None = None,
         max_concurrent: int = 5,
         hook_executor: Any = None,
+        default_collection_strategy: str = "HYBRID",
+        collection_poll_interval_ms: int = 500,
     ) -> None:
         self._registry = registry
         self._confirmation = confirmation_handler
@@ -92,6 +88,11 @@ class ToolExecutor:
         self._progressive_mode: bool = False
         # Run-scoped task graph management
         self._todo_service = TaskService()
+        # Collection strategy config defaults (from SubAgentConfig)
+        self._default_collection_strategy: str = default_collection_strategy.upper()
+        self._collection_poll_interval_ms: int = collection_poll_interval_ms
+        # Lead collector for multi-agent result collection strategies
+        self._lead_collector: Any = None  # LeadCollector, created on first async spawn
 
     @property
     def todo_service(self) -> TaskService:
@@ -99,8 +100,16 @@ class ToolExecutor:
         return self._todo_service
 
     def set_current_run_id(self, run_id: str) -> None:
-        """Called by RunCoordinator to bind the current run_id for quota tracking."""
+        """Called by RunCoordinator to bind the current run_id for quota tracking.
+
+        Also resets the LeadCollector so spawn tracking from previous runs
+        does not leak into the new run.
+        """
         self._current_run_id = run_id
+        # Reset per-run state: LeadCollector must not carry over spawns from prior runs
+        if self._lead_collector is not None:
+            self._lead_collector.reset()
+            self._lead_collector = None
 
     def set_current_session_messages(self, messages: list[Message]) -> None:
         """Called by RunCoordinator before each iteration for spawn seed building."""
@@ -408,19 +417,26 @@ class ToolExecutor:
 
     async def _subagent_spawn(self, args: dict) -> Any:
         """Build SubAgentSpec from arguments and dispatch sync or async."""
-        from agent_framework.models.subagent import (
-            MemoryScope, SpawnContextMode, SpawnMode, SubAgentSpec,
-        )
         from agent_framework.context.builder import ContextBuilder
+        from agent_framework.models.subagent import (MemoryScope,
+                                                     SpawnContextMode,
+                                                     SpawnMode, SubAgentSpec)
 
         mode_str = args.get("mode", "ephemeral").upper()
         scope_str = args.get("memory_scope", "isolated").upper()
         context_mode_str = args.get("context_mode", "minimal").upper()
         wait = args.get("wait", True)
-        # In progressive mode, force wait=True — the batch_execute_progressive
-        # already handles "return as each completes". Using wait=False would
-        # make spawn instant (just returns spawn_id) defeating progressive's purpose.
-        if self._progressive_mode:
+        # Progressive mode + collection_strategy coexistence:
+        #
+        # Progressive controls INTRA-iteration tool result streaming.
+        # Collection strategy controls INTER-iteration spawn result batching.
+        # They operate at different layers and should NOT conflict.
+        #
+        # Rule: If LLM explicitly sets wait=false, respect it regardless of
+        # progressive mode — the LLM wants async spawn + collection_strategy.
+        # Only force wait=true when LLM didn't explicitly request async.
+        llm_explicitly_async = "wait" in args and not args["wait"]
+        if self._progressive_mode and not llm_explicitly_async:
             wait = True
         parent_agent = self._parent_agent_getter() if self._parent_agent_getter else None
         parent_run_id = self._current_run_id
@@ -471,10 +487,25 @@ class ToolExecutor:
         if not wait:
             spawn_id = await self._delegation.delegate_to_subagent_async(spec, parent_agent)
             logger.info("tool.routing.subagent.async_submitted", spawn_id=spawn_id)
+
+            # Register in LeadCollector for batch collection
+            label = args.get("label", "") or f"Agent {spawn_id[:8]}"
+            # LLM can override; falls back to config default
+            strategy_str = args.get("collection_strategy", "").upper()
+            if strategy_str not in ("SEQUENTIAL", "BATCH_ALL", "HYBRID"):
+                strategy_str = self._default_collection_strategy
+            self._ensure_lead_collector(strategy_str)
+            self._lead_collector.register_spawn(spawn_id, spec.task_input, label)
+
             return {
                 "spawn_id": spawn_id,
                 "status": "PENDING",
-                "message": "Sub-agent started asynchronously. Use check_spawn_result to collect the result.",
+                "label": label,
+                "collection_strategy": strategy_str,
+                "message": (
+                    "Sub-agent started asynchronously. Use check_spawn_result to collect the result. "
+                    f"Collection strategy: {strategy_str}. Use batch_pull=true for batch collection."
+                ),
             }
 
         result = await self._delegation.delegate_to_subagent(spec, parent_agent)
@@ -489,7 +520,30 @@ class ToolExecutor:
         return DelegationExecutor.summarize_result(result).model_dump()
 
     async def _subagent_collect(self, args: dict) -> dict:
-        """Collect async sub-agent result by spawn_id."""
+        """Collect async sub-agent result — single or batch."""
+        batch_pull = args.get("batch_pull", False)
+
+        # Batch pull: use LeadCollector strategy
+        if batch_pull and self._lead_collector is None:
+            return {
+                "error": "No async agents spawned in this run. "
+                "Use spawn_agent(wait=false) first, then check_spawn_result(batch_pull=true).",
+                "results": [],
+                "total_spawned": 0,
+            }
+        if batch_pull and self._lead_collector is not None:
+            async def _collect_fn(sid: str, wait: bool = False) -> dict | None:
+                r = await self._delegation.collect_subagent_result(sid, wait=wait)
+                if r is None:
+                    # Return sentinel-marked dict so LeadCollector knows it's still running
+                    return {"spawn_id": sid, "status": "RUNNING", "_still_running": True}
+                from agent_framework.tools.delegation import DelegationExecutor
+                return DelegationExecutor.summarize_result(r).model_dump()
+
+            batch_result = await self._lead_collector.pull(_collect_fn)
+            return batch_result.model_dump()
+
+        # Single spawn_id collect (original behavior)
         spawn_id = args.get("spawn_id", "")
         wait = args.get("wait", True)
         result = await self._delegation.collect_subagent_result(spawn_id, wait=wait)
@@ -497,6 +551,44 @@ class ToolExecutor:
             return {"spawn_id": spawn_id, "status": "RUNNING"}
         from agent_framework.tools.delegation import DelegationExecutor
         return DelegationExecutor.summarize_result(result).model_dump()
+
+    def _ensure_lead_collector(self, strategy_str: str) -> None:
+        """Create LeadCollector on first async spawn if not exists.
+
+        Falls back to config default when strategy_str is empty or invalid.
+        Uses config-driven poll_interval_ms for SEQUENTIAL/HYBRID polling.
+
+        If collector already exists and a different strategy is requested,
+        logs a warning — the first spawn's strategy wins for the entire run.
+        """
+        if self._lead_collector is not None:
+            current = self._lead_collector.strategy.value
+            if strategy_str and strategy_str != current:
+                logger.warning(
+                    "tool.lead_collector.strategy_mismatch",
+                    requested=strategy_str,
+                    active=current,
+                    hint="Collection strategy is set by the first async spawn and cannot change mid-run",
+                )
+            return
+        from agent_framework.subagent.lead_collector import (
+            CollectionStrategy, LeadCollector,
+        )
+        # Resolve: explicit arg → config default → HYBRID
+        effective = strategy_str or self._default_collection_strategy
+        try:
+            strategy = CollectionStrategy(effective)
+        except ValueError:
+            strategy = CollectionStrategy.HYBRID
+        self._lead_collector = LeadCollector(
+            strategy=strategy,
+            poll_interval_ms=self._collection_poll_interval_ms,
+        )
+        logger.info(
+            "tool.lead_collector.created",
+            strategy=strategy.value,
+            poll_interval_ms=self._collection_poll_interval_ms,
+        )
 
     def _handle_tool_error(
         self, tool_name: str, error: Exception, entry: ToolEntry | None = None, start: float = 0.0, tool_call_id: str = ""

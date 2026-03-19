@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from agent_framework.infra.logger import get_logger
 from agent_framework.models.plugin import PluginManifest, PluginStatus
-from agent_framework.plugins.errors import PluginConflictError, PluginValidationError
+from agent_framework.plugins.errors import (PluginConflictError,
+                                            PluginValidationError)
 from agent_framework.plugins.protocol import PluginProtocol
 
 logger = get_logger(__name__)

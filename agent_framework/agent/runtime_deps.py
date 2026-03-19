@@ -4,17 +4,15 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from agent_framework.protocols.core import (
-        ConfirmationHandlerProtocol,
-        ContextEngineerProtocol,
-        DelegationExecutorProtocol,
-        MemoryManagerProtocol,
-        ModelAdapterProtocol,
-        SkillRouterProtocol,
-        SubAgentRuntimeProtocol,
-        ToolExecutorProtocol,
-        ToolRegistryProtocol,
-    )
+    from agent_framework.protocols.core import (ConfirmationHandlerProtocol,
+                                                ContextEngineerProtocol,
+                                                DelegationExecutorProtocol,
+                                                MemoryManagerProtocol,
+                                                ModelAdapterProtocol,
+                                                SkillRouterProtocol,
+                                                SubAgentRuntimeProtocol,
+                                                ToolExecutorProtocol,
+                                                ToolRegistryProtocol)
 
 
 @dataclass

@@ -23,11 +23,12 @@ import asyncio
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 from agent_framework.entry import AgentFramework
 from agent_framework.infra.config import load_config
 from agent_framework.models.message import ToolCallRequest
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 
 
 async def demo_subagent_sync(fw: AgentFramework) -> None:

@@ -24,7 +24,8 @@ async def main():
 
     # Initialize MCP (requires `pip install mcp`)
     try:
-        from agent_framework.protocols.mcp.mcp_client_manager import MCPClientManager
+        from agent_framework.protocols.mcp.mcp_client_manager import \
+            MCPClientManager
 
         mcp = MCPClientManager()
         await mcp.connect_server(config)

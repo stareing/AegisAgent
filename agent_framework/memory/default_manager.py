@@ -4,16 +4,11 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from agent_framework.memory.base_manager import BaseMemoryManager
-from agent_framework.models.memory import (
-    CommitDecision,
-    MemoryCandidateSource,
-    MemoryCandidate,
-    MemoryConfidence,
-    MemoryKind,
-    MemoryRecord,
-    MemorySourceContext,
-    MemoryUpdateAction,
-)
+from agent_framework.models.memory import (CommitDecision, MemoryCandidate,
+                                           MemoryCandidateSource,
+                                           MemoryConfidence, MemoryKind,
+                                           MemoryRecord, MemorySourceContext,
+                                           MemoryUpdateAction)
 
 if TYPE_CHECKING:
     from agent_framework.models.agent import AgentState, IterationResult

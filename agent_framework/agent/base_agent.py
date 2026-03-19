@@ -2,20 +2,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from agent_framework.models.agent import (
-    AgentConfig,
-    AgentState,
-    CapabilityPolicy,
-    ContextPolicy,
-    ErrorStrategy,
-    IterationResult,
-    MemoryPolicy,
-    SpawnDecision,
-    StopDecision,
-    StopReason,
-    StopSignal,
-    ToolCallDecision,
-)
+from agent_framework.models.agent import (AgentConfig, AgentState,
+                                          CapabilityPolicy, ContextPolicy,
+                                          ErrorStrategy, IterationResult,
+                                          MemoryPolicy, SpawnDecision,
+                                          StopDecision, StopReason, StopSignal,
+                                          ToolCallDecision)
 from agent_framework.models.message import ToolCallRequest
 from agent_framework.models.tool import ToolResult
 

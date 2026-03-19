@@ -13,7 +13,8 @@ async def main():
     framework.setup(auto_approve_tools=True)
 
     try:
-        from agent_framework.protocols.a2a.a2a_client_adapter import A2AClientAdapter
+        from agent_framework.protocols.a2a.a2a_client_adapter import \
+            A2AClientAdapter
 
         a2a = A2AClientAdapter()
 

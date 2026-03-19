@@ -12,30 +12,19 @@ from __future__ import annotations
 
 import pytest
 
-from agent_framework.models.plugin import (
-    HIGH_RISK_PERMISSIONS,
-    PluginManifest,
-    PluginPermission,
-    PluginStatus,
-)
-from agent_framework.models.hook import (
-    HookContext,
-    HookMeta,
-    HookPoint,
-    HookResult,
-    HookResultAction,
-)
 from agent_framework.hooks.registry import HookRegistry
-from agent_framework.plugins.registry import PluginRegistry
+from agent_framework.models.hook import (HookContext, HookMeta, HookPoint,
+                                         HookResult, HookResultAction)
+from agent_framework.models.plugin import (HIGH_RISK_PERMISSIONS,
+                                           PluginManifest, PluginPermission,
+                                           PluginStatus)
+from agent_framework.plugins.errors import (PluginConflictError,
+                                            PluginLifecycleError,
+                                            PluginPermissionError,
+                                            PluginValidationError)
 from agent_framework.plugins.lifecycle import PluginLifecycleManager
 from agent_framework.plugins.loader import PluginLoader
-from agent_framework.plugins.errors import (
-    PluginConflictError,
-    PluginLifecycleError,
-    PluginPermissionError,
-    PluginValidationError,
-)
-
+from agent_framework.plugins.registry import PluginRegistry
 
 # ---------------------------------------------------------------------------
 # Test helpers
@@ -511,6 +500,7 @@ class TestPluginCommandLifecycle:
     def test_disable_removes_commands(self) -> None:
         """After disable, plugin commands must not remain in SkillRouter."""
         from unittest.mock import MagicMock
+
         from agent_framework.models.agent import Skill
 
         preg = PluginRegistry()
@@ -538,6 +528,7 @@ class TestPluginCommandLifecycle:
     def test_enable_rollback_removes_commands(self) -> None:
         """If enable fails after commands registered, commands must be rolled back."""
         from unittest.mock import MagicMock
+
         from agent_framework.models.agent import Skill
 
         preg = PluginRegistry()

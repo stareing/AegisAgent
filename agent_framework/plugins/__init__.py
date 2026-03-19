@@ -14,16 +14,13 @@ Design invariants:
 - Disabled plugins' hooks are never executed
 """
 
-from agent_framework.models.plugin import (
-    HIGH_RISK_PERMISSIONS,
-    PluginManifest,
-    PluginPermission,
-    PluginStatus,
-)
+from agent_framework.models.plugin import (HIGH_RISK_PERMISSIONS,
+                                           PluginManifest, PluginPermission,
+                                           PluginStatus)
+from agent_framework.plugins.lifecycle import PluginLifecycleManager
+from agent_framework.plugins.loader import PluginLoader
 from agent_framework.plugins.protocol import PluginProtocol
 from agent_framework.plugins.registry import PluginRegistry
-from agent_framework.plugins.loader import PluginLoader
-from agent_framework.plugins.lifecycle import PluginLifecycleManager
 
 __all__ = [
     "HIGH_RISK_PERMISSIONS",

@@ -22,15 +22,12 @@ import inspect
 from typing import TYPE_CHECKING, Any, Callable, Sequence
 
 from agent_framework.graph.constants import END, START
+from agent_framework.graph.errors import (DuplicateNodeError, InvalidEdgeError,
+                                          NodeNotFoundError)
 
 if TYPE_CHECKING:
     from agent_framework.graph.compiled import CompiledGraph
 
-from agent_framework.graph.errors import (
-    DuplicateNodeError,
-    InvalidEdgeError,
-    NodeNotFoundError,
-)
 
 # Type aliases
 NodeFn = Callable[..., Any]  # sync or async (state) -> partial update

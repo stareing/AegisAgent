@@ -16,22 +16,17 @@ Design invariants:
 - Execution order is stable: priority → plugin_id → hook_id
 """
 
-from agent_framework.hooks.models import (
-    HookCategory,
-    HookContext,
-    HookExecutionMode,
-    HookFailurePolicy,
-    HookMeta,
-    HookPoint,
-    HookResult,
-    HookResultAction,
-)
+from agent_framework.hooks.dispatcher import HookDispatchService
+from agent_framework.hooks.executor import HookExecutor
+from agent_framework.hooks.interpreter import (HookChainOutcome,
+                                               interpret_hook_results)
+from agent_framework.hooks.models import (HookCategory, HookContext,
+                                          HookExecutionMode, HookFailurePolicy,
+                                          HookMeta, HookPoint, HookResult,
+                                          HookResultAction)
 from agent_framework.hooks.protocol import AsyncHookProtocol, HookProtocol
 from agent_framework.hooks.registry import HookRegistry
-from agent_framework.hooks.executor import HookExecutor
-from agent_framework.hooks.interpreter import HookChainOutcome, interpret_hook_results
 from agent_framework.hooks.singleton import HookSubsystem
-from agent_framework.hooks.dispatcher import HookDispatchService
 
 __all__ = [
     "HookCategory",

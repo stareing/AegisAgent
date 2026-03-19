@@ -4,7 +4,8 @@ import uuid
 from html import escape as _xml_escape
 from typing import TYPE_CHECKING, Any
 
-from agent_framework.context.transaction_group import ToolTransactionGroup, TransactionGroupIndex
+from agent_framework.context.transaction_group import (ToolTransactionGroup,
+                                                       TransactionGroupIndex)
 from agent_framework.models.memory import MemoryRecord
 from agent_framework.models.message import Message
 

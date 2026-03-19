@@ -14,17 +14,17 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from agent_framework.context.transaction_group import ToolTransactionGroup
-from agent_framework.context.source_provider import ContextSourceProvider
 from agent_framework.context.builder import ContextBuilder
 from agent_framework.context.compressor import ContextCompressor
 from agent_framework.context.engineer import ContextEngineer
-from agent_framework.models.agent import AgentConfig, AgentState, AgentStatus, Skill
+from agent_framework.context.source_provider import ContextSourceProvider
+from agent_framework.context.transaction_group import ToolTransactionGroup
+from agent_framework.models.agent import (AgentConfig, AgentState, AgentStatus,
+                                          Skill)
 from agent_framework.models.context import ContextStats
 from agent_framework.models.memory import MemoryKind, MemoryRecord
 from agent_framework.models.message import Message, ToolCallRequest
 from agent_framework.models.session import SessionState
-
 
 # =====================================================================
 # ToolTransactionGroup
@@ -380,6 +380,7 @@ class TestContextCompressor:
     async def test_source_hash_invalidates_frozen_async(self):
         """Async LLM path: stale hash must invalidate frozen summary entirely."""
         from unittest.mock import AsyncMock as AM
+
         from agent_framework.context.compressor import SummaryBlock
 
         comp = ContextCompressor(token_counter=self.counter)
@@ -667,7 +668,8 @@ class TestFrozenPromptPrefix:
 
     def test_session_mode_default_stateless(self):
         """Default adapter session mode is stateless."""
-        from agent_framework.adapters.model.base_adapter import BaseModelAdapter, SessionMode
+        from agent_framework.adapters.model.base_adapter import (
+            BaseModelAdapter, SessionMode)
         sm = SessionMode()
         assert sm.active is False
 

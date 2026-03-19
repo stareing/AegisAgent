@@ -71,7 +71,8 @@ class TestBuildSafeEnv:
 
     def test_only_whitelisted_keys_present(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Result contains only whitelisted keys plus AGENT_FS_SANDBOX_ROOTS."""
-        from agent_framework.tools.builtin.shell import _ENV_WHITELIST, _build_safe_env
+        from agent_framework.tools.builtin.shell import (_ENV_WHITELIST,
+                                                         _build_safe_env)
 
         monkeypatch.setenv("PATH", "/usr/bin")
         monkeypatch.setenv("RANDOM_VAR", "should_not_appear")
@@ -95,8 +96,8 @@ class TestShellEnabledFlag:
 
     def test_shell_disabled_excludes_shell_tools(self) -> None:
         """When shell_enabled=False, shell tools are not registered."""
-        from agent_framework.tools.catalog import GlobalToolCatalog
         from agent_framework.tools.builtin import register_all_builtins
+        from agent_framework.tools.catalog import GlobalToolCatalog
 
         catalog = GlobalToolCatalog()
         register_all_builtins(catalog, shell_enabled=False)
@@ -110,8 +111,8 @@ class TestShellEnabledFlag:
 
     def test_shell_enabled_includes_shell_tools(self) -> None:
         """When shell_enabled=True, shell tools are registered."""
-        from agent_framework.tools.catalog import GlobalToolCatalog
         from agent_framework.tools.builtin import register_all_builtins
+        from agent_framework.tools.catalog import GlobalToolCatalog
 
         catalog = GlobalToolCatalog()
         register_all_builtins(catalog, shell_enabled=True)
@@ -126,8 +127,8 @@ class TestShellEnabledFlag:
 
     def test_get_env_via_bash(self) -> None:
         """get_env removed; env vars accessed via bash_exec('echo $VAR')."""
-        from agent_framework.tools.catalog import GlobalToolCatalog
         from agent_framework.tools.builtin import register_all_builtins
+        from agent_framework.tools.catalog import GlobalToolCatalog
 
         catalog = GlobalToolCatalog()
         register_all_builtins(catalog, shell_enabled=False)

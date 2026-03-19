@@ -318,14 +318,29 @@ class SpawnAgentArgs(BaseModel):
         default=True,
         description="Block until completion (True) or return spawn_id (False)",
     )
+    collection_strategy: str = Field(
+        default="HYBRID",
+        description="SEQUENTIAL (one at a time), BATCH_ALL (wait for all), or HYBRID (collect all completed per pull)",
+    )
+    label: str = Field(
+        default="",
+        description="Human-readable label for this agent (e.g. 'Agent A — shell.py')",
+    )
 
 
 class CheckSpawnResultArgs(BaseModel):
     """Parameters for check_spawn_result tool."""
-    spawn_id: str = Field(description="Spawn ID from spawn_agent(wait=false)")
+    spawn_id: str = Field(
+        default="",
+        description="Spawn ID from spawn_agent(wait=false). Required for single-agent check.",
+    )
     wait: bool = Field(
         default=True,
         description="Block until completion (True) or check status (False)",
+    )
+    batch_pull: bool = Field(
+        default=False,
+        description="Pull results per collection strategy (ignores spawn_id)",
     )
 
 

@@ -19,7 +19,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from agent_framework.agent.message_projector import MessageProjector
-from agent_framework.models.agent import AgentState, AgentStatus, IterationResult, StopSignal
+from agent_framework.models.agent import (AgentState, AgentStatus,
+                                          IterationResult, StopSignal)
 
 if TYPE_CHECKING:
     from agent_framework.models.agent import Skill

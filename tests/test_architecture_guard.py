@@ -15,19 +15,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agent_framework.models.message import Message, ModelResponse, TokenUsage, ToolCallRequest
-from agent_framework.models.agent import (
-    AgentConfig,
-    AgentRunResult,
-    AgentState,
-    AgentStatus,
-    IterationResult,
-    StopReason,
-    StopSignal,
-    TerminationKind,
-)
+from agent_framework.models.agent import (AgentConfig, AgentRunResult,
+                                          AgentState, AgentStatus,
+                                          IterationResult, StopReason,
+                                          StopSignal, TerminationKind)
+from agent_framework.models.message import (Message, ModelResponse, TokenUsage,
+                                            ToolCallRequest)
 from agent_framework.models.tool import ToolExecutionError, ToolResult
-
 
 # =====================================================================
 # PART 1: Anti-Bypass Scan — automated code-level boundary checks
@@ -174,7 +168,8 @@ class TestAntiBypassScan:
 
     def test_consume_transaction_index_no_uuid(self):
         """_consume_transaction_index must not generate new UUIDs."""
-        from agent_framework.context.source_provider import ContextSourceProvider
+        from agent_framework.context.source_provider import \
+            ContextSourceProvider
         source = inspect.getsource(ContextSourceProvider._consume_transaction_index)
         assert "uuid" not in source
 
@@ -324,8 +319,9 @@ class TestFaultInjection:
     @pytest.mark.asyncio
     async def test_subagent_timeout_produces_failure(self):
         """Sub-agent timeout → SubAgentResult.success=False."""
+        from agent_framework.models.subagent import (SubAgentHandle,
+                                                     SubAgentResult)
         from agent_framework.subagent.scheduler import SubAgentScheduler
-        from agent_framework.models.subagent import SubAgentHandle, SubAgentResult
 
         sched = SubAgentScheduler(max_per_run=5)
         handle = SubAgentHandle(
@@ -512,7 +508,8 @@ class TestDataFlowInvariants:
 
     def test_session_snapshot_frozen(self):
         """SessionSnapshot must not reflect post-creation changes."""
-        from agent_framework.models.session import SessionSnapshot, SessionState
+        from agent_framework.models.session import (SessionSnapshot,
+                                                    SessionState)
         session = SessionState(session_id="s1")
         session.append_message(Message(role="user", content="a"))
         snap = SessionSnapshot(session)
@@ -594,9 +591,10 @@ class TestDataFlowInvariants:
     def test_resolved_policy_bundle_immutable(self):
         """ResolvedRunPolicyBundle must be frozen."""
         from agent_framework.agent.run_policy import ResolvedRunPolicyBundle
-        from agent_framework.models.agent import (
-            CapabilityPolicy, ContextPolicy, EffectiveRunConfig, MemoryPolicy,
-        )
+        from agent_framework.models.agent import (CapabilityPolicy,
+                                                  ContextPolicy,
+                                                  EffectiveRunConfig,
+                                                  MemoryPolicy)
         bundle = ResolvedRunPolicyBundle(
             effective_run_config=EffectiveRunConfig(),
             context_policy=ContextPolicy(),
@@ -610,8 +608,9 @@ class TestDataFlowInvariants:
 
     def test_whitelist_never_expands_beyond_safe_set(self):
         """tool_category_whitelist can only narrow, never expand."""
-        from agent_framework.subagent.factory import _resolve_effective_tool_names
         from agent_framework.models.tool import ToolEntry, ToolMeta
+        from agent_framework.subagent.factory import \
+            _resolve_effective_tool_names
 
         tools = [
             ToolEntry(meta=ToolMeta(name="calc", category="math", source="local")),
@@ -630,9 +629,8 @@ class TestDataFlowInvariants:
 
     def test_all_error_codes_mapped_to_status(self):
         """Every DelegationErrorCode must have a SubAgentStatus mapping."""
-        from agent_framework.models.subagent import (
-            DelegationErrorCode, _ERROR_CODE_TO_STATUS,
-        )
+        from agent_framework.models.subagent import (_ERROR_CODE_TO_STATUS,
+                                                     DelegationErrorCode)
         for code in DelegationErrorCode:
             assert code in _ERROR_CODE_TO_STATUS, f"{code} unmapped"
 
@@ -641,8 +639,7 @@ class TestDataFlowInvariants:
     def test_all_stop_reasons_mapped(self):
         """Every StopReason must map to a TerminationKind."""
         from agent_framework.models.agent import (
-            StopReason, _STOP_REASON_TO_TERMINATION_KIND,
-        )
+            _STOP_REASON_TO_TERMINATION_KIND, StopReason)
         for reason in StopReason:
             assert reason in _STOP_REASON_TO_TERMINATION_KIND, f"{reason} unmapped"
 
@@ -673,10 +670,10 @@ class TestDataFlowInvariants:
 
     def test_index_consumed_without_regeneration(self):
         """When TransactionGroupIndex is provided, group IDs must be preserved."""
-        from agent_framework.context.source_provider import ContextSourceProvider
+        from agent_framework.context.source_provider import \
+            ContextSourceProvider
         from agent_framework.context.transaction_group import (
-            ToolTransactionGroup, TransactionGroupIndex,
-        )
+            ToolTransactionGroup, TransactionGroupIndex)
         from agent_framework.models.session import SessionState
 
         provider = ContextSourceProvider()

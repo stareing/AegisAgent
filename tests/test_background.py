@@ -15,11 +15,8 @@ import time
 
 import pytest
 
-from agent_framework.tools.background import (
-    BackgroundNotification,
-    BackgroundNotifier,
-)
-
+from agent_framework.tools.background import (BackgroundNotification,
+                                              BackgroundNotifier)
 
 # ══════════════════════════════════════════════════════════════════
 # 1. Notification formatting
@@ -394,6 +391,7 @@ class TestKillShellBackgroundOnly:
     async def test_kill_actually_kills_os_process(self):
         """kill_shell must SIGKILL the OS subprocess, verified by pid liveness check."""
         import os as _os
+
         from agent_framework.tools.shell.shell_manager import BashSession
 
         session = BashSession()

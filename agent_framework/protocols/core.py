@@ -1,35 +1,31 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, AsyncIterator, Protocol, runtime_checkable
+from typing import (TYPE_CHECKING, Any, AsyncIterator, Protocol,
+                    runtime_checkable)
 
-from agent_framework.models.memory import (
-    CommitDecision,
-    MemoryCandidate,
-    MemoryKind,
-    MemoryRecord,
-    MemorySourceContext,
-    RunSessionOutcome,
-)
-from agent_framework.models.message import Message, ModelResponse, ToolCallRequest
-from agent_framework.models.tool import ToolEntry, ToolExecutionMeta, ToolResult
+from agent_framework.models.memory import (CommitDecision, MemoryCandidate,
+                                           MemoryKind, MemoryRecord,
+                                           MemorySourceContext,
+                                           RunSessionOutcome)
+from agent_framework.models.message import (Message, ModelResponse,
+                                            ToolCallRequest)
+from agent_framework.models.tool import (ToolEntry, ToolExecutionMeta,
+                                         ToolResult)
 
 if TYPE_CHECKING:
     from agent_framework.adapters.model.base_adapter import ModelChunk
-    from agent_framework.models.agent import (
-        AgentState, ContextPolicy, IterationResult, MemoryPolicy, MemoryQuota, Skill,
-    )
+    from agent_framework.models.agent import (AgentState, ContextPolicy,
+                                              IterationResult, MemoryPolicy,
+                                              MemoryQuota, Skill)
     from agent_framework.models.context import ContextStats
-    from agent_framework.models.hook import HookContext, HookMeta, HookPoint, HookResult
+    from agent_framework.models.hook import (HookContext, HookMeta, HookPoint,
+                                             HookResult)
     from agent_framework.models.plugin import PluginManifest
-    from agent_framework.models.subagent import (
-        DelegationEvent,
-        HITLRequest,
-        HITLResponse,
-        SubAgentCheckpoint,
-        SubAgentHandle,
-        SubAgentResult,
-        SubAgentSpec,
-    )
+    from agent_framework.models.subagent import (DelegationEvent, HITLRequest,
+                                                 HITLResponse,
+                                                 SubAgentCheckpoint,
+                                                 SubAgentHandle,
+                                                 SubAgentResult, SubAgentSpec)
 
 
 # ---------------------------------------------------------------------------

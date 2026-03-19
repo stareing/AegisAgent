@@ -1,0 +1,14 @@
+{
+  "model": {
+    "adapter_type": "deepseek",
+    "default_model_name": "deepseek-chat",
+    "api_key": "${DEEPSEEK_API_KEY}"
+  },
+  "subagent": {
+    "max_sub_agents_per_run": 10,
+    "max_concurrent_sub_agents": 5,
+    "default_collection_strategy": "SEQUENTIAL",
+    "collection_poll_interval_ms": 300
+  },
+  "logging": { "level": "INFO" }
+}

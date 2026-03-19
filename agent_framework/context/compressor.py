@@ -222,7 +222,8 @@ class ContextCompressor:
             return groups
 
         # Build text and call LLM via shared summarizer
-        from agent_framework.context.summarizer import call_llm_compress, messages_to_text
+        from agent_framework.context.summarizer import (call_llm_compress,
+                                                        messages_to_text)
 
         uncovered_msgs = [msg for g in uncovered_groups for msg in g.messages]
         history_text = messages_to_text(uncovered_msgs)

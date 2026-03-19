@@ -10,19 +10,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from agent_framework.infra.logger import get_logger
 from agent_framework.hooks.registry import HookRegistry
-from agent_framework.models.plugin import (
-    HIGH_RISK_PERMISSIONS,
-    PluginPermission,
-    PluginStatus,
-)
-from agent_framework.plugins.errors import (
-    PluginLifecycleError,
-    PluginPermissionError,
-    PluginValidationError,
-)
-from agent_framework.plugins.extensions import PluginExtensionRegistrar, PluginApplyReceipt
+from agent_framework.infra.logger import get_logger
+from agent_framework.models.plugin import (HIGH_RISK_PERMISSIONS,
+                                           PluginPermission, PluginStatus)
+from agent_framework.plugins.errors import (PluginLifecycleError,
+                                            PluginPermissionError,
+                                            PluginValidationError)
+from agent_framework.plugins.extensions import (PluginApplyReceipt,
+                                                PluginExtensionRegistrar)
 from agent_framework.plugins.protocol import PluginProtocol
 from agent_framework.plugins.registry import PluginRegistry
 

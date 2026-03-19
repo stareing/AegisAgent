@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -114,6 +113,22 @@ class SubAgentConfig(BaseModel):
     SOFT (exceed → graceful degradation, trimming, or warning):
     - per_sub_agent_max_tokens   — context trimmed if over budget
     - max_concurrent_sub_agents  — excess queued, not rejected
+
+    Collection strategy (for multi-agent orchestration):
+    - default_collection_strategy — "HYBRID" | "SEQUENTIAL" | "BATCH_ALL"
+      Controls how the Lead agent collects results from async sub-agents.
+      LLM can override per-spawn via spawn_agent(collection_strategy=...).
+    - collection_poll_interval_ms — polling interval for SEQUENTIAL/HYBRID modes.
+
+    execution_mode vs collection_strategy interaction:
+    - execution_mode="progressive" controls INTRA-iteration tool result streaming
+      (all tools in one LLM turn streamed as they complete).
+    - collection_strategy controls INTER-iteration spawn result batching
+      (async spawns collected across multiple LLM turns).
+    - They operate at different layers. LLM can use spawn_agent(wait=false)
+      even in progressive mode to opt into collection_strategy.
+    - When LLM uses spawn_agent(wait=true) in progressive mode, progressive
+      handles the streaming; collection_strategy is not involved.
     """
 
     max_sub_agents_per_run: int = 5
@@ -124,6 +139,8 @@ class SubAgentConfig(BaseModel):
     allow_recursive_spawn: bool = False
     max_spawn_depth: int = 1
     execution_mode: str = "progressive"  # "parallel" | "progressive"
+    default_collection_strategy: str = "HYBRID"  # "SEQUENTIAL" | "BATCH_ALL" | "HYBRID"
+    collection_poll_interval_ms: int = 500
 
 
 class SkillConfig(BaseModel):

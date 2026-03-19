@@ -11,10 +11,11 @@ import asyncio
 import concurrent.futures
 from typing import Any
 
-from agent_framework.infra.logger import get_logger
 from agent_framework.hooks.errors import HookDeniedError
 from agent_framework.hooks.executor import HookExecutor
-from agent_framework.hooks.interpreter import HookChainOutcome, interpret_hook_results
+from agent_framework.hooks.interpreter import (HookChainOutcome,
+                                               interpret_hook_results)
+from agent_framework.infra.logger import get_logger
 from agent_framework.models.hook import HookContext, HookPoint
 
 logger = get_logger(__name__)

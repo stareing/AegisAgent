@@ -25,7 +25,6 @@ from pydantic import BaseModel, Field
 
 from agent_framework.models.message import Message, TokenUsage
 
-
 # ---------------------------------------------------------------------------
 # Core Enums
 # ---------------------------------------------------------------------------
@@ -66,6 +65,23 @@ class WaitMode(str, Enum):
 
     BLOCKING = "BLOCKING"
     NON_BLOCKING = "NON_BLOCKING"
+
+
+class CollectionStrategy(str, Enum):
+    """How the Lead agent collects results from multiple spawned sub-agents.
+
+    SEQUENTIAL (Mode A): Collect one result at a time. Lead gets a decision
+        window after each. Good for dependent tasks needing mid-course correction.
+    BATCH_ALL (Mode B): Wait for all spawns to complete, collect all at once.
+        Good for independent tasks where only the merged result matters.
+    HYBRID (Mode C, default): Each pull returns ALL currently-completed results.
+        Degrades to SEQUENTIAL when 1 completes, to BATCH_ALL when all complete
+        simultaneously. Recommended default for most orchestration scenarios.
+    """
+
+    SEQUENTIAL = "SEQUENTIAL"
+    BATCH_ALL = "BATCH_ALL"
+    HYBRID = "HYBRID"
 
 
 class DelegationMode(str, Enum):

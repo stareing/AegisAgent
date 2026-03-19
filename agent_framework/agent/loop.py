@@ -6,30 +6,27 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from agent_framework.hooks.dispatcher import HookDispatchService
+from agent_framework.hooks.payloads import (iteration_error_payload,
+                                            iteration_finish_payload,
+                                            iteration_start_payload)
 from agent_framework.infra.logger import get_logger
 from agent_framework.infra.telemetry import get_tracing_manager
-from agent_framework.hooks.dispatcher import HookDispatchService
-from agent_framework.hooks.payloads import (
-    iteration_start_payload, iteration_finish_payload, iteration_error_payload,
-)
-from agent_framework.models.hook import HookPoint
-from agent_framework.models.agent import (
-    AgentState,
-    EffectiveRunConfig,
-    ErrorStrategy,
-    IterationError,
-    IterationResult,
-    StopReason,
-    StopSignal,
-)
+from agent_framework.models.agent import (AgentState, EffectiveRunConfig,
+                                          ErrorStrategy, IterationError,
+                                          IterationResult, StopReason,
+                                          StopSignal)
 from agent_framework.models.context import LLMRequest
-from agent_framework.models.message import ModelResponse, TokenUsage, ToolCallRequest
+from agent_framework.models.hook import HookPoint
+from agent_framework.models.message import (ModelResponse, TokenUsage,
+                                            ToolCallRequest)
 from agent_framework.models.stream import StreamEvent, StreamEventType
 from agent_framework.models.tool import ToolExecutionMeta, ToolResult
 
 if TYPE_CHECKING:
     from agent_framework.agent.base_agent import BaseAgent
-    from agent_framework.protocols.core import ModelAdapterProtocol, ToolExecutorProtocol
+    from agent_framework.protocols.core import (ModelAdapterProtocol,
+                                                ToolExecutorProtocol)
 
 logger = get_logger(__name__)
 

@@ -15,9 +15,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from agent_framework.infra.event_bus import EventBus
 from agent_framework.infra.disk_store import DiskStore
-
+from agent_framework.infra.event_bus import EventBus
 
 # =====================================================================
 # EventBus

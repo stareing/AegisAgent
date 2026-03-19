@@ -9,36 +9,29 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
+from agent_framework.hooks.dispatcher import HookDispatchService
+from agent_framework.hooks.errors import HookDeniedError
+from agent_framework.hooks.payloads import (delegation_error_payload,
+                                            delegation_post_payload)
 from agent_framework.infra.logger import get_logger
 from agent_framework.models.hook import HookPoint
-from agent_framework.hooks.errors import HookDeniedError
-from agent_framework.hooks.dispatcher import HookDispatchService
-from agent_framework.hooks.payloads import (
-    delegation_post_payload, delegation_error_payload,
-)
+from agent_framework.models.subagent import (ArtifactRef, DelegationErrorCode,
+                                             DelegationEventType,
+                                             DelegationMode, DelegationSummary,
+                                             HITLRequest, HITLResponse,
+                                             SubAgentResult, SubAgentSpec,
+                                             SubAgentStatus,
+                                             SubAgentSuspendInfo,
+                                             SubAgentSuspendReason,
+                                             resolve_delegation_status)
 from agent_framework.tools.delegation_hooks import (
-    apply_pre_delegation_hooks, _DelegationConfirmationDenied,
-)
-from agent_framework.models.subagent import (
-    ArtifactRef,
-    DelegationErrorCode,
-    DelegationEventType,
-    DelegationMode,
-    DelegationSummary,
-    HITLRequest,
-    HITLResponse,
-    SubAgentResult,
-    SubAgentSpec,
-    SubAgentStatus,
-    SubAgentSuspendInfo,
-    SubAgentSuspendReason,
-    resolve_delegation_status,
-)
+    _DelegationConfirmationDenied, apply_pre_delegation_hooks)
 
 if TYPE_CHECKING:
     from agent_framework.agent.base_agent import BaseAgent
     from agent_framework.protocols.core import SubAgentRuntimeProtocol
-    from agent_framework.subagent.interaction_channel import InMemoryInteractionChannel
+    from agent_framework.subagent.interaction_channel import \
+        InMemoryInteractionChannel
 
 logger = get_logger(__name__)
 

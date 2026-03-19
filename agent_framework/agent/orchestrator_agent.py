@@ -12,15 +12,9 @@ from __future__ import annotations
 
 from agent_framework.agent.base_agent import BaseAgent
 from agent_framework.agent.prompt_templates import ORCHESTRATOR_SYSTEM_PROMPT
-from agent_framework.models.agent import (
-    AgentConfig,
-    AgentState,
-    IterationResult,
-    SpawnDecision,
-    StopDecision,
-    StopReason,
-    StopSignal,
-)
+from agent_framework.models.agent import (AgentConfig, AgentState,
+                                          IterationResult, SpawnDecision,
+                                          StopDecision, StopReason, StopSignal)
 
 # Default synthesis budget: 0 = unlimited
 _DEFAULT_MAX_POST_SPAWN_ITERATIONS = 0

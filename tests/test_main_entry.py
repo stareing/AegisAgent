@@ -5,17 +5,14 @@ from types import SimpleNamespace
 import pytest
 
 import agent_framework.main as main_module
-from agent_framework.textual_cli import AegisAgentApp, _filter_entries
-from agent_framework.terminal_runtime import (
-    CommandPaletteEntry,
-    ReplState,
-    _execute_with_progressive,
-    format_result,
-)
 from agent_framework.infra.config import FrameworkConfig
 from agent_framework.models.agent import AgentRunResult, IterationResult
 from agent_framework.models.message import Message, ModelResponse, TokenUsage
 from agent_framework.models.stream import StreamEvent, StreamEventType
+from agent_framework.terminal_runtime import (CommandPaletteEntry, ReplState,
+                                              _execute_with_progressive,
+                                              format_result)
+from agent_framework.textual_cli import AegisAgentApp, _filter_entries
 
 
 def test_main_delegates_to_cli_run(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -179,10 +176,6 @@ async def test_execute_with_progressive_preserves_event_text_order(capsys: pytes
                     "output": "result 1",
                 },
             )
-            yield StreamEvent(
-                type=StreamEventType.PROGRESSIVE_RESPONSE,
-                data={"text": "mid response", "index": 1, "total": 2},
-            )
             yield StreamEvent(type=StreamEventType.DONE, data={"result": result})
 
     import agent_framework.terminal_runtime as _rt
@@ -197,10 +190,9 @@ async def test_execute_with_progressive_preserves_event_text_order(capsys: pytes
     tool_pos = captured.index("[tool]")
     start_pos = captured.index("启动:")
     done_pos = captured.index("完成:")
-    progressive_pos = captured.index("Agent [1/2]:")
     final_pos = output.index("Agent 最终回复")
 
-    assert tool_pos < start_pos < done_pos < progressive_pos
+    assert tool_pos < start_pos < done_pos
     assert "final answer" in output
     assert final_pos >= 0
 

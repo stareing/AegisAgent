@@ -1,0 +1,71 @@
+{
+  "next_id": 5,
+  "tasks": {
+    "1": {
+      "id": 1,
+      "subject": "并发测试工具需求梳理与功能设计",
+      "description": "明确工具功能边界，确定技术选型，设计核心流程：1. 支持自定义并发数、请求总数、请求地址、方法、头体配置；2. 性能指标统计逻辑；3. 输出格式设计",
+      "status": "pending",
+      "blockedBy": [],
+      "blocks": [
+        2
+      ],
+      "owner": "",
+      "activeForm": "",
+      "metadata": {},
+      "created_at": 1773922347.629758,
+      "updated_at": 1773922347.6297581
+    },
+    "2": {
+      "id": 2,
+      "subject": "并发测试工具代码实现",
+      "description": "使用Python实现工具核心功能，基于aiohttp实现异步并发请求，集成指标统计逻辑，支持配置参数输入",
+      "status": "pending",
+      "blockedBy": [
+        1
+      ],
+      "blocks": [
+        3,
+        4
+      ],
+      "owner": "",
+      "activeForm": "",
+      "metadata": {},
+      "created_at": 1773922347.6301477,
+      "updated_at": 1773922347.630148
+    },
+    "3": {
+      "id": 3,
+      "subject": "编写工具使用说明文档",
+      "description": "包含安装依赖、参数说明、使用示例、输出指标解释",
+      "status": "pending",
+      "blockedBy": [
+        2
+      ],
+      "blocks": [
+        4
+      ],
+      "owner": "",
+      "activeForm": "",
+      "metadata": {},
+      "created_at": 1773922347.6304643,
+      "updated_at": 1773922347.6304643
+    },
+    "4": {
+      "id": 4,
+      "subject": "工具功能验证",
+      "description": "测试工具各项功能是否正常，验证指标输出准确性，修复潜在问题",
+      "status": "pending",
+      "blockedBy": [
+        2,
+        3
+      ],
+      "blocks": [],
+      "owner": "",
+      "activeForm": "",
+      "metadata": {},
+      "created_at": 1773922347.6311777,
+      "updated_at": 1773922347.631178
+    }
+  }
+}

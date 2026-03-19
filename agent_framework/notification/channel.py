@@ -18,18 +18,17 @@ from __future__ import annotations
 import html
 from typing import TYPE_CHECKING, Any
 
-from agent_framework.models.subagent import (
-    AckLevel,
-    DelegationEventSummary,
-    DelegationEventType,
-    RuntimeNotification,
-    RuntimeNotificationType,
-    SubAgentStatus,
-)
-from agent_framework.tools.background import BackgroundNotification, BackgroundNotifier
+from agent_framework.models.subagent import (AckLevel, DelegationEventSummary,
+                                             DelegationEventType,
+                                             RuntimeNotification,
+                                             RuntimeNotificationType,
+                                             SubAgentStatus)
+from agent_framework.tools.background import (BackgroundNotification,
+                                              BackgroundNotifier)
 
 if TYPE_CHECKING:
-    from agent_framework.subagent.interaction_channel import InMemoryInteractionChannel
+    from agent_framework.subagent.interaction_channel import \
+        InMemoryInteractionChannel
 
 
 class RuntimeNotificationChannel:

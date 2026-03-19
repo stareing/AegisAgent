@@ -9,12 +9,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from agent_framework.memory.base_manager import BaseMemoryManager
-from agent_framework.models.memory import (
-    MemoryCandidate,
-    MemoryKind,
-    MemoryRecord,
-    MemoryUpdateAction,
-)
+from agent_framework.models.memory import (MemoryCandidate, MemoryKind,
+                                           MemoryRecord, MemoryUpdateAction)
 
 if TYPE_CHECKING:
     from agent_framework.models.agent import AgentState, IterationResult

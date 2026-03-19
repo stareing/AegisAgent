@@ -14,11 +14,8 @@ import uuid
 from collections import defaultdict
 from datetime import datetime, timezone
 
-from agent_framework.models.subagent import (
-    AckLevel,
-    DelegationEvent,
-    DelegationEventType,
-)
+from agent_framework.models.subagent import (AckLevel, DelegationEvent,
+                                             DelegationEventType)
 
 
 class InMemoryInteractionChannel:
