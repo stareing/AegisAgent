@@ -15,11 +15,8 @@ import time
 
 import pytest
 
-from agent_framework.tools.background import (
-    BackgroundNotification,
-    BackgroundNotifier,
-)
-
+from agent_framework.notification.background import (BackgroundNotification,
+                                              BackgroundNotifier)
 
 # ══════════════════════════════════════════════════════════════════
 # 1. Notification formatting
@@ -159,13 +156,14 @@ class TestCoordinatorIntegration:
         assert "<background-results>" in msgs[0].content
         assert "Noted" in msgs[1].content
 
-    def test_no_drain_when_no_pending(self):
+    @pytest.mark.asyncio
+    async def test_no_drain_when_no_pending(self):
         from agent_framework.agent.coordinator import RunCoordinator
         from agent_framework.models.session import SessionState
 
         coordinator = RunCoordinator()
         session = SessionState()
-        coordinator._drain_background_notifications(session)
+        await coordinator._drain_background_notifications(session)
         assert len(session.get_messages()) == 0
 
     def test_notifier_is_instance_level(self):
@@ -393,6 +391,7 @@ class TestKillShellBackgroundOnly:
     async def test_kill_actually_kills_os_process(self):
         """kill_shell must SIGKILL the OS subprocess, verified by pid liveness check."""
         import os as _os
+
         from agent_framework.tools.shell.shell_manager import BashSession
 
         session = BashSession()

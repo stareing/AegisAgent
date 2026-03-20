@@ -3,21 +3,19 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
-from agent_framework.models.hook import HookPoint
-from agent_framework.hooks.errors import HookDeniedError
 from agent_framework.hooks.dispatcher import HookDispatchService
-from agent_framework.hooks.payloads import memory_pre_record_payload, memory_post_record_payload
-from agent_framework.models.memory import (
-    CommitDecision,
-    MemoryCandidate,
-    MemoryRecord,
-    MemorySourceContext,
-    MemoryUpdateAction,
-    RunSessionOutcome,
-)
+from agent_framework.hooks.errors import HookDeniedError
+from agent_framework.hooks.payloads import (memory_post_record_payload,
+                                            memory_pre_record_payload)
+from agent_framework.models.hook import HookPoint
+from agent_framework.models.memory import (CommitDecision, MemoryCandidate,
+                                           MemoryRecord, MemorySourceContext,
+                                           MemoryUpdateAction,
+                                           RunSessionOutcome)
 
 if TYPE_CHECKING:
-    from agent_framework.models.agent import AgentState, IterationResult, MemoryPolicy, MemoryQuota
+    from agent_framework.models.agent import (AgentState, IterationResult,
+                                              MemoryPolicy, MemoryQuota)
     from agent_framework.protocols.core import MemoryStoreProtocol
 
 

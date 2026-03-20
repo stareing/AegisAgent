@@ -1,16 +1,17 @@
 import ast
 import inspect
 import os
+import platform
 import re
 from string import Template
-from typing import List, Callable, Tuple
+from typing import Callable, List, Tuple
 
 import click
 from dotenv import load_dotenv
 from openai import OpenAI
-import platform
 
-from agent_framework.examples.react_prompt_reference import react_system_prompt_template
+from agent_framework.examples.react_prompt_reference import \
+    react_system_prompt_template
 
 
 class ReActAgent:

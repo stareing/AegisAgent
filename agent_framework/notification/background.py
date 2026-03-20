@@ -77,7 +77,8 @@ class BackgroundNotifier:
             return []
 
         try:
-            from agent_framework.tools.shell.process_registry import ShellSessionManager
+            from agent_framework.tools.shell.process_registry import \
+                ShellSessionManager
         except ImportError:
             return []
 

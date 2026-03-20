@@ -5,32 +5,19 @@ from __future__ import annotations
 import asyncio
 import operator
 from typing import Annotated
-from typing_extensions import TypedDict
 
 import pytest
+from typing_extensions import TypedDict
 
-from agent_framework.graph import (
-    END,
-    START,
-    CompiledGraph,
-    DuplicateNodeError,
-    GraphCompilationError,
-    GraphRuntimeError,
-    GraphStreamEvent,
-    InMemorySaver,
-    InvalidEdgeError,
-    InvalidStateUpdateError,
-    NodeNotFoundError,
-    NoPathToEndError,
-    StateGraph,
-    StreamMode,
-    UnreachableNodeError,
-    apply_update,
-    extract_reducers,
-    passthrough_node,
-    tool_node,
-)
-
+from agent_framework.graph import (END, START, CompiledGraph,
+                                   DuplicateNodeError, GraphCompilationError,
+                                   GraphRuntimeError, GraphStreamEvent,
+                                   InMemorySaver, InvalidEdgeError,
+                                   InvalidStateUpdateError, NodeNotFoundError,
+                                   NoPathToEndError, StateGraph, StreamMode,
+                                   UnreachableNodeError, apply_update,
+                                   extract_reducers, passthrough_node,
+                                   tool_node)
 
 # ── Test state schemas ─────────────────────────────────────────────
 

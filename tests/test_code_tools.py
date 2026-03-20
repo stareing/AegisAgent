@@ -177,7 +177,8 @@ class TestGrepSearch:
 
     def test_respects_gitignore(self, tmp_path: Path) -> None:
         """Files matching .gitignore patterns are excluded by default."""
-        from agent_framework.tools.builtin.search import grep_search, _load_gitignore_rules
+        from agent_framework.tools.builtin.search import (
+            _load_gitignore_rules, grep_search)
 
         _load_gitignore_rules.cache_clear()
         # Simulate a git repo
@@ -197,7 +198,8 @@ class TestGrepSearch:
 
     def test_include_gitignored_flag(self, tmp_path: Path) -> None:
         """include_gitignored=True searches everything."""
-        from agent_framework.tools.builtin.search import grep_search, _load_gitignore_rules
+        from agent_framework.tools.builtin.search import (
+            _load_gitignore_rules, grep_search)
 
         _load_gitignore_rules.cache_clear()
         (tmp_path / ".git").mkdir()
@@ -210,7 +212,8 @@ class TestGrepSearch:
 
     def test_gitignore_negation(self, tmp_path: Path) -> None:
         """! negation patterns un-ignore previously ignored files."""
-        from agent_framework.tools.builtin.search import grep_search, _load_gitignore_rules
+        from agent_framework.tools.builtin.search import (
+            _load_gitignore_rules, grep_search)
 
         _load_gitignore_rules.cache_clear()
         (tmp_path / ".git").mkdir()
@@ -240,9 +243,9 @@ class TestGlobFiles:
         assert "a.py" in result[0]
 
     def test_sorted_by_mtime(self, tmp_path: Path) -> None:
-        from agent_framework.tools.builtin.search import glob_files
-
         import time
+
+        from agent_framework.tools.builtin.search import glob_files
         f1 = tmp_path / "old.txt"
         f1.write_text("old")
         time.sleep(0.05)
@@ -265,7 +268,9 @@ class TestGlobFiles:
 
 class TestBashExec:
     def test_basic_command(self) -> None:
-        from agent_framework.tools.builtin.shell import bash_exec, ShellSessionManager as _ShellSessionManager
+        from agent_framework.tools.builtin.shell import \
+            ShellSessionManager as _ShellSessionManager
+        from agent_framework.tools.builtin.shell import bash_exec
         _ShellSessionManager._sessions.clear()  # fresh session
 
         result = asyncio.run(bash_exec("echo hello"))
@@ -273,7 +278,9 @@ class TestBashExec:
         assert "hello" in result["output"]
 
     def test_persistent_cwd(self) -> None:
-        from agent_framework.tools.builtin.shell import bash_exec, ShellSessionManager as _ShellSessionManager
+        from agent_framework.tools.builtin.shell import \
+            ShellSessionManager as _ShellSessionManager
+        from agent_framework.tools.builtin.shell import bash_exec
         _ShellSessionManager._sessions.clear()
 
         async def _run():
@@ -285,21 +292,27 @@ class TestBashExec:
         assert "/tmp" in result["output"]
 
     def test_exit_code(self) -> None:
-        from agent_framework.tools.builtin.shell import bash_exec, ShellSessionManager as _ShellSessionManager
+        from agent_framework.tools.builtin.shell import \
+            ShellSessionManager as _ShellSessionManager
+        from agent_framework.tools.builtin.shell import bash_exec
         _ShellSessionManager._sessions.clear()
 
         result = asyncio.run(bash_exec("false"))
         assert result["exit_code"] != 0
 
     def test_timeout(self) -> None:
-        from agent_framework.tools.builtin.shell import bash_exec, ShellSessionManager as _ShellSessionManager
+        from agent_framework.tools.builtin.shell import \
+            ShellSessionManager as _ShellSessionManager
+        from agent_framework.tools.builtin.shell import bash_exec
         _ShellSessionManager._sessions.clear()
 
         result = asyncio.run(bash_exec("sleep 10", timeout_seconds=1))
         assert result["timed_out"] is True
 
     def test_background_and_output(self) -> None:
-        from agent_framework.tools.builtin.shell import bash_exec, bash_output, ShellSessionManager as _ShellSessionManager
+        from agent_framework.tools.builtin.shell import \
+            ShellSessionManager as _ShellSessionManager
+        from agent_framework.tools.builtin.shell import bash_exec, bash_output
         _ShellSessionManager._sessions.clear()
 
         async def _run():
@@ -316,7 +329,9 @@ class TestBashExec:
 
 class TestKillShell:
     def test_kill(self) -> None:
-        from agent_framework.tools.builtin.shell import bash_exec, kill_shell, ShellSessionManager as _ShellSessionManager
+        from agent_framework.tools.builtin.shell import \
+            ShellSessionManager as _ShellSessionManager
+        from agent_framework.tools.builtin.shell import bash_exec, kill_shell
         _ShellSessionManager._sessions.clear()
 
         async def _run():
@@ -330,9 +345,9 @@ class TestKillShell:
 
 class TestTaskStop:
     def test_task_stop_aliases_single_background_stop(self) -> None:
-        from agent_framework.tools.builtin.shell import (
-            bash_exec, task_stop, ShellSessionManager as _ShellSessionManager,
-        )
+        from agent_framework.tools.builtin.shell import \
+            ShellSessionManager as _ShellSessionManager
+        from agent_framework.tools.builtin.shell import bash_exec, task_stop
         _ShellSessionManager._sessions.clear()
 
         async def _run():
@@ -385,6 +400,7 @@ class TestTaskManager:
 
     def setup_method(self) -> None:
         import tempfile
+
         from agent_framework.tools.todo import TaskManager
         self._tmp = tempfile.mkdtemp()
         self._mgr = TaskManager(self._tmp)

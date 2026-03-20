@@ -9,8 +9,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from agent_framework.infra.logger import get_logger
 from agent_framework.hooks.registry import HookRegistry
+from agent_framework.infra.logger import get_logger
 
 logger = get_logger(__name__)
 

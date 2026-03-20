@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from agent_framework.terminal_runtime import CommandPaletteEntry, ReplState, score_palette_entry
+from agent_framework.terminal_runtime import (CommandPaletteEntry, ReplState,
+                                              score_palette_entry)
 
 
 def test_repl_state_records_recent_commands_in_mru_order() -> None:

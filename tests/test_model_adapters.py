@@ -14,25 +14,24 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
+import types
 from typing import Any, AsyncIterator
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agent_framework.adapters.model.base_adapter import (
-    LLMAuthError,
-    LLMCallError,
-    LLMRateLimitError,
-    LLMTimeoutError,
-    ModelChunk,
-)
-from agent_framework.models.message import (
-    Message,
-    ModelResponse,
-    ToolCallRequest,
-    TokenUsage,
-)
-
+from agent_framework.adapters.model.base_adapter import \
+    BaseModelAdapter as _BaseModelAdapter
+from agent_framework.adapters.model.base_adapter import (LLMAuthError,
+                                                         LLMCallError,
+                                                         LLMRateLimitError,
+                                                         LLMTimeoutError,
+                                                         ModelChunk)
+from agent_framework.adapters.model.fallback_adapter import \
+    FallbackModelAdapter
+from agent_framework.models.message import (Message, ModelResponse, TokenUsage,
+                                            ToolCallRequest)
 
 # =====================================================================
 # Fixtures: Shared tool schemas & messages
@@ -82,7 +81,8 @@ class TestOpenAIAdapterMessageConversion:
 
     def _get_adapter_class(self):
         with patch("openai.AsyncOpenAI"):
-            from agent_framework.adapters.model.openai_adapter import OpenAIAdapter
+            from agent_framework.adapters.model.openai_adapter import \
+                OpenAIAdapter
             return OpenAIAdapter
 
     def test_simple_messages_to_dicts(self):
@@ -143,7 +143,8 @@ class TestOpenAIAdapterResponseParsing:
 
     def _make_adapter(self):
         with patch("openai.AsyncOpenAI"):
-            from agent_framework.adapters.model.openai_adapter import OpenAIAdapter
+            from agent_framework.adapters.model.openai_adapter import \
+                OpenAIAdapter
             return OpenAIAdapter(model_name="gpt-4o")
 
     def _make_raw_response(
@@ -297,7 +298,8 @@ class TestOpenAIAdapterBuildKwargs:
 
     def _make_adapter(self, **kw):
         with patch("openai.AsyncOpenAI"):
-            from agent_framework.adapters.model.openai_adapter import OpenAIAdapter
+            from agent_framework.adapters.model.openai_adapter import \
+                OpenAIAdapter
             return OpenAIAdapter(model_name="gpt-4o", **kw)
 
     def test_basic_kwargs(self):
@@ -344,7 +346,8 @@ class TestOpenAIAdapterRetryAndErrors:
         import openai as openai_module
 
         with patch("openai.AsyncOpenAI") as MockClient:
-            from agent_framework.adapters.model.openai_adapter import OpenAIAdapter
+            from agent_framework.adapters.model.openai_adapter import \
+                OpenAIAdapter
 
             adapter = OpenAIAdapter(model_name="gpt-4o", max_retries=3)
             mock_create = AsyncMock(
@@ -366,7 +369,8 @@ class TestOpenAIAdapterRetryAndErrors:
         import openai as openai_module
 
         with patch("openai.AsyncOpenAI"):
-            from agent_framework.adapters.model.openai_adapter import OpenAIAdapter
+            from agent_framework.adapters.model.openai_adapter import \
+                OpenAIAdapter
 
             adapter = OpenAIAdapter(model_name="gpt-4o", max_retries=2)
             mock_create = AsyncMock(
@@ -388,7 +392,8 @@ class TestOpenAIAdapterRetryAndErrors:
         import openai as openai_module
 
         with patch("openai.AsyncOpenAI"):
-            from agent_framework.adapters.model.openai_adapter import OpenAIAdapter
+            from agent_framework.adapters.model.openai_adapter import \
+                OpenAIAdapter
 
             adapter = OpenAIAdapter(model_name="gpt-4o", max_retries=2)
             mock_create = AsyncMock(
@@ -406,7 +411,8 @@ class TestOpenAIAdapterRetryAndErrors:
         import openai as openai_module
 
         with patch("openai.AsyncOpenAI"):
-            from agent_framework.adapters.model.openai_adapter import OpenAIAdapter
+            from agent_framework.adapters.model.openai_adapter import \
+                OpenAIAdapter
 
             adapter = OpenAIAdapter(model_name="gpt-4o", max_retries=2)
             mock_create = AsyncMock(
@@ -426,7 +432,8 @@ class TestOpenAIAdapterRetryAndErrors:
     @pytest.mark.asyncio
     async def test_successful_complete(self):
         with patch("openai.AsyncOpenAI"):
-            from agent_framework.adapters.model.openai_adapter import OpenAIAdapter
+            from agent_framework.adapters.model.openai_adapter import \
+                OpenAIAdapter
 
             adapter = OpenAIAdapter(model_name="gpt-4o", max_retries=1)
 
@@ -457,7 +464,8 @@ class TestOpenAIAdapterRetryAndErrors:
 
     def test_supports_parallel_tool_calls(self):
         with patch("openai.AsyncOpenAI"):
-            from agent_framework.adapters.model.openai_adapter import OpenAIAdapter
+            from agent_framework.adapters.model.openai_adapter import \
+                OpenAIAdapter
             adapter = OpenAIAdapter(model_name="gpt-4o")
             assert adapter.supports_parallel_tool_calls() is True
 
@@ -467,7 +475,8 @@ class TestOpenAIAdapterTokenCounting:
 
     def test_count_tokens_fallback(self):
         with patch("openai.AsyncOpenAI"):
-            from agent_framework.adapters.model.openai_adapter import OpenAIAdapter
+            from agent_framework.adapters.model.openai_adapter import \
+                OpenAIAdapter
             adapter = OpenAIAdapter(model_name="unknown-model-xyz")
             # With an unknown model, tiktoken may raise; fallback to char estimate
             count = adapter.count_tokens([Message(role="user", content="Hello world")])
@@ -475,7 +484,8 @@ class TestOpenAIAdapterTokenCounting:
 
     def test_count_tokens_empty_messages(self):
         with patch("openai.AsyncOpenAI"):
-            from agent_framework.adapters.model.openai_adapter import OpenAIAdapter
+            from agent_framework.adapters.model.openai_adapter import \
+                OpenAIAdapter
             adapter = OpenAIAdapter(model_name="gpt-4o")
             count = adapter.count_tokens([])
             assert count == 0
@@ -491,7 +501,8 @@ class TestAnthropicAdapterMessageConversion:
 
     def _get_adapter_class(self):
         with patch("anthropic.AsyncAnthropic"):
-            from agent_framework.adapters.model.anthropic_adapter import AnthropicAdapter
+            from agent_framework.adapters.model.anthropic_adapter import \
+                AnthropicAdapter
             return AnthropicAdapter
 
     def test_extract_system_single(self):
@@ -611,7 +622,8 @@ class TestAnthropicAdapterToolConversion:
 
     def _get_adapter_class(self):
         with patch("anthropic.AsyncAnthropic"):
-            from agent_framework.adapters.model.anthropic_adapter import AnthropicAdapter
+            from agent_framework.adapters.model.anthropic_adapter import \
+                AnthropicAdapter
             return AnthropicAdapter
 
     def test_convert_openai_tools_to_anthropic(self):
@@ -654,7 +666,8 @@ class TestAnthropicAdapterResponseParsing:
 
     def _make_adapter(self):
         with patch("anthropic.AsyncAnthropic"):
-            from agent_framework.adapters.model.anthropic_adapter import AnthropicAdapter
+            from agent_framework.adapters.model.anthropic_adapter import \
+                AnthropicAdapter
             return AnthropicAdapter(model_name="claude-sonnet-4-20250514")
 
     def _make_text_block(self, text):
@@ -765,7 +778,8 @@ class TestAnthropicAdapterStreamParsing:
 
     def _get_adapter_class(self):
         with patch("anthropic.AsyncAnthropic"):
-            from agent_framework.adapters.model.anthropic_adapter import AnthropicAdapter
+            from agent_framework.adapters.model.anthropic_adapter import \
+                AnthropicAdapter
             return AnthropicAdapter
 
     def test_parse_text_delta(self):
@@ -848,7 +862,8 @@ class TestAnthropicAdapterRetryAndErrors:
         import anthropic as anthropic_module
 
         with patch("anthropic.AsyncAnthropic"):
-            from agent_framework.adapters.model.anthropic_adapter import AnthropicAdapter
+            from agent_framework.adapters.model.anthropic_adapter import \
+                AnthropicAdapter
 
             adapter = AnthropicAdapter(model_name="claude-sonnet-4-20250514", max_retries=3)
             mock_create = AsyncMock(
@@ -870,7 +885,8 @@ class TestAnthropicAdapterRetryAndErrors:
         import anthropic as anthropic_module
 
         with patch("anthropic.AsyncAnthropic"):
-            from agent_framework.adapters.model.anthropic_adapter import AnthropicAdapter
+            from agent_framework.adapters.model.anthropic_adapter import \
+                AnthropicAdapter
 
             adapter = AnthropicAdapter(model_name="claude-sonnet-4-20250514", max_retries=2)
             mock_create = AsyncMock(
@@ -890,7 +906,8 @@ class TestAnthropicAdapterRetryAndErrors:
     @pytest.mark.asyncio
     async def test_successful_complete(self):
         with patch("anthropic.AsyncAnthropic"):
-            from agent_framework.adapters.model.anthropic_adapter import AnthropicAdapter
+            from agent_framework.adapters.model.anthropic_adapter import \
+                AnthropicAdapter
 
             adapter = AnthropicAdapter(model_name="claude-sonnet-4-20250514", max_retries=1)
 
@@ -916,13 +933,15 @@ class TestAnthropicAdapterRetryAndErrors:
 
     def test_supports_parallel_tool_calls(self):
         with patch("anthropic.AsyncAnthropic"):
-            from agent_framework.adapters.model.anthropic_adapter import AnthropicAdapter
+            from agent_framework.adapters.model.anthropic_adapter import \
+                AnthropicAdapter
             adapter = AnthropicAdapter(model_name="claude-sonnet-4-20250514")
             assert adapter.supports_parallel_tool_calls() is True
 
     def test_count_tokens_estimate(self):
         with patch("anthropic.AsyncAnthropic"):
-            from agent_framework.adapters.model.anthropic_adapter import AnthropicAdapter
+            from agent_framework.adapters.model.anthropic_adapter import \
+                AnthropicAdapter
             adapter = AnthropicAdapter(model_name="claude-sonnet-4-20250514")
             count = adapter.count_tokens([Message(role="user", content="Hello world")])
             assert count > 0
@@ -933,7 +952,8 @@ class TestAnthropicAdapterBuildKwargs:
 
     def _make_adapter(self):
         with patch("anthropic.AsyncAnthropic"):
-            from agent_framework.adapters.model.anthropic_adapter import AnthropicAdapter
+            from agent_framework.adapters.model.anthropic_adapter import \
+                AnthropicAdapter
             return AnthropicAdapter(model_name="claude-sonnet-4-20250514")
 
     def test_system_extracted_into_kwarg(self):
@@ -969,8 +989,6 @@ class TestAnthropicAdapterBuildKwargs:
 # Google Adapter Tests
 # =====================================================================
 
-import sys
-import types
 
 
 def _mock_google_genai():
@@ -1515,38 +1533,44 @@ class TestAdapterFactory:
     def test_create_openai_adapter(self):
         with patch("openai.AsyncOpenAI"):
             from agent_framework.entry import AgentFramework
-            from agent_framework.infra.config import FrameworkConfig, ModelConfig
+            from agent_framework.infra.config import (FrameworkConfig,
+                                                      ModelConfig)
 
             config = FrameworkConfig(model=ModelConfig(adapter_type="openai", default_model_name="gpt-4o"))
             fw = AgentFramework(config=config)
             adapter = fw._create_model_adapter()
 
-            from agent_framework.adapters.model.openai_adapter import OpenAIAdapter
+            from agent_framework.adapters.model.openai_adapter import \
+                OpenAIAdapter
             assert isinstance(adapter, OpenAIAdapter)
 
     def test_create_anthropic_adapter(self):
         with patch("anthropic.AsyncAnthropic"):
             from agent_framework.entry import AgentFramework
-            from agent_framework.infra.config import FrameworkConfig, ModelConfig
+            from agent_framework.infra.config import (FrameworkConfig,
+                                                      ModelConfig)
 
             config = FrameworkConfig(model=ModelConfig(adapter_type="anthropic", default_model_name="claude-sonnet-4-20250514"))
             fw = AgentFramework(config=config)
             adapter = fw._create_model_adapter()
 
-            from agent_framework.adapters.model.anthropic_adapter import AnthropicAdapter
+            from agent_framework.adapters.model.anthropic_adapter import \
+                AnthropicAdapter
             assert isinstance(adapter, AnthropicAdapter)
 
     def test_create_google_adapter(self):
         _mock_google_genai()
         try:
             from agent_framework.entry import AgentFramework
-            from agent_framework.infra.config import FrameworkConfig, ModelConfig
+            from agent_framework.infra.config import (FrameworkConfig,
+                                                      ModelConfig)
 
             config = FrameworkConfig(model=ModelConfig(adapter_type="google", default_model_name="gemini-2.5-flash"))
             fw = AgentFramework(config=config)
             adapter = fw._create_model_adapter()
 
-            from agent_framework.adapters.model.google_adapter import GoogleAdapter
+            from agent_framework.adapters.model.google_adapter import \
+                GoogleAdapter
             assert isinstance(adapter, GoogleAdapter)
         finally:
             _cleanup_google_genai()
@@ -1559,7 +1583,8 @@ class TestAdapterFactory:
         fw = AgentFramework(config=config)
         adapter = fw._create_model_adapter()
 
-        from agent_framework.adapters.model.litellm_adapter import LiteLLMAdapter
+        from agent_framework.adapters.model.litellm_adapter import \
+            LiteLLMAdapter
         assert isinstance(adapter, LiteLLMAdapter)
 
     def test_create_litellm_adapter_unknown_type(self):
@@ -1571,7 +1596,8 @@ class TestAdapterFactory:
         fw = AgentFramework(config=config)
         adapter = fw._create_model_adapter()
 
-        from agent_framework.adapters.model.litellm_adapter import LiteLLMAdapter
+        from agent_framework.adapters.model.litellm_adapter import \
+            LiteLLMAdapter
         assert isinstance(adapter, LiteLLMAdapter)
 
 
@@ -1590,14 +1616,17 @@ class TestCrossAdapterConsistency:
         _cleanup_google_genai()
 
     def test_all_adapters_inherit_base(self):
-        from agent_framework.adapters.model.base_adapter import BaseModelAdapter
+        from agent_framework.adapters.model.base_adapter import \
+            BaseModelAdapter
 
         with patch("openai.AsyncOpenAI"):
-            from agent_framework.adapters.model.openai_adapter import OpenAIAdapter
+            from agent_framework.adapters.model.openai_adapter import \
+                OpenAIAdapter
             assert issubclass(OpenAIAdapter, BaseModelAdapter)
 
         with patch("anthropic.AsyncAnthropic"):
-            from agent_framework.adapters.model.anthropic_adapter import AnthropicAdapter
+            from agent_framework.adapters.model.anthropic_adapter import \
+                AnthropicAdapter
             assert issubclass(AnthropicAdapter, BaseModelAdapter)
 
         from agent_framework.adapters.model.google_adapter import GoogleAdapter
@@ -1605,11 +1634,13 @@ class TestCrossAdapterConsistency:
 
     def test_all_adapters_support_parallel_tool_calls(self):
         with patch("openai.AsyncOpenAI"):
-            from agent_framework.adapters.model.openai_adapter import OpenAIAdapter
+            from agent_framework.adapters.model.openai_adapter import \
+                OpenAIAdapter
             assert OpenAIAdapter(model_name="gpt-4o").supports_parallel_tool_calls() is True
 
         with patch("anthropic.AsyncAnthropic"):
-            from agent_framework.adapters.model.anthropic_adapter import AnthropicAdapter
+            from agent_framework.adapters.model.anthropic_adapter import \
+                AnthropicAdapter
             assert AnthropicAdapter(model_name="claude-sonnet-4-20250514").supports_parallel_tool_calls() is True
 
         from agent_framework.adapters.model.google_adapter import GoogleAdapter
@@ -1619,11 +1650,13 @@ class TestCrossAdapterConsistency:
         msgs = [Message(role="user", content="Test message")]
 
         with patch("openai.AsyncOpenAI"):
-            from agent_framework.adapters.model.openai_adapter import OpenAIAdapter
+            from agent_framework.adapters.model.openai_adapter import \
+                OpenAIAdapter
             assert isinstance(OpenAIAdapter(model_name="gpt-4o").count_tokens(msgs), int)
 
         with patch("anthropic.AsyncAnthropic"):
-            from agent_framework.adapters.model.anthropic_adapter import AnthropicAdapter
+            from agent_framework.adapters.model.anthropic_adapter import \
+                AnthropicAdapter
             assert isinstance(AnthropicAdapter(model_name="claude-sonnet-4-20250514").count_tokens(msgs), int)
 
         from agent_framework.adapters.model.google_adapter import GoogleAdapter
@@ -1632,8 +1665,6 @@ class TestCrossAdapterConsistency:
 
 # ─── Fallback Adapter Tests ──────────────────────────────────────────
 
-from agent_framework.adapters.model.base_adapter import BaseModelAdapter as _BaseModelAdapter
-from agent_framework.adapters.model.fallback_adapter import FallbackModelAdapter
 
 
 class _StubAdapter(_BaseModelAdapter):

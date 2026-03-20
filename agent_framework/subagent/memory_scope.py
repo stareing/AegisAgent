@@ -3,17 +3,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from agent_framework.memory.base_manager import BaseMemoryManager
-from agent_framework.models.memory import (
-    CommitDecision,
-    MemoryCandidate,
-    MemoryRecord,
-    MemorySourceContext,
-    MemoryUpdateAction,
-)
+from agent_framework.models.memory import (CommitDecision, MemoryCandidate,
+                                           MemoryRecord, MemorySourceContext,
+                                           MemoryUpdateAction)
 
 if TYPE_CHECKING:
     from agent_framework.models.agent import AgentState, IterationResult
-    from agent_framework.protocols.core import MemoryManagerProtocol, MemoryStoreProtocol
+    from agent_framework.protocols.core import (MemoryManagerProtocol,
+                                                MemoryStoreProtocol)
 
 
 class IsolatedMemoryManager(BaseMemoryManager):

@@ -7,36 +7,31 @@ import uuid
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
 
-from agent_framework.infra.logger import get_logger
-from agent_framework.infra.telemetry import get_tracing_manager
-from agent_framework.models.hook import HookPoint
-from agent_framework.hooks.dispatcher import HookDispatchService
-from agent_framework.hooks.payloads import (
-    run_start_payload, run_finish_payload, run_error_payload,
-    artifact_finalize_payload,
-)
 from agent_framework.agent.capability_policy import apply_capability_policy
-from agent_framework.tools.background import BackgroundNotifier
 from agent_framework.agent.commit_sequencer import CommitSequencer
 from agent_framework.agent.loop import AgentLoop, AgentLoopDeps
 from agent_framework.agent.run_policy import RunPolicyResolver
 from agent_framework.agent.run_state import RunStateController
-from agent_framework.models.agent import (
-    AgentRunResult,
-    AgentState,
-    AgentStatus,
-    EffectiveRunConfig,
-    IterationResult,
-    Skill,
-    StopDecision,
-    StopReason,
-    StopSignal,
-)
+from agent_framework.hooks.dispatcher import HookDispatchService
+from agent_framework.hooks.payloads import (artifact_finalize_payload,
+                                            run_error_payload,
+                                            run_finish_payload,
+                                            run_start_payload)
+from agent_framework.infra.logger import get_logger
+from agent_framework.infra.telemetry import get_tracing_manager
+from agent_framework.models.agent import (AgentRunResult, AgentState,
+                                          AgentStatus, EffectiveRunConfig,
+                                          IterationResult, Skill, StopDecision,
+                                          StopReason, StopSignal)
 from agent_framework.models.context import LLMRequest
+from agent_framework.models.hook import HookPoint
+from agent_framework.models.memory import RunSessionOutcome
 from agent_framework.models.message import ContentPart, Message, TokenUsage
 from agent_framework.models.session import SessionState
-from agent_framework.models.memory import RunSessionOutcome
 from agent_framework.models.subagent import Artifact
+from agent_framework.notification.background import BackgroundNotifier
+from agent_framework.notification.channel import \
+    RuntimeNotificationChannel
 
 # Default global run timeout (5 minutes). Prevents hangs from slow models.
 DEFAULT_RUN_TIMEOUT_MS = 300_000
@@ -111,9 +106,12 @@ class RunCoordinator:
         self._cached_tools_schema: list[dict] | None = None
         # Dispatcher for hook dispatch (created per-run from deps.hook_executor)
         self._dispatcher: HookDispatchService | None = None
-        # Background task auto-notification (s08) — instance-level, survives across runs
-        # so tasks that outlive one run are still drained in the next.
+        # Unified notification channel (v3.1) — instance-level, survives across runs.
+        # Handles both background bash tasks AND delegation events.
         self._bg_notifier = BackgroundNotifier()
+        self._notification_channel = RuntimeNotificationChannel(
+            bg_notifier=self._bg_notifier,
+        )
 
     def _build_user_message(
         self,
@@ -302,7 +300,7 @@ class RunCoordinator:
                     break
 
                 # Drain background task notifications before LLM call (s08)
-                self._drain_background_notifications(session_state)
+                await self._drain_background_notifications(session_state, deps)
 
                 # Prepare LLM request
                 # Give executor a fresh session snapshot so spawn can build context seed.
@@ -650,7 +648,7 @@ class RunCoordinator:
                     break
 
                 # Drain background task notifications before LLM call (s08)
-                self._drain_background_notifications(session_state)
+                await self._drain_background_notifications(session_state, deps)
 
                 if hasattr(deps.tool_executor, "set_current_session_messages"):
                     maybe = deps.tool_executor.set_current_session_messages(
@@ -675,8 +673,6 @@ class RunCoordinator:
 
                 iteration_result: IterationResult | None = None
                 progressive = getattr(effective_config, "progressive_tool_results", False)
-                progressive_total = 0
-                progressive_done = 0
                 progressive_assistant_projected = False
 
                 async for item in self._loop.execute_iteration_stream(
@@ -700,36 +696,18 @@ class RunCoordinator:
                             )
                             progressive_assistant_projected = True
 
-                        if (
-                            progressive
-                            and item.type == StreamEventType.PROGRESSIVE_DONE
-                            and iteration_result is None
-                        ):
-                            progressive_done += 1
-                            progressive_total = int(item.data.get("total", 1))
-                            mid_response_text = await self._process_progressive_tool_completion(
-                                agent=agent,
-                                deps=deps,
-                                agent_state=agent_state,
+                        if progressive and item.type == StreamEventType.PROGRESSIVE_DONE:
+                            self._project_progressive_tool_result(
                                 session_state=session_state,
-                                effective_config=effective_config,
-                                active_skill=active_skill,
-                                task=task,
                                 tool_call_id=item.data.get("tool_call_id"),
                                 tool_name=str(item.data.get("tool_name", "spawn_agent")),
-                                output_str=str(item.data.get("output", "")),
-                                current_index=progressive_done,
-                                total=progressive_total,
+                                output_str=str(
+                                    item.data.get(
+                                        "display_text",
+                                        item.data.get("output", ""),
+                                    )
+                                ),
                             )
-                            if mid_response_text:
-                                yield StreamEvent(
-                                    type=StreamEventType.PROGRESSIVE_RESPONSE,
-                                    data={
-                                        "text": mid_response_text,
-                                        "index": progressive_done,
-                                        "total": progressive_total,
-                                    },
-                                )
 
                 assert iteration_result is not None
 
@@ -916,7 +894,11 @@ class RunCoordinator:
     # ------------------------------------------------------------------
 
     def _register_background_tasks(self, iteration_result: IterationResult) -> None:
-        """Detect bash_exec(run_in_background=True) results and register task_ids."""
+        """Detect bash_exec(run_in_background=True) and spawn_agent(async) results.
+
+        Registers background bash tasks for polling, and monitors spawn_ids
+        for delegation event draining.
+        """
         for tr in iteration_result.tool_results:
             if tr.tool_name == "bash_exec" and tr.success:
                 output = tr.output
@@ -924,15 +906,35 @@ class RunCoordinator:
                     task_id = output.get("task_id", "")
                     if task_id:
                         self._bg_notifier.register(task_id)
+            # Monitor async spawns for delegation event draining
+            if tr.tool_name == "spawn_agent" and tr.success:
+                output = tr.output
+                if isinstance(output, dict):
+                    spawn_id = output.get("spawn_id", "")
+                    if spawn_id:
+                        self._notification_channel.monitor_spawn(spawn_id)
 
-    def _drain_background_notifications(self, session_state: SessionState) -> None:
-        """Drain completed background tasks and inject as messages."""
-        if not self._bg_notifier.has_pending:
+    async def _drain_background_notifications(
+        self, session_state: SessionState, deps: AgentRuntimeDeps | None = None,
+    ) -> None:
+        """Drain all pending notifications (background tasks + delegation events).
+
+        Pipeline:
+        1. drain_all() — polls bg tasks + delegation events, ack → RECEIVED
+        2. Format and inject into session as user message + assistant ack
+        3. Advance delegation events to PROJECTED (boundary §4)
+        4. Auto-forward HITL events: QUESTION/CONFIRMATION_REQUEST →
+           event_to_hitl_request → forward_hitl_request → resume_subagent,
+           then advance to HANDLED (boundary §6)
+        """
+        if not self._notification_channel.has_pending:
             return
-        notifications = self._bg_notifier.drain()
+
+        notifications = self._notification_channel.drain_all()
         if not notifications:
             return
-        text = BackgroundNotifier.format_notifications(notifications)
+
+        text = RuntimeNotificationChannel.format_notifications(notifications)
         # Inject as user message + assistant ack (standard message pair)
         self._state_ctrl.append_user_message(
             session_state,
@@ -942,6 +944,101 @@ class RunCoordinator:
             session_state,
             [Message(role="assistant", content="Noted background results.")],
         )
+
+        # Advance delegation events to PROJECTED + auto-forward HITL (boundary §4/§6)
+        delegation_executor = deps.delegation_executor if deps else None
+        for n in notifications:
+            if n.notification_type.value != "delegation_event":
+                continue
+
+            spawn_id = n.payload.get("spawn_id", "")
+            event_id = n.payload.get("event_id", "")
+            event_type = n.payload.get("event_type", "")
+
+            if spawn_id and event_id:
+                self._notification_channel.mark_projected(spawn_id, event_id)
+
+            # Auto-forward HITL events to the delegation executor (boundary §6)
+            if event_type in ("QUESTION", "CONFIRMATION_REQUEST") and delegation_executor:
+                await self._handle_hitl_event(
+                    delegation_executor, n, spawn_id, event_id,
+                )
+
+    async def _handle_hitl_event(
+        self,
+        delegation_executor: Any,
+        notification: Any,
+        spawn_id: str,
+        event_id: str,
+    ) -> None:
+        """Convert a HITL delegation event to HITLRequest, forward, and resume.
+
+        Full chain: event → event_to_hitl_request → forward_hitl_request
+        → HITLResponse → resume_subagent → mark_handled
+        """
+        try:
+            from agent_framework.models.subagent import (DelegationEvent,
+                                                         DelegationEventType)
+            from agent_framework.subagent.hitl import event_to_hitl_request
+
+            # Reconstruct a minimal DelegationEvent from the notification payload
+            payload = notification.payload
+            event_type_str = payload.get("event_type", "")
+            event_type = DelegationEventType(event_type_str)
+            event = DelegationEvent(
+                event_id=event_id,
+                spawn_id=spawn_id,
+                parent_run_id=payload.get("parent_run_id", ""),
+                event_type=event_type,
+                payload=payload.get("data", {}),
+            )
+
+            hitl_request = event_to_hitl_request(event)
+            if hitl_request is None:
+                return
+
+            logger.info(
+                "coordinator.hitl.auto_forward",
+                spawn_id=spawn_id,
+                event_id=event_id,
+                request_type=hitl_request.request_type,
+            )
+
+            response = await delegation_executor.forward_hitl_request(hitl_request)
+            if response is None:
+                # No HITL handler configured — leave at PROJECTED
+                return
+
+            # Resume the sub-agent with the user's response
+            resume_payload: dict = {}
+            if response.response_type == "answer":
+                resume_payload["answer"] = response.answer or response.selected_option or ""
+            elif response.response_type == "confirm":
+                resume_payload["confirmed"] = True
+            elif response.response_type in ("deny", "cancel"):
+                resume_payload["denied"] = True
+
+            await delegation_executor.resume_subagent(
+                spawn_id, resume_payload, None,
+            )
+
+            # Advance to HANDLED — business processing complete (boundary §4)
+            self._notification_channel.mark_handled(spawn_id, event_id)
+
+            logger.info(
+                "coordinator.hitl.completed",
+                spawn_id=spawn_id,
+                event_id=event_id,
+                response_type=response.response_type,
+            )
+
+        except Exception as e:
+            logger.warning(
+                "coordinator.hitl.auto_forward_failed",
+                spawn_id=spawn_id,
+                event_id=event_id,
+                error=str(e),
+            )
 
     @staticmethod
     def _collect_runtime_info(
@@ -1153,8 +1250,8 @@ class RunCoordinator:
         """Stream tool results to LLM one by one, yielding StreamEvents.
 
         Tools have already been executed in parallel by execute_iteration.
-        This method projects each result individually, calls LLM after each,
-        and yields PROGRESSIVE_DONE / PROGRESSIVE_RESPONSE events for real-time UI.
+        This method projects each result individually and yields PROGRESSIVE_DONE
+        for real-time UI. Coordinator does not synthesize mid-stream narration.
 
         Final yield is a _ProgressiveOutcome with stop decision info.
         """
@@ -1164,7 +1261,6 @@ class RunCoordinator:
         tool_metas = iteration_result.tool_execution_meta
         model_response = iteration_result.model_response
         total = len(tool_results)
-
         if model_response:
             self._project_progressive_assistant_message(
                 session_state,
@@ -1198,19 +1294,11 @@ class RunCoordinator:
             else:
                 display_text = output_str
 
-            mid_response_text = await self._process_progressive_tool_completion(
-                agent=agent,
-                deps=deps,
-                agent_state=agent_state,
+            self._project_progressive_tool_result(
                 session_state=session_state,
-                effective_config=effective_config,
-                active_skill=active_skill,
-                task=task,
                 tool_call_id=tr.tool_call_id,
                 tool_name=tr.tool_name,
                 output_str=display_text,
-                current_index=i + 1,
-                total=total,
             )
 
             # Yield PROGRESSIVE_DONE
@@ -1230,12 +1318,6 @@ class RunCoordinator:
                     "index": i + 1, "total": total,
                 },
             )
-
-            if mid_response_text:
-                yield StreamEvent(
-                    type=StreamEventType.PROGRESSIVE_RESPONSE,
-                    data={"text": mid_response_text, "index": i + 1, "total": total},
-                )
 
         # Record the full iteration
         self._state_ctrl.apply_iteration_result(agent_state, iteration_result)
@@ -1266,90 +1348,21 @@ class RunCoordinator:
             tool_calls=tool_calls or None,
         )])
 
-    async def _process_progressive_tool_completion(
+    def _project_progressive_tool_result(
         self,
         *,
-        agent: BaseAgent,
-        deps: AgentRuntimeDeps,
-        agent_state: AgentState,
         session_state: SessionState,
-        effective_config: EffectiveRunConfig,
-        active_skill: Any,
-        task: str,
         tool_call_id: str | None,
         tool_name: str,
         output_str: str,
-        current_index: int,
-        total: int,
-    ) -> str | None:
-        """Project tool result to session and optionally get mid-stream LLM response.
-
-        The mid-response uses a focused prompt so the LLM generates a brief
-        incremental update (not a full summary of all results).
-        """
+    ) -> None:
+        """Project a factual progressive tool result into session state."""
         self._state_ctrl.append_projected_messages(session_state, [Message(
             role="tool",
             content=output_str,
             tool_call_id=tool_call_id,
             name=tool_name,
         )])
-
-        # Skip mid-response for the last tool — the normal iteration loop
-        # will handle the final LLM call with full context.
-        if current_index >= total:
-            return None
-
-        try:
-            # Build a focused mid-response: use session context but inject a
-            # system instruction that constrains the LLM to a brief progress update.
-            if hasattr(deps.tool_executor, "set_current_session_messages"):
-                maybe = deps.tool_executor.set_current_session_messages(
-                    session_state.get_messages()
-                )
-                if inspect.isawaitable(maybe):
-                    await maybe
-
-            # Use focused messages: last few session messages + progress instruction
-            recent_msgs = session_state.get_messages()
-            progress_instruction = Message(
-                role="system",
-                content=(
-                    f"Task {current_index}/{total} just completed. "
-                    f"Give a brief 1-2 sentence progress update about THIS result only. "
-                    f"Do NOT summarize all tasks. Do NOT give a final conclusion. "
-                    f"Other tasks are still running."
-                ),
-            )
-            # Take system + last few messages + progress instruction
-            focused_msgs = []
-            if recent_msgs and recent_msgs[0].role == "system":
-                focused_msgs.append(recent_msgs[0])
-            # Add only the tool call + result pair for this task
-            focused_msgs.append(progress_instruction)
-            # Add the most recent tool result
-            for m in reversed(recent_msgs):
-                if m.role == "tool" and getattr(m, "tool_call_id", None) == tool_call_id:
-                    focused_msgs.append(m)
-                    break
-
-            mid_response = await self._loop._call_llm(
-                deps.model_adapter,
-                focused_msgs,
-                None,  # No tools for mid-response
-                effective_config,
-            )
-            if not mid_response.content:
-                return None
-            self._state_ctrl.append_projected_messages(session_state, [Message(
-                role="assistant", content=mid_response.content,
-            )])
-            if not hasattr(agent_state, "_progressive_responses"):
-                agent_state._progressive_responses = []
-            agent_state._progressive_responses.append(mid_response.content)
-            return mid_response.content
-        except Exception as e:
-            logger.warning("progressive.mid_llm_failed", error=str(e))
-            return None
 
     def _finalize_run(
         self,

@@ -27,27 +27,17 @@ from textual.binding import Binding
 from textual.containers import Container, Horizontal
 from textual.reactive import reactive
 from textual.screen import ModalScreen
-from textual.widgets import (
-    Button,
-    Input,
-    Label,
-    ListItem,
-    ListView,
-    RichLog,
-    Static,
-)
+from textual.widgets import (Button, Input, Label, ListItem, ListView, RichLog,
+                             Static)
 from textual.worker import Worker, WorkerState
 
-from agent_framework.terminal_runtime import (
-    AEGIS_LOGO_LINES,
-    CommandPaletteEntry,
-    ReplState,
-    build_palette_entries,
-    execute_slash_command,
-    execute_user_input,
-    execute_user_input_stream,
-    score_palette_entry,
-)
+from agent_framework.terminal_runtime import (AEGIS_LOGO_LINES,
+                                              CommandPaletteEntry, ReplState,
+                                              build_palette_entries,
+                                              execute_slash_command,
+                                              execute_user_input,
+                                              execute_user_input_stream,
+                                              score_palette_entry)
 
 # ── Colors ─────────────────────────────────────────────────
 _GOLD = "#d9c07c"
@@ -418,6 +408,7 @@ class AegisAgentApp(App[None]):
     async def _initialize(self) -> None:
         """Background worker for loading history and connecting protocols."""
         import uuid
+
         # 1. Load history from DB (IO bound)
         if self._fw._memory_store:
             loaded = await asyncio.to_thread(self._state.load_from_db, self._fw._memory_store, self._project_id)
@@ -569,12 +560,6 @@ class AegisAgentApp(App[None]):
                                 self._append_chat(f"    {line}")
                     else:
                         self._append_chat(f"\n  [{tag} {idx}/{total}] {status} {display}")
-
-                elif event.type == StreamEventType.PROGRESSIVE_RESPONSE:
-                    text_resp = event.data.get("text", "")
-                    idx = event.data.get("index", 0)
-                    total = event.data.get("total", 0)
-                    self._append_chat(f"\n  Agent [{idx}/{total}]: {text_resp}")
 
                 elif event.type == StreamEventType.ERROR:
                     error_msg = event.data.get("error", "unknown error")

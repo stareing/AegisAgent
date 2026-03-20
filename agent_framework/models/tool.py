@@ -5,7 +5,6 @@ from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, Field
 
-
 # ---------------------------------------------------------------------------
 # Unified Error Code Registry
 # ---------------------------------------------------------------------------

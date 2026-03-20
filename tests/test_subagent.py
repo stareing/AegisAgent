@@ -16,15 +16,10 @@ import pytest
 
 from agent_framework.models.agent import AgentConfig
 from agent_framework.models.memory import MemoryRecord
-from agent_framework.models.subagent import (
-    MemoryScope,
-    SpawnMode,
-    SubAgentHandle,
-    SubAgentResult,
-    SubAgentSpec,
-)
+from agent_framework.models.subagent import (MemoryScope, SpawnMode,
+                                             SubAgentHandle, SubAgentResult,
+                                             SubAgentSpec)
 from agent_framework.subagent.scheduler import SubAgentScheduler
-
 
 # =====================================================================
 # SubAgentScheduler
@@ -268,7 +263,8 @@ class TestSubAgentFactory:
         agent, sub_deps = factory.create_agent_and_deps(spec, parent)
 
         # Memory manager should be InheritRead type
-        from agent_framework.subagent.memory_scope import InheritReadMemoryManager
+        from agent_framework.subagent.memory_scope import \
+            InheritReadMemoryManager
         assert isinstance(sub_deps.memory_manager, InheritReadMemoryManager)
 
     def test_create_shared_write_agent(self):
@@ -285,12 +281,13 @@ class TestSubAgentFactory:
         parent = DefaultAgent(agent_id="parent")
         agent, sub_deps = factory.create_agent_and_deps(spec, parent)
 
-        from agent_framework.subagent.memory_scope import SharedWriteMemoryManager
+        from agent_framework.subagent.memory_scope import \
+            SharedWriteMemoryManager
         assert isinstance(sub_deps.memory_manager, SharedWriteMemoryManager)
 
     def test_tool_category_whitelist(self):
-        from agent_framework.subagent.factory import SubAgentFactory
         from agent_framework.models.tool import ToolEntry, ToolMeta
+        from agent_framework.subagent.factory import SubAgentFactory
 
         deps = self._make_parent_deps()
         deps.tool_registry.list_tools.return_value = [
@@ -314,8 +311,8 @@ class TestSubAgentFactory:
         assert isinstance(sub_deps.tool_registry, ScopedToolRegistry)
 
     def test_default_tool_filtering_blocks_dangerous(self):
-        from agent_framework.subagent.factory import SubAgentFactory
         from agent_framework.models.tool import ToolEntry, ToolMeta
+        from agent_framework.subagent.factory import SubAgentFactory
 
         deps = self._make_parent_deps()
         deps.tool_registry.list_tools.return_value = [
@@ -421,8 +418,9 @@ class TestAsyncSpawn:
     @pytest.mark.asyncio
     async def test_runtime_spawn_async_and_collect(self):
         """spawn_async returns spawn_id, collect_result returns result."""
+        from agent_framework.models.agent import (AgentRunResult, StopReason,
+                                                  StopSignal)
         from agent_framework.models.message import TokenUsage
-        from agent_framework.models.agent import AgentRunResult, StopSignal, StopReason
         from agent_framework.subagent.runtime import SubAgentRuntime
 
         mock_deps = MagicMock()
@@ -474,8 +472,9 @@ class TestAsyncSpawn:
     @pytest.mark.asyncio
     async def test_collect_result_nonblocking_while_running(self):
         """collect_result(wait=False) returns None while sub-agent is still running."""
+        from agent_framework.models.agent import (AgentRunResult, StopReason,
+                                                  StopSignal)
         from agent_framework.models.message import TokenUsage
-        from agent_framework.models.agent import AgentRunResult, StopSignal, StopReason
         from agent_framework.subagent.runtime import SubAgentRuntime
 
         mock_deps = MagicMock()
@@ -524,7 +523,7 @@ class TestAsyncSpawn:
     @pytest.mark.asyncio
     async def test_delegation_executor_async_flow(self):
         """DelegationExecutor async spawn + collect produces DelegationSummary."""
-        from agent_framework.tools.delegation import DelegationExecutor
+        from agent_framework.subagent.delegation import DelegationExecutor
 
         mock_runtime = AsyncMock()
         mock_runtime.spawn_async = AsyncMock(return_value="sp_123")
@@ -611,8 +610,8 @@ class TestAsyncLifecycleRegression:
     @pytest.mark.asyncio
     async def test_timeout_sets_task_record_status(self):
         """task_record.status must be TIMEOUT after deadline exceeded."""
-        from agent_framework.subagent.scheduler import SubAgentScheduler
         from agent_framework.models.subagent import SubAgentTaskStatus
+        from agent_framework.subagent.scheduler import SubAgentScheduler
 
         sched = SubAgentScheduler(max_concurrent=3, max_per_run=5)
         task_record = sched.allocate_task_id("r1", "sp_timeout")
@@ -634,8 +633,8 @@ class TestAsyncLifecycleRegression:
     @pytest.mark.asyncio
     async def test_cancel_sets_task_record_status(self):
         """task_record.status must be CANCELLED after cancel."""
-        from agent_framework.subagent.scheduler import SubAgentScheduler
         from agent_framework.models.subagent import SubAgentTaskStatus
+        from agent_framework.subagent.scheduler import SubAgentScheduler
 
         sched = SubAgentScheduler(max_concurrent=3, max_per_run=5)
         task_record = sched.allocate_task_id("r1", "sp_cancel")
@@ -658,8 +657,9 @@ class TestAsyncLifecycleRegression:
     @pytest.mark.asyncio
     async def test_parallel_spawn_not_blocked_by_depth(self):
         """Parallel spawns must not be blocked — depth is for recursive nesting only."""
+        from agent_framework.models.agent import (AgentRunResult, StopReason,
+                                                  StopSignal)
         from agent_framework.models.message import TokenUsage
-        from agent_framework.models.agent import AgentRunResult, StopSignal, StopReason
         from agent_framework.subagent.runtime import SubAgentRuntime
 
         mock_deps = MagicMock()

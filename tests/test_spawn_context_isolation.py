@@ -14,11 +14,8 @@ import pytest
 
 from agent_framework.context.builder import ContextBuilder
 from agent_framework.models.message import Message, ToolCallRequest
-from agent_framework.models.subagent import (
-    SpawnContextMode,
-    SpawnMode,
-    SubAgentSpec,
-)
+from agent_framework.models.subagent import (SpawnContextMode, SpawnMode,
+                                             SubAgentSpec)
 
 
 class TestSpawnContextMode:

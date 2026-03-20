@@ -12,18 +12,21 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from agent_framework.agent.capability_policy import apply_capability_policy
 from agent_framework.models.agent import CapabilityPolicy
 from agent_framework.models.message import ToolCallRequest
 from agent_framework.models.subagent import SubAgentResult, SubAgentSpec
-from agent_framework.models.tool import ToolEntry, ToolExecutionError, ToolMeta, ToolResult
-from agent_framework.tools.decorator import tool, _build_parameters_model, _extract_description
+from agent_framework.models.tool import (ToolEntry, ToolExecutionError,
+                                         ToolMeta, ToolResult)
 from agent_framework.tools.catalog import GlobalToolCatalog
-from agent_framework.tools.registry import ToolRegistry, ScopedToolRegistry, _qualified_name
+from agent_framework.tools.confirmation import (AutoApproveConfirmationHandler,
+                                                CLIConfirmationHandler)
+from agent_framework.tools.decorator import (_build_parameters_model,
+                                             _extract_description, tool)
+from agent_framework.subagent.delegation import DelegationExecutor
 from agent_framework.tools.executor import ToolExecutor
-from agent_framework.tools.confirmation import AutoApproveConfirmationHandler, CLIConfirmationHandler
-from agent_framework.tools.delegation import DelegationExecutor
-from agent_framework.agent.capability_policy import apply_capability_policy
-
+from agent_framework.tools.registry import (ScopedToolRegistry, ToolRegistry,
+                                            _qualified_name)
 
 # =====================================================================
 # @tool decorator

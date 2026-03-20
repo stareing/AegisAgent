@@ -52,8 +52,9 @@ from agent_framework.models.agent import AgentRunResult, Skill
 from agent_framework.models.message import ContentPart, Message
 from agent_framework.models.session import SessionState
 from agent_framework.tools.catalog import GlobalToolCatalog
-from agent_framework.tools.confirmation import AutoApproveConfirmationHandler, CLIConfirmationHandler
-from agent_framework.tools.delegation import DelegationExecutor
+from agent_framework.tools.confirmation import (AutoApproveConfirmationHandler,
+                                                CLIConfirmationHandler)
+from agent_framework.subagent.delegation import DelegationExecutor
 from agent_framework.tools.executor import ToolExecutor
 from agent_framework.tools.registry import ToolRegistry
 
@@ -110,8 +111,8 @@ class AgentFramework:
         self._hook_dispatcher = self._hook_subsystem.dispatcher
 
         # CONFIG_LOADED hook — fires after config is available, before component init
-        from agent_framework.models.hook import HookPoint
         from agent_framework.hooks.payloads import config_loaded_payload
+        from agent_framework.models.hook import HookPoint
         try:
             self._hook_dispatcher.fire_sync_advisory(
                 HookPoint.CONFIG_LOADED,
@@ -162,11 +163,25 @@ class AgentFramework:
         else:
             confirmation = CLIConfirmationHandler()
 
+        # Interaction channel for long-term parent-child delegation (v3.1)
+        from agent_framework.subagent.interaction_channel import \
+            InMemoryInteractionChannel
+        from agent_framework.subagent.hitl import QueueHITLHandler
+
+        self._interaction_channel = InMemoryInteractionChannel(
+            max_events_per_spawn=self.config.long_interaction.max_delegation_events_per_subagent,
+        )
+        self._hitl_handler = QueueHITLHandler(
+            max_pending_per_run=self.config.long_interaction.max_pending_hitl_requests_per_run,
+        )
+
         # Delegation executor (placeholder, wired after subagent runtime)
         delegation_executor = DelegationExecutor(
             sub_agent_runtime=None,
             hook_executor=self._hook_executor,
             confirmation_handler=confirmation,
+            interaction_channel=self._interaction_channel,
+            hitl_handler=self._hitl_handler,
         )
 
         # Tool executor
@@ -177,6 +192,8 @@ class AgentFramework:
             mcp_client_manager=self._mcp_manager,
             parent_agent_getter=lambda: self._agent,
             max_concurrent=self.config.tools.max_concurrent_tool_calls,
+            default_collection_strategy=self.config.subagent.default_collection_strategy,
+            collection_poll_interval_ms=self.config.subagent.collection_poll_interval_ms,
             hook_executor=self._hook_executor,
         )
 
@@ -265,6 +282,8 @@ class AgentFramework:
                 max_concurrent=self.config.subagent.max_concurrent_sub_agents,
                 max_per_run=self.config.subagent.max_sub_agents_per_run,
                 max_spawn_depth=self.config.subagent.max_spawn_depth,
+                live_agent_ttl_seconds=self.config.subagent.live_agent_ttl_seconds,
+                max_live_agents_per_run=self.config.subagent.max_live_agents_per_run,
             )
             self._deps.sub_agent_runtime = sub_runtime
             delegation_executor._sub_agent_runtime = sub_runtime
@@ -276,7 +295,8 @@ class AgentFramework:
         if agent:
             self._agent = agent
         else:
-            from agent_framework.agent.orchestrator_agent import OrchestratorAgent
+            from agent_framework.agent.orchestrator_agent import \
+                OrchestratorAgent
             self._agent = OrchestratorAgent(
                 model_name=self.config.model.default_model_name,
                 temperature=self.config.model.temperature,
@@ -293,10 +313,17 @@ class AgentFramework:
 
         # Bind memory context for memory_admin tools — AFTER agent creation
         # so agent_id matches the actual agent (e.g. "orchestrator" not "default")
-        from agent_framework.tools.builtin.memory_admin import set_memory_context
+        from agent_framework.tools.builtin.memory_admin import \
+            set_memory_context
         set_memory_context(memory_manager, self._agent.agent_id)
 
         self._coordinator = RunCoordinator()
+
+        # Wire interaction channel into coordinator's notification channel (v3.1)
+        self._coordinator._notification_channel.set_interaction_channel(
+            self._interaction_channel
+        )
+
         self._setup_done = True
 
         logger.info(
@@ -350,7 +377,8 @@ class AgentFramework:
         if not cfg.fallback_models:
             return primary
 
-        from agent_framework.adapters.model.fallback_adapter import FallbackModelAdapter
+        from agent_framework.adapters.model.fallback_adapter import \
+            FallbackModelAdapter
 
         fallbacks: list[BaseModelAdapter] = []
         for fb_dict in cfg.fallback_models:
@@ -397,42 +425,95 @@ class AgentFramework:
 
         match adapter_type:
             case "openai":
-                from agent_framework.adapters.model.openai_adapter import OpenAIAdapter
+                from agent_framework.adapters.model.openai_adapter import \
+                    OpenAIAdapter
                 return OpenAIAdapter(**common)
             case "anthropic":
-                from agent_framework.adapters.model.anthropic_adapter import AnthropicAdapter
+                from agent_framework.adapters.model.anthropic_adapter import \
+                    AnthropicAdapter
                 return AnthropicAdapter(**common)
             case "google":
-                from agent_framework.adapters.model.google_adapter import GoogleAdapter
+                from agent_framework.adapters.model.google_adapter import \
+                    GoogleAdapter
                 common.pop("api_base", None)
                 return GoogleAdapter(**common)
+            # --- International OpenAI-compatible providers ---
+            case "openrouter":
+                from agent_framework.adapters.model.openai_compatible_adapter import \
+                    OpenRouterAdapter
+                return OpenRouterAdapter(**common)
+            case "together":
+                from agent_framework.adapters.model.openai_compatible_adapter import \
+                    TogetherAdapter
+                return TogetherAdapter(**common)
+            case "groq":
+                from agent_framework.adapters.model.openai_compatible_adapter import \
+                    GroqAdapter
+                return GroqAdapter(**common)
+            case "fireworks":
+                from agent_framework.adapters.model.openai_compatible_adapter import \
+                    FireworksAdapter
+                return FireworksAdapter(**common)
+            case "mistral":
+                from agent_framework.adapters.model.openai_compatible_adapter import \
+                    MistralAdapter
+                return MistralAdapter(**common)
+            case "perplexity":
+                from agent_framework.adapters.model.openai_compatible_adapter import \
+                    PerplexityAdapter
+                return PerplexityAdapter(**common)
+            # --- Chinese providers ---
             case "deepseek":
-                from agent_framework.adapters.model.openai_compatible_adapter import DeepSeekAdapter
+                from agent_framework.adapters.model.openai_compatible_adapter import \
+                    DeepSeekAdapter
                 return DeepSeekAdapter(**common)
             case "doubao":
-                from agent_framework.adapters.model.openai_compatible_adapter import DoubaoAdapter
+                from agent_framework.adapters.model.openai_compatible_adapter import \
+                    DoubaoAdapter
                 return DoubaoAdapter(**common)
             case "qwen":
-                from agent_framework.adapters.model.openai_compatible_adapter import QwenAdapter
+                from agent_framework.adapters.model.openai_compatible_adapter import \
+                    QwenAdapter
                 return QwenAdapter(**common)
             case "zhipu":
-                from agent_framework.adapters.model.openai_compatible_adapter import ZhipuAdapter
+                from agent_framework.adapters.model.openai_compatible_adapter import \
+                    ZhipuAdapter
                 return ZhipuAdapter(**common)
             case "minimax":
-                from agent_framework.adapters.model.openai_compatible_adapter import MiniMaxAdapter
+                from agent_framework.adapters.model.openai_compatible_adapter import \
+                    MiniMaxAdapter
                 return MiniMaxAdapter(**common)
+            case "siliconflow":
+                from agent_framework.adapters.model.openai_compatible_adapter import \
+                    SiliconFlowAdapter
+                return SiliconFlowAdapter(**common)
+            case "moonshot":
+                from agent_framework.adapters.model.openai_compatible_adapter import \
+                    MoonshotAdapter
+                return MoonshotAdapter(**common)
+            case "baichuan":
+                from agent_framework.adapters.model.openai_compatible_adapter import \
+                    BaichuanAdapter
+                return BaichuanAdapter(**common)
+            case "yi":
+                from agent_framework.adapters.model.openai_compatible_adapter import \
+                    YiAdapter
+                return YiAdapter(**common)
             case "custom":
-                from agent_framework.adapters.model.openai_compatible_adapter import CustomAdapter
+                from agent_framework.adapters.model.openai_compatible_adapter import \
+                    CustomAdapter
                 return CustomAdapter(**common)
             case _:
-                from agent_framework.adapters.model.litellm_adapter import LiteLLMAdapter
+                from agent_framework.adapters.model.litellm_adapter import \
+                    LiteLLMAdapter
                 common.pop("api_key", None)
                 return LiteLLMAdapter(**common)
 
     async def setup_mcp(self) -> None:
         """Connect to configured MCP servers and sync tools."""
         from agent_framework.models.mcp import MCPServerConfig
-        from agent_framework.protocols.mcp.mcp_client_manager import MCPClientManager
+        from agent_framework.protocols.mcp.mcp_client_manager import \
+            MCPClientManager
 
         self._mcp_manager = MCPClientManager()
 
@@ -454,7 +535,8 @@ class AgentFramework:
 
     async def setup_a2a(self) -> None:
         """Discover configured A2A agents and register their tools."""
-        from agent_framework.protocols.a2a.a2a_client_adapter import A2AClientAdapter
+        from agent_framework.protocols.a2a.a2a_client_adapter import \
+            A2AClientAdapter
 
         self._a2a_adapter = A2AClientAdapter()
         if self._deps and self._deps.delegation_executor:
@@ -730,7 +812,8 @@ class AgentFramework:
             app = framework.build_a2a_server(name="my-agent", port=9000)
             uvicorn.run(app, host="0.0.0.0", port=9000)
         """
-        from agent_framework.protocols.a2a.a2a_client_adapter import A2AClientAdapter
+        from agent_framework.protocols.a2a.a2a_client_adapter import \
+            A2AClientAdapter
         adapter = A2AClientAdapter()
         return adapter.build_a2a_server_app(
             self,
@@ -758,9 +841,9 @@ class AgentFramework:
 
     def load_plugin(self, plugin: Any) -> Any:
         """Load and register a plugin."""
+        from agent_framework.plugins.lifecycle import PluginLifecycleManager
         from agent_framework.plugins.loader import PluginLoader
         from agent_framework.plugins.registry import PluginRegistry
-        from agent_framework.plugins.lifecycle import PluginLifecycleManager
         if not hasattr(self, "_plugin_registry"):
             self._plugin_registry = PluginRegistry()
             self._plugin_lifecycle = PluginLifecycleManager(

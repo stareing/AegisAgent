@@ -8,11 +8,9 @@ from agent_framework.infra.logger import get_logger
 from agent_framework.memory.sqlite_store import SQLiteMemoryStore
 from agent_framework.models.memory import MemoryRecord
 from agent_framework.models.subagent import MemoryScope, SubAgentSpec
-from agent_framework.subagent.memory_scope import (
-    InheritReadMemoryManager,
-    IsolatedMemoryManager,
-    SharedWriteMemoryManager,
-)
+from agent_framework.subagent.memory_scope import (InheritReadMemoryManager,
+                                                   IsolatedMemoryManager,
+                                                   SharedWriteMemoryManager)
 
 if TYPE_CHECKING:
     from agent_framework.agent.base_agent import BaseAgent

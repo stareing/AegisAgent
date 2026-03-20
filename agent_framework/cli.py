@@ -8,13 +8,11 @@ import sys
 import traceback
 from collections.abc import Sequence
 
-from agent_framework.terminal_runtime import (
-    build_argument_parser,
-    build_framework_from_args,
-    format_missing_textual_message,
-    run_classic_repl,
-    run_single_task,
-)
+from agent_framework.terminal_runtime import (build_argument_parser,
+                                              build_framework_from_args,
+                                              format_missing_textual_message,
+                                              run_classic_repl,
+                                              run_single_task)
 
 
 def run(argv: Sequence[str] | None = None) -> int:

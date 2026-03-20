@@ -10,7 +10,6 @@ import pytest
 
 from agent_framework.models.agent import Skill
 
-
 # =====================================================================
 # SKILL.md Parsing
 # =====================================================================
@@ -106,6 +105,7 @@ class TestSkillDiscovery:
 
     def test_discover_directory_layout(self, tmp_path):
         from agent_framework.skills.loader import discover_skills
+
         # skills/my-skill/SKILL.md
         skill_dir = tmp_path / "my-skill"
         skill_dir.mkdir()
@@ -123,6 +123,7 @@ class TestSkillDiscovery:
 
     def test_discover_flat_md_layout(self, tmp_path):
         from agent_framework.skills.loader import discover_skills
+
         # skills/helper.md
         (tmp_path / "helper.md").write_text(textwrap.dedent("""\
             ---
@@ -265,27 +266,31 @@ class TestArgumentSubstitution:
 class TestShellPreprocessing:
 
     def test_shell_directive_echo(self):
-        from agent_framework.skills.preprocessor import execute_shell_directives
+        from agent_framework.skills.preprocessor import \
+            execute_shell_directives
         body = "Result: !`echo hello`"
         result = execute_shell_directives(body)
         assert "hello" in result
         assert "!`" not in result
 
     def test_shell_directive_timeout(self):
-        from agent_framework.skills.preprocessor import execute_shell_directives
+        from agent_framework.skills.preprocessor import \
+            execute_shell_directives
         body = "Data: !`sleep 30`"
         result = execute_shell_directives(body)
         assert "timed out" in result
 
     def test_shell_directive_failure(self):
-        from agent_framework.skills.preprocessor import execute_shell_directives
+        from agent_framework.skills.preprocessor import \
+            execute_shell_directives
         body = "Data: !`nonexistent_command_xyz 2>/dev/null`"
         result = execute_shell_directives(body)
         # Should contain fallback text, not crash
         assert "!`" not in result
 
     def test_no_shell_directives_passthrough(self):
-        from agent_framework.skills.preprocessor import execute_shell_directives
+        from agent_framework.skills.preprocessor import \
+            execute_shell_directives
         body = "No commands here."
         result = execute_shell_directives(body)
         assert result == body
@@ -405,7 +410,8 @@ class TestInvokeSkillTool:
 
     def test_invoke_file_skill(self, tmp_path):
         from agent_framework.agent.skill_router import SkillRouter
-        from agent_framework.tools.builtin_skills import invoke_skill, set_skill_runtime
+        from agent_framework.tools.builtin_skills import (invoke_skill,
+                                                          set_skill_runtime)
 
         skill_dir = tmp_path / "greet"
         skill_dir.mkdir()
@@ -427,7 +433,8 @@ class TestInvokeSkillTool:
 
     def test_invoke_config_skill(self):
         from agent_framework.agent.skill_router import SkillRouter
-        from agent_framework.tools.builtin_skills import invoke_skill, set_skill_runtime
+        from agent_framework.tools.builtin_skills import (invoke_skill,
+                                                          set_skill_runtime)
 
         router = SkillRouter()
         router.register_skill(Skill(
@@ -441,7 +448,8 @@ class TestInvokeSkillTool:
 
     def test_invoke_nonexistent_skill(self):
         from agent_framework.agent.skill_router import SkillRouter
-        from agent_framework.tools.builtin_skills import invoke_skill, set_skill_runtime
+        from agent_framework.tools.builtin_skills import (invoke_skill,
+                                                          set_skill_runtime)
 
         router = SkillRouter()
         set_skill_runtime(router, MagicMock())
@@ -450,7 +458,8 @@ class TestInvokeSkillTool:
         assert "not found" in result
 
     def test_invoke_not_initialized(self):
-        from agent_framework.tools.builtin_skills import invoke_skill, set_skill_runtime
+        from agent_framework.tools.builtin_skills import (invoke_skill,
+                                                          set_skill_runtime)
         set_skill_runtime(None, None)
         result = invoke_skill("anything")
         assert "not initialized" in result
@@ -464,7 +473,8 @@ class TestInvokeSkillTool:
 class TestSkillContextInjection:
 
     def test_collect_skill_catalog(self):
-        from agent_framework.context.source_provider import ContextSourceProvider
+        from agent_framework.context.source_provider import \
+            ContextSourceProvider
         provider = ContextSourceProvider()
         descs = [
             {"skill_id": "commit", "name": "commit", "description": "Make a git commit"},
@@ -478,7 +488,8 @@ class TestSkillContextInjection:
         assert "[file]" in result
 
     def test_collect_skill_catalog_empty(self):
-        from agent_framework.context.source_provider import ContextSourceProvider
+        from agent_framework.context.source_provider import \
+            ContextSourceProvider
         provider = ContextSourceProvider()
         assert provider.collect_skill_catalog([]) is None
 
@@ -513,6 +524,7 @@ class TestComplexSkillSupport:
 
     def test_shell_directive_uses_skill_dir_as_cwd(self, tmp_path):
         from agent_framework.skills.preprocessor import preprocess_skill
+
         # Create a file in the skill directory
         (tmp_path / "marker.txt").write_text("FOUND_IT")
         body = "Marker: !`cat marker.txt`"
@@ -555,7 +567,8 @@ class TestComplexSkillSupport:
     def test_invoke_skill_with_skill_dir(self, tmp_path):
         """invoke_skill passes skill_dir correctly for ${SKILL_DIR} resolution."""
         from agent_framework.agent.skill_router import SkillRouter
-        from agent_framework.tools.builtin_skills import invoke_skill, set_skill_runtime
+        from agent_framework.tools.builtin_skills import (invoke_skill,
+                                                          set_skill_runtime)
 
         skill_dir = tmp_path / "my-complex-skill"
         skill_dir.mkdir()
@@ -584,12 +597,10 @@ class TestComplexSkillSupport:
 
     def test_full_complex_skill_structure(self, tmp_path):
         """Test a skill with structure mirroring skill-creator."""
-        from agent_framework.skills.loader import (
-            discover_skills,
-            list_skill_files,
-            load_skill_body,
-            load_supporting_file,
-        )
+        from agent_framework.skills.loader import (discover_skills,
+                                                   list_skill_files,
+                                                   load_skill_body,
+                                                   load_supporting_file)
         from agent_framework.skills.preprocessor import preprocess_skill
 
         # Build a skill-creator-like structure

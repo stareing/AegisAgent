@@ -4,15 +4,9 @@ import re
 
 from agent_framework.agent.base_agent import BaseAgent
 from agent_framework.agent.prompt_templates import REACT_SYSTEM_PROMPT
-from agent_framework.models.agent import (
-    AgentConfig,
-    AgentState,
-    ErrorStrategy,
-    IterationResult,
-    StopDecision,
-    StopReason,
-    StopSignal,
-)
+from agent_framework.models.agent import (AgentConfig, AgentState,
+                                          ErrorStrategy, IterationResult,
+                                          StopDecision, StopReason, StopSignal)
 
 _FINAL_ANSWER_PATTERN = re.compile(
     r"Final\s*Answer\s*[:：]\s*(.*)", re.IGNORECASE | re.DOTALL

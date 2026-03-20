@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -10,7 +9,7 @@ from pydantic_settings import BaseSettings
 
 
 class ModelConfig(BaseModel):
-    adapter_type: str = "litellm"  # "litellm"|"openai"|"anthropic"|"google"|"deepseek"|"doubao"|"qwen"|"zhipu"|"minimax"|"custom"
+    adapter_type: str = "litellm"  # "litellm"|"openai"|"anthropic"|"google"|"openrouter"|"together"|"groq"|"fireworks"|"mistral"|"perplexity"|"deepseek"|"doubao"|"qwen"|"zhipu"|"minimax"|"siliconflow"|"moonshot"|"baichuan"|"yi"|"custom"
     default_model_name: str = "gpt-3.5-turbo"
     temperature: float = 1.0
     max_output_tokens: int = 4096
@@ -89,6 +88,17 @@ class TodoConfig(BaseModel):
     inject_reminder: bool = True
 
 
+class LongInteractionConfig(BaseModel):
+    """Configuration for long-term parent-child agent interaction (PRD §15)."""
+
+    enable_interactive_subagents: bool = True
+    enable_suspend_resume: bool = True
+    max_pending_hitl_requests_per_run: int = 5
+    max_delegation_events_per_subagent: int = 200
+    max_interactive_rounds_per_subagent: int = 20
+    delegation_event_summary_limit: int = 10
+
+
 class SubAgentConfig(BaseModel):
     """Sub-agent configuration.
 
@@ -103,6 +113,22 @@ class SubAgentConfig(BaseModel):
     SOFT (exceed → graceful degradation, trimming, or warning):
     - per_sub_agent_max_tokens   — context trimmed if over budget
     - max_concurrent_sub_agents  — excess queued, not rejected
+
+    Collection strategy (for multi-agent orchestration):
+    - default_collection_strategy — "HYBRID" | "SEQUENTIAL" | "BATCH_ALL"
+      Controls how the Lead agent collects results from async sub-agents.
+      LLM can override per-spawn via spawn_agent(collection_strategy=...).
+    - collection_poll_interval_ms — polling interval for SEQUENTIAL/HYBRID modes.
+
+    execution_mode vs collection_strategy interaction:
+    - execution_mode="progressive" controls INTRA-iteration tool result streaming
+      (all tools in one LLM turn streamed as they complete).
+    - collection_strategy controls INTER-iteration spawn result batching
+      (async spawns collected across multiple LLM turns).
+    - They operate at different layers. LLM can use spawn_agent(wait=false)
+      even in progressive mode to opt into collection_strategy.
+    - When LLM uses spawn_agent(wait=true) in progressive mode, progressive
+      handles the streaming; collection_strategy is not involved.
     """
 
     max_sub_agents_per_run: int = 5
@@ -113,6 +139,10 @@ class SubAgentConfig(BaseModel):
     allow_recursive_spawn: bool = False
     max_spawn_depth: int = 1
     execution_mode: str = "progressive"  # "parallel" | "progressive"
+    default_collection_strategy: str = "HYBRID"  # "SEQUENTIAL" | "BATCH_ALL" | "HYBRID"
+    collection_poll_interval_ms: int = 500
+    live_agent_ttl_seconds: int = 300  # LONG_LIVED agent IDLE timeout before auto-cleanup
+    max_live_agents_per_run: int = 3   # Max LONG_LIVED agents alive simultaneously
 
 
 class SkillConfig(BaseModel):
@@ -190,6 +220,7 @@ class FrameworkConfig(BaseSettings):
     tools: ToolConfig = Field(default_factory=ToolConfig)
     todo: TodoConfig = Field(default_factory=TodoConfig)
     subagent: SubAgentConfig = Field(default_factory=SubAgentConfig)
+    long_interaction: LongInteractionConfig = Field(default_factory=LongInteractionConfig)
     skills: SkillsConfig = Field(default_factory=SkillsConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     a2a: A2AConfig = Field(default_factory=A2AConfig)

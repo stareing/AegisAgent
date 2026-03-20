@@ -7,11 +7,13 @@ Uses a mock model adapter to simulate LLM responses.
 from __future__ import annotations
 
 import asyncio
-import pytest
 from typing import AsyncIterator
 from unittest.mock import AsyncMock
 
-from agent_framework.adapters.model.base_adapter import BaseModelAdapter, ModelChunk
+import pytest
+
+from agent_framework.adapters.model.base_adapter import (BaseModelAdapter,
+                                                         ModelChunk)
 from agent_framework.agent.base_agent import BaseAgent
 from agent_framework.agent.coordinator import RunCoordinator
 from agent_framework.agent.default_agent import DefaultAgent
@@ -24,15 +26,16 @@ from agent_framework.context.engineer import ContextEngineer
 from agent_framework.context.source_provider import ContextSourceProvider
 from agent_framework.memory.default_manager import DefaultMemoryManager
 from agent_framework.memory.sqlite_store import SQLiteMemoryStore
-from agent_framework.models.agent import AgentConfig, AgentStatus, CapabilityPolicy, Skill, StopReason
-from agent_framework.models.message import Message, ModelResponse, TokenUsage, ToolCallRequest
-from agent_framework.models.subagent import SubAgentSpec, SubAgentResult
+from agent_framework.models.agent import (AgentConfig, AgentStatus,
+                                          CapabilityPolicy, Skill, StopReason)
+from agent_framework.models.message import (Message, ModelResponse, TokenUsage,
+                                            ToolCallRequest)
+from agent_framework.models.subagent import SubAgentResult, SubAgentSpec
 from agent_framework.models.tool import ToolEntry, ToolMeta
 from agent_framework.tools.confirmation import AutoApproveConfirmationHandler
 from agent_framework.tools.decorator import tool
 from agent_framework.tools.executor import ToolExecutor
 from agent_framework.tools.registry import ToolRegistry
-
 
 # ---------------------------------------------------------------------------
 # Mock model adapter
@@ -591,8 +594,9 @@ class TestSubAgentScheduler:
 
     @pytest.mark.asyncio
     async def test_quota_enforcement(self):
+        from agent_framework.models.subagent import (SubAgentHandle,
+                                                     SubAgentResult)
         from agent_framework.subagent.scheduler import SubAgentScheduler
-        from agent_framework.models.subagent import SubAgentHandle, SubAgentResult
 
         scheduler = SubAgentScheduler(max_concurrent=2, max_per_run=2)
 
@@ -620,8 +624,9 @@ class TestSubAgentScheduler:
 
     @pytest.mark.asyncio
     async def test_timeout(self):
+        from agent_framework.models.subagent import (SubAgentHandle,
+                                                     SubAgentResult)
         from agent_framework.subagent.scheduler import SubAgentScheduler
-        from agent_framework.models.subagent import SubAgentHandle, SubAgentResult
 
         scheduler = SubAgentScheduler(max_concurrent=2, max_per_run=5)
 
@@ -808,9 +813,9 @@ class TestRegressionFixes:
 
     def test_subagent_factory_uses_scoped_executor(self):
         from agent_framework.subagent.factory import SubAgentFactory
-        from agent_framework.tools.catalog import GlobalToolCatalog
         from agent_framework.tools.builtin.spawn_agent import spawn_agent
         from agent_framework.tools.builtin.system import run_command
+        from agent_framework.tools.catalog import GlobalToolCatalog
 
         model = MockModelAdapter([])
         deps = build_deps(model, register_tools=True)
@@ -913,8 +918,9 @@ class TestRegressionFixes:
         assert kwargs["user_id"] == "u_1"
 
     def test_mcp_sync_tools_to_catalog_supports_server_filter(self):
-        from agent_framework.protocols.mcp.mcp_client_manager import MCPClientManager
         from agent_framework.models.mcp import MCPToolInfo
+        from agent_framework.protocols.mcp.mcp_client_manager import \
+            MCPClientManager
         from agent_framework.tools.catalog import GlobalToolCatalog
 
         manager = MCPClientManager()

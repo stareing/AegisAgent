@@ -1,8 +1,8 @@
-"""Tests for progressive streaming — verifies real-time event emission.
+"""Tests for progressive streaming — verifies real-time factual event emission.
 
 Covers:
 1. TOOL_CALL_DONE events emitted in completion order (not batched)
-2. SUBAGENT_DONE / PROGRESSIVE_RESPONSE events in stream
+2. Coordinator does not synthesize lead-style narration
 3. Non-progressive mode unchanged
 4. Event ordering: START before DONE before final DONE
 """
@@ -14,15 +14,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from agent_framework.models.agent import (
-    AgentState,
-    EffectiveRunConfig,
-    IterationResult,
-    StopReason,
-    StopSignal,
-)
+from agent_framework.models.agent import (AgentState, EffectiveRunConfig,
+                                          IterationResult, StopReason,
+                                          StopSignal)
 from agent_framework.models.context import LLMRequest
-from agent_framework.models.message import Message, ModelResponse, ToolCallRequest
+from agent_framework.models.message import (Message, ModelResponse,
+                                            ToolCallRequest)
 from agent_framework.models.stream import StreamEvent, StreamEventType
 from agent_framework.models.tool import ToolExecutionMeta, ToolResult
 
@@ -33,8 +30,8 @@ class TestProgressiveToolDoneOrdering:
     @pytest.mark.asyncio
     async def test_progressive_yields_done_per_tool(self):
         """In progressive mode, each TOOL_CALL_DONE should arrive individually."""
-        from agent_framework.agent.loop import AgentLoop, AgentLoopDeps
         from agent_framework.agent.default_agent import DefaultAgent
+        from agent_framework.agent.loop import AgentLoop, AgentLoopDeps
 
         loop = AgentLoop()
         agent = DefaultAgent(progressive_tool_results=True)
@@ -43,8 +40,9 @@ class TestProgressiveToolDoneOrdering:
         mock_adapter = AsyncMock()
 
         async def mock_stream(*args, **kwargs):
-            from agent_framework.adapters.model.base_adapter import ModelChunk
             import json
+
+            from agent_framework.adapters.model.base_adapter import ModelChunk
             for i in range(3):
                 yield ModelChunk(delta_tool_calls=[{
                     "index": i, "id": f"tc_{i}",
@@ -176,8 +174,8 @@ class TestNonProgressiveUnchanged:
     @pytest.mark.asyncio
     async def test_non_progressive_batches_done_events(self):
         """Without progressive, TOOL_CALL_DONE events come after all tools complete."""
-        from agent_framework.agent.loop import AgentLoop, AgentLoopDeps
         from agent_framework.agent.default_agent import DefaultAgent
+        from agent_framework.agent.loop import AgentLoop, AgentLoopDeps
 
         loop = AgentLoop()
         agent = DefaultAgent(progressive_tool_results=False)  # explicit non-progressive
@@ -185,8 +183,9 @@ class TestNonProgressiveUnchanged:
         mock_adapter = AsyncMock()
 
         async def mock_stream(*args, **kwargs):
-            from agent_framework.adapters.model.base_adapter import ModelChunk
             import json
+
+            from agent_framework.adapters.model.base_adapter import ModelChunk
             yield ModelChunk(delta_tool_calls=[{
                 "index": 0, "id": "tc_0",
                 "function": {"name": "think", "arguments": json.dumps({"thought": "test"})},
@@ -226,7 +225,7 @@ class TestRunStreamProgressiveTiming:
     """run_stream must emit progressive responses before the iteration fully closes."""
 
     @pytest.mark.asyncio
-    async def test_run_stream_emits_progressive_response_before_iteration_result(self):
+    async def test_run_stream_facts_only_by_default(self):
         from agent_framework.agent.coordinator import RunCoordinator
         from agent_framework.agent.default_agent import DefaultAgent
         from agent_framework.agent.runtime_deps import AgentRuntimeDeps
@@ -319,13 +318,14 @@ class TestRunStreamProgressiveTiming:
                     },
                 )
                 yield StreamEvent(
-                    type=StreamEventType.SUBAGENT_DONE,
+                    type=StreamEventType.PROGRESSIVE_DONE,
                     data={
                         "tool_call_id": "tc_1",
                         "tool_name": "spawn_agent",
-                        "task_input": "task 1",
+                        "description": "task 1",
                         "success": True,
                         "output": "result 1",
+                        "display_text": "result 1",
                         "index": 1,
                         "total": 2,
                     },
@@ -348,14 +348,132 @@ class TestRunStreamProgressiveTiming:
 
         event_types = [event.type for event in events]
         assert StreamEventType.SUBAGENT_DONE in event_types
-        assert StreamEventType.PROGRESSIVE_RESPONSE in event_types
+        assert StreamEventType.PROGRESSIVE_RESPONSE not in event_types
         assert StreamEventType.DONE in event_types
+        coordinator._loop._call_llm.assert_not_awaited()
 
-        subagent_done_index = event_types.index(StreamEventType.SUBAGENT_DONE)
-        progressive_index = event_types.index(StreamEventType.PROGRESSIVE_RESPONSE)
-        done_index = event_types.index(StreamEventType.DONE)
+    @pytest.mark.asyncio
+    async def test_run_stream_never_emits_progressive_response(self):
+        from agent_framework.agent.coordinator import RunCoordinator
+        from agent_framework.agent.default_agent import DefaultAgent
+        from agent_framework.agent.runtime_deps import AgentRuntimeDeps
 
-        assert subagent_done_index < progressive_index < done_index
+        coordinator = RunCoordinator()
+        agent = DefaultAgent(progressive_tool_results=True)
 
-        progressive_event = events[progressive_index]
-        assert progressive_event.data["text"] == "mid response"
+        memory_manager = MagicMock()
+        memory_manager.select_for_context.return_value = []
+        memory_manager.begin_run_session = MagicMock()
+        memory_manager.end_run_session = MagicMock()
+        memory_manager.begin_session = MagicMock()
+        memory_manager.end_session = MagicMock()
+        memory_manager.record_turn = MagicMock()
+
+        context_engineer = MagicMock()
+        context_engineer.prepare_context_for_llm = AsyncMock(return_value=[
+            Message(role="system", content="sys"),
+            Message(role="user", content="task"),
+        ])
+        context_engineer.set_skill_context = MagicMock()
+
+        tool_registry = MagicMock()
+        tool_registry.list_tools.return_value = []
+        tool_registry.export_schemas.return_value = []
+
+        tool_executor = MagicMock()
+        tool_executor.is_tool_allowed = MagicMock(return_value=True)
+        tool_executor.set_current_session_messages = MagicMock()
+
+        skill_router = MagicMock()
+        skill_router.detect_skill.return_value = None
+
+        model_adapter = AsyncMock()
+
+        deps = AgentRuntimeDeps(
+            tool_registry=tool_registry,
+            tool_executor=tool_executor,
+            memory_manager=memory_manager,
+            context_engineer=context_engineer,
+            model_adapter=model_adapter,
+            skill_router=skill_router,
+        )
+
+        first_iteration = IterationResult(
+            iteration_index=0,
+            model_response=ModelResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="tc_1",
+                        function_name="spawn_agent",
+                        arguments={"task_input": "task 1", "wait": True},
+                    ),
+                    ToolCallRequest(
+                        id="tc_2",
+                        function_name="spawn_agent",
+                        arguments={"task_input": "task 2", "wait": True},
+                    ),
+                ],
+                finish_reason="tool_calls",
+            ),
+            tool_results=[
+                ToolResult(tool_call_id="tc_1", tool_name="spawn_agent", success=True, output="result 1"),
+                ToolResult(tool_call_id="tc_2", tool_name="spawn_agent", success=True, output="result 2"),
+            ],
+            tool_execution_meta=[
+                ToolExecutionMeta(execution_time_ms=10, source="subagent"),
+                ToolExecutionMeta(execution_time_ms=20, source="subagent"),
+            ],
+        )
+        final_iteration = IterationResult(
+            iteration_index=1,
+            model_response=ModelResponse(content="final", finish_reason="stop"),
+            stop_signal=StopSignal(reason=StopReason.LLM_STOP),
+        )
+
+        async def fake_execute_iteration_stream(*args, **kwargs):
+            state = args[2]
+            if state.iteration_count == 0:
+                yield StreamEvent(
+                    type=StreamEventType.ITERATION_START,
+                    data={"iteration_index": 0},
+                )
+                yield StreamEvent(
+                    type=StreamEventType.ASSISTANT_TOOL_CALLS,
+                    data={
+                        "content": "",
+                        "tool_calls": first_iteration.model_response.tool_calls,
+                    },
+                )
+                yield StreamEvent(
+                    type=StreamEventType.PROGRESSIVE_DONE,
+                    data={
+                        "tool_call_id": "tc_1",
+                        "tool_name": "spawn_agent",
+                        "description": "task 1",
+                        "success": True,
+                        "output": "result 1",
+                        "display_text": "result 1",
+                        "index": 1,
+                        "total": 2,
+                    },
+                )
+                yield first_iteration
+            else:
+                yield final_iteration
+
+        coordinator._loop.execute_iteration_stream = fake_execute_iteration_stream
+        coordinator._loop._call_llm = AsyncMock()
+        coordinator._prepare_llm_request = AsyncMock(
+            return_value=LLMRequest(messages=[], tools_schema=[])
+        )
+
+        events = []
+        async for event in coordinator.run_stream(agent, deps, "progressive task"):
+            events.append(event)
+
+        event_types = [event.type for event in events]
+        assert StreamEventType.PROGRESSIVE_DONE in event_types
+        assert StreamEventType.PROGRESSIVE_RESPONSE not in event_types
+        assert StreamEventType.DONE in event_types
+        coordinator._loop._call_llm.assert_not_awaited()

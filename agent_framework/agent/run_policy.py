@@ -12,12 +12,8 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
-from agent_framework.models.agent import (
-    CapabilityPolicy,
-    ContextPolicy,
-    EffectiveRunConfig,
-    MemoryPolicy,
-)
+from agent_framework.models.agent import (CapabilityPolicy, ContextPolicy,
+                                          EffectiveRunConfig, MemoryPolicy)
 
 if TYPE_CHECKING:
     from agent_framework.agent.base_agent import BaseAgent

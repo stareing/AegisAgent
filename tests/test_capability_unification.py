@@ -24,8 +24,8 @@ class TestMemoryAdminTools:
 
     def test_memory_admin_tools_registered(self):
         """list_memories, forget_memory, clear_memories must be in catalog."""
-        from agent_framework.tools.catalog import GlobalToolCatalog
         from agent_framework.tools.builtin import register_all_builtins
+        from agent_framework.tools.catalog import GlobalToolCatalog
 
         catalog = GlobalToolCatalog()
         register_all_builtins(catalog)
@@ -36,8 +36,8 @@ class TestMemoryAdminTools:
 
     def test_memory_admin_tools_category(self):
         """Memory admin tools must have category='memory_admin'."""
-        from agent_framework.tools.catalog import GlobalToolCatalog
         from agent_framework.tools.builtin import register_all_builtins
+        from agent_framework.tools.catalog import GlobalToolCatalog
 
         catalog = GlobalToolCatalog()
         register_all_builtins(catalog)
@@ -47,16 +47,17 @@ class TestMemoryAdminTools:
 
     def test_list_memories_via_execute(self):
         """list_memories callable through ToolExecutor.execute()."""
-        from agent_framework.tools.builtin.memory_admin import set_memory_context
+        from agent_framework.tools.builtin.memory_admin import \
+            set_memory_context
 
         mock_manager = MagicMock()
         mock_manager.list_memories.return_value = []
         set_memory_context(mock_manager, "test-agent")
 
-        from agent_framework.tools.catalog import GlobalToolCatalog
-        from agent_framework.tools.registry import ToolRegistry
         from agent_framework.tools.builtin import register_all_builtins
+        from agent_framework.tools.catalog import GlobalToolCatalog
         from agent_framework.tools.executor import ToolExecutor
+        from agent_framework.tools.registry import ToolRegistry
 
         catalog = GlobalToolCatalog()
         register_all_builtins(catalog)
@@ -73,16 +74,17 @@ class TestMemoryAdminTools:
 
     def test_clear_memories_via_execute(self):
         """clear_memories callable through ToolExecutor.execute()."""
-        from agent_framework.tools.builtin.memory_admin import set_memory_context
+        from agent_framework.tools.builtin.memory_admin import \
+            set_memory_context
 
         mock_manager = MagicMock()
         mock_manager.clear_memories.return_value = 5
         set_memory_context(mock_manager, "test-agent")
 
-        from agent_framework.tools.catalog import GlobalToolCatalog
-        from agent_framework.tools.registry import ToolRegistry
         from agent_framework.tools.builtin import register_all_builtins
+        from agent_framework.tools.catalog import GlobalToolCatalog
         from agent_framework.tools.executor import ToolExecutor
+        from agent_framework.tools.registry import ToolRegistry
 
         catalog = GlobalToolCatalog()
         register_all_builtins(catalog)
@@ -102,10 +104,11 @@ class TestCapabilityPolicyEnforcement:
 
     def test_memory_admin_blocked_by_default_policy(self):
         """Default capability policy (allow_memory_admin=False) blocks memory_admin tools."""
+        from agent_framework.agent.capability_policy import \
+            apply_capability_policy
         from agent_framework.models.agent import CapabilityPolicy
-        from agent_framework.agent.capability_policy import apply_capability_policy
-        from agent_framework.tools.catalog import GlobalToolCatalog
         from agent_framework.tools.builtin import register_all_builtins
+        from agent_framework.tools.catalog import GlobalToolCatalog
 
         catalog = GlobalToolCatalog()
         register_all_builtins(catalog)
@@ -122,10 +125,11 @@ class TestCapabilityPolicyEnforcement:
 
     def test_memory_admin_allowed_when_policy_permits(self):
         """When allow_memory_admin=True, memory_admin tools are visible."""
+        from agent_framework.agent.capability_policy import \
+            apply_capability_policy
         from agent_framework.models.agent import CapabilityPolicy
-        from agent_framework.agent.capability_policy import apply_capability_policy
-        from agent_framework.tools.catalog import GlobalToolCatalog
         from agent_framework.tools.builtin import register_all_builtins
+        from agent_framework.tools.catalog import GlobalToolCatalog
 
         catalog = GlobalToolCatalog()
         register_all_builtins(catalog)

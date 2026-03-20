@@ -126,6 +126,12 @@ class GoogleAdapter(BaseModelAdapter):
     def supports_parallel_tool_calls(self) -> bool:
         return True
 
+    def supports_vision(self) -> bool:
+        return True  # All Gemini models support vision
+
+    def supports_audio(self) -> bool:
+        return True  # Gemini supports audio natively
+
     # ------------------------------------------------------------------
     # Message & tool conversion (Gemini format)
     # ------------------------------------------------------------------

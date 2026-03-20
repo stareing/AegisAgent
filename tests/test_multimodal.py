@@ -16,7 +16,6 @@ import pytest
 
 from agent_framework.models.message import ContentPart, Message
 
-
 # ---------------------------------------------------------------------------
 # ContentPart model tests
 # ---------------------------------------------------------------------------
@@ -199,7 +198,8 @@ class TestOpenAIConversion:
 
 class TestAnthropicConversion:
     def _convert(self, messages: list[Message]) -> list[dict]:
-        from agent_framework.adapters.model.anthropic_adapter import AnthropicAdapter
+        from agent_framework.adapters.model.anthropic_adapter import \
+            AnthropicAdapter
         return AnthropicAdapter._convert_messages(messages)
 
     def test_text_only_unchanged(self) -> None:
@@ -322,7 +322,8 @@ class TestCoordinatorMultimodal:
 class TestCompressionMultimodal:
     def test_multimodal_group_marked_protected(self) -> None:
         """Groups containing multimodal messages should be marked protected."""
-        from agent_framework.context.transaction_group import ToolTransactionGroup
+        from agent_framework.context.transaction_group import \
+            ToolTransactionGroup
 
         multimodal_msg = Message(
             role="user",
@@ -362,7 +363,8 @@ class TestCompressionMultimodal:
     def test_multimodal_message_survives_trim(self) -> None:
         """Protected multimodal groups should not be trimmed by ContextBuilder."""
         from agent_framework.context.builder import ContextBuilder
-        from agent_framework.context.transaction_group import ToolTransactionGroup
+        from agent_framework.context.transaction_group import \
+            ToolTransactionGroup
 
         builder = ContextBuilder(max_context_tokens=8192)
         multimodal_msg = Message(
@@ -431,7 +433,8 @@ class TestSummarizerMultimodal:
         assert "hello" in text
 
     def test_is_summary_message_uses_text_content(self) -> None:
-        from agent_framework.context.summarizer import is_summary_message, wrap_summary
+        from agent_framework.context.summarizer import (is_summary_message,
+                                                        wrap_summary)
         summary_text = wrap_summary("test summary")
         m = Message(
             role="user",
@@ -493,7 +496,8 @@ class TestTokenEstimation:
     def test_compressor_cache_key_uses_text_content(self) -> None:
         """Cache key should use text_content for consistent hashing."""
         from agent_framework.context.compressor import ContextCompressor
-        from agent_framework.context.transaction_group import ToolTransactionGroup
+        from agent_framework.context.transaction_group import \
+            ToolTransactionGroup
         m1 = Message(
             role="user",
             content="fallback",
@@ -557,8 +561,9 @@ class TestSpawnSeedMultimodal:
 class TestMemoryMultimodal:
     def test_extract_candidates_text_only_input(self) -> None:
         """Memory extraction works with text from multimodal message."""
-        from agent_framework.memory.default_manager import DefaultMemoryManager
         from unittest.mock import MagicMock
+
+        from agent_framework.memory.default_manager import DefaultMemoryManager
         store = MagicMock()
         mgr = DefaultMemoryManager(store)
         # Memory extraction receives text_content, not raw multimodal

@@ -22,22 +22,21 @@ import contextlib
 from contextlib import asynccontextmanager, contextmanager
 from typing import TYPE_CHECKING, Any, Generator
 
+from agent_framework.infra.config import TracingConfig
+
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
-from agent_framework.infra.config import TracingConfig
 
 # ── OTel SDK detection ────────────────────────────────────────────────
 
 try:
     from opentelemetry import trace
-    from opentelemetry.trace import StatusCode, Span, Tracer
-    from opentelemetry.sdk.trace import TracerProvider
-    from opentelemetry.sdk.trace.export import (
-        BatchSpanProcessor,
-        ConsoleSpanExporter,
-    )
     from opentelemetry.sdk.resources import Resource
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import (BatchSpanProcessor,
+                                                ConsoleSpanExporter)
+    from opentelemetry.trace import Span, StatusCode, Tracer
 
     _HAS_OTEL = True
 except ImportError:
@@ -120,9 +119,8 @@ class TracingManager:
 
         if config.exporter_type == "otlp":
             try:
-                from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
-                    OTLPSpanExporter,
-                )
+                from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import \
+                    OTLPSpanExporter
                 return OTLPSpanExporter(endpoint=config.otlp_endpoint)
             except ImportError:
                 # Fallback to console if OTLP exporter not installed

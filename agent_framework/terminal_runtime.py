@@ -14,11 +14,13 @@ from contextlib import redirect_stdout
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Sequence
 
-from agent_framework.adapters.model.base_adapter import BaseModelAdapter, ModelChunk
+from agent_framework.adapters.model.base_adapter import (BaseModelAdapter,
+                                                         ModelChunk)
 from agent_framework.entry import AgentFramework
 from agent_framework.infra.config import load_config
 from agent_framework.models.agent import Skill
-from agent_framework.models.message import Message, ModelResponse, TokenUsage, ToolCallRequest
+from agent_framework.models.message import (Message, ModelResponse, TokenUsage,
+                                            ToolCallRequest)
 from agent_framework.tools.decorator import tool
 
 _NO_COLOR = os.environ.get("NO_COLOR") is not None
@@ -338,12 +340,10 @@ class ReplState:
         if len(self.history) < 2:
             return ""
 
-        from agent_framework.context.summarizer import (
-            call_llm_compress,
-            is_summary_message,
-            messages_to_text,
-            wrap_summary,
-        )
+        from agent_framework.context.summarizer import (call_llm_compress,
+                                                        is_summary_message,
+                                                        messages_to_text,
+                                                        wrap_summary)
 
         previous_summary = None
         compress_messages = list(self.history)
@@ -1396,14 +1396,6 @@ async def _execute_with_progressive(
                         print(f"    {line}")
             else:
                 print(f"  {_dim(f'[{tag} {idx}/{total}]')} {status}: {display}")
-
-        elif event.type == StreamEventType.PROGRESSIVE_RESPONSE:
-            text = event.data.get("text", "")
-            idx = event.data.get("index", 0)
-            total = event.data.get("total", 0)
-            print(f"  {_cyan(f'Agent [{idx}/{total}]:')}")
-            for line in text.splitlines():
-                print(f"    {line}")
 
         elif event.type == StreamEventType.DONE:
             result = event.data.get("result")

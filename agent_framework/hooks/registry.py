@@ -10,10 +10,10 @@ from __future__ import annotations
 
 from typing import Union
 
-from agent_framework.infra.logger import get_logger
 from agent_framework.hooks.errors import HookRegistrationError
 from agent_framework.hooks.models import HookMeta, HookPoint
 from agent_framework.hooks.protocol import AsyncHookProtocol, HookProtocol
+from agent_framework.infra.logger import get_logger
 
 logger = get_logger(__name__)
 

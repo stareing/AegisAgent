@@ -6,12 +6,9 @@ import uuid
 from typing import Any
 
 from agent_framework.infra.logger import get_logger
-from agent_framework.models.subagent import (
-    SubAgentHandle,
-    SubAgentResult,
-    SubAgentTaskRecord,
-    SubAgentTaskStatus,
-)
+from agent_framework.models.subagent import (SubAgentHandle, SubAgentResult,
+                                             SubAgentTaskRecord,
+                                             SubAgentTaskStatus)
 
 logger = get_logger(__name__)
 

@@ -22,8 +22,7 @@
 * **测试友好**：设计必须便于 mock、替换和单元测试。
 * **边界清晰**：跨层调用必须通过正式接口，禁止越层访问。
 * **一处定义**：同一规则、常量、协议只保留一个权威定义。
-* **记忆进度**：热更新CLAUDE.md技能修复摘要
-* **代码审核**：将由codex排查代码是否和需求一致
+* **代码审核**：由 codex 排查代码是否和需求一致
 
 ## Project Overview
 Offline-first, extensible AI Agent Framework in Python 3.11+ / pydantic v2.
@@ -31,62 +30,44 @@ Protocol → Base → Default three-layer pattern. Tech: structlog, blinker, lit
 
 ## Architecture Layers
 ```
-Entry → entry.py, cli.py | Agent → agent/ | SubAgent → subagent/ | Tools → tools/
-Memory → memory/ | Context → context/ | Protocols → protocols/ | Models → models/
-Adapters → adapters/model/ | Infra → infra/
+agent_framework/
+├── agent/           # Agent loop, coordinator, state, prompt templates, skills
+├── adapters/model/  # 20 LLM adapters (OpenAI/Anthropic/Google/DeepSeek/Groq/OpenRouter/Together/...)
+├── context/         # Context engineering, compression, 5-slot builder
+├── graph/           # LangGraph-compatible compiled graph engine
+├── hooks/           # Hook registry, executor, 3 builtin hooks, payloads
+├── infra/           # Config, logging, event bus, telemetry
+├── memory/          # Memory manager, SQLite/PostgreSQL/MongoDB/Neo4j stores
+├── models/          # Pydantic v2 data models (message/tool/agent/subagent/hook/plugin)
+├── notification/    # [planned] RuntimeNotificationChannel, BackgroundNotifier
+├── plugins/         # Plugin manifest, loader, lifecycle, permissions
+├── protocols/       # core.py protocols + MCP client + A2A client adapter
+├── skills/          # Skill loader, preprocessor, SKILL.md discovery
+├── subagent/        # Factory, scheduler, runtime, delegation, HITL, interaction channel
+├── tools/           # Tool executor, catalog, registry, decorator, builtin tools, shell
+├── entry.py         # AgentFramework facade
+├── cli.py           # CLI entry point
+├── main.py          # Interactive terminal
+├── terminal_runtime.py  # Rich terminal display
+└── textual_cli.py       # Textual TUI
+config/              # Model & collection strategy JSON configs
+tests/               # 1358+ tests across 35+ files
 ```
 
 ## Completed Tasks
 - **L1-8** 全模块骨架 (infra/models/protocols/adapters/tools/memory/context/agent)
 - **#11-16** ReAct Agent, SubAgent Runtime, MCP/A2A Client, Entry+CLI, Integration
 - **#17-27** 多智能体协调 + v2.4架构 (Policy/Config/SessionState/AgentLoop/Skill/MemoryScope)
-- **#29-37** 多模型适配(10+) + Skill系统 + 交互终端main.py
+- **#29-37** 多模型适配(20+) + Skill系统 + 交互终端main.py
 - **#38-39** 终止条件6层闭环 + 全链路日志50+事件
-- **#40-52** 架构审查+收口 (v2.5.1→v2.6.5): RunCoordinator三层拆分, Hook/Decision分离, TerminationKind, CommitSequencer, SubAgent状态机, SessionSnapshot, 重试版本链, 架构守卫43项, 700 tests
-- **#53** 记忆+上下文闭环修复 (详见下方)
-- **s03-s08** 任务系统 + 后台执行: 持久化任务 DAG (.tasks/), 依赖图自动解锁, 独立 subprocess 后台并发, 跨 run 通知持续, SIGKILL 进程组取消链, 对齐 Claude Code TaskCreate/Update/List/Get/Output/Stop 全 API
-- **Graph** LangGraph 兼容编译式图引擎: StateGraph/CompiledGraph/InMemorySaver, 条件路由, fan-out/fan-in, 3 种 stream mode
-- **TUI** 流式渲染修复: #active-stream 实时 partial line, 移除 per-token sleep(0) 抖动
-
-### #53 记忆+上下文管理闭环修复
-
-**消息顺序修复**
-- task 作为 user 消息在 run 开始时写入 SessionState (coordinator.py)
-- 移除 current_input 末尾重复注入 (engineer.py)
-- 修复前: `[system] → [assistant+tool] → [tool_result] → [user]` (LLM 误判为新请求)
-- 修复后: `[system] → [user] → [assistant+tool] → [tool_result]` (标准 API 格式)
-
-**压缩策略精简**
-- 移除 SLIDING_WINDOW / TOOL_RESULT_SUMMARY, 仅保留 LLM incremental summarization
-- 移除 CompressionStrategy 枚举, compressor 不再有 lossy fallback
-- 删除 memory/policies.py 重复定义
-
-**策略闭环接通**
-- MemoryPolicy: coordinator → memory_manager.apply_memory_policy() (memory_enabled/auto_extract/max_in_context 生效)
-- ContextPolicy: coordinator → context_engineer.apply_context_policy() (allow_compression 生效)
-- MemoryQuota: entry.py → set_quota() (max_items_per_user/max_content_length/max_tags 执行)
-- 删除 ContextPolicy 死字段 (prefer_recent_history/max_session_groups)
-- 协议补全: MemoryManagerProtocol + ContextEngineerProtocol 增加 policy 方法
-- models/__init__.py 导出 MemoryPolicy/MemoryQuota/ContextPolicy
-
-**Config → Policy 优先级统一**
-- entry.py:_bind_config_policies() 将 FrameworkConfig 值绑定到 agent 的 get_memory_policy()/get_context_policy()
-- 解决: BaseAgent 默认策略覆盖全局配置的问题
-- 链路: FrameworkConfig → agent.get_*_policy() → RunPolicyResolver → coordinator → apply_*_policy()
-
-**其他修复**
-- 异常路径 record_turn: except 分支也执行 CommitDecision (契约一致)
-- XML 转义: source_provider 所有用户可控值通过 html.escape() (memory/skill/runtime_info)
-- note 工具接入 memory_manager.remember() 持久化
-- SharedWriteMemoryManager.record_turn 不再误委托 parent
-- user_id 参数贯通 coordinator.run() → begin_run_session()
-
-### Bug Fixes
-- 消息顺序: user 消息在 tool_result 之后导致 LLM 重复调用工具
-- 策略断裂: MemoryPolicy/ContextPolicy 解析后未传给执行层
-- Config 覆盖: run 级默认策略反向覆盖 FrameworkConfig 值
-- 双定义: memory/policies.py 与 models/agent.py 的 MemoryPolicy 冲突
-- XML 注入: memory title/content 直接拼接 XML 标签无转义
+- **#40-52** 架构审查+收口: RunCoordinator三层拆分, Hook/Decision分离, TerminationKind, CommitSequencer, SubAgent状态机, SessionSnapshot, 架构守卫43项
+- **#53** 记忆+上下文闭环修复
+- **s03-s08** 任务系统 + 后台执行: 持久化任务 DAG, 依赖图自动解锁, 独立 subprocess 后台并发, 跨 run 通知持续, SIGKILL 进程组取消链
+- **Graph** LangGraph 兼容编译式图引擎: StateGraph/CompiledGraph/InMemorySaver, 条件路由, fan-out/fan-in
+- **TUI** 流式渲染修复: #active-stream 实时 partial line
+- **v3.1 长时交互**: 15 态统一状态机 + PauseReason + DelegationEvent 事件通道 + HITL 闭环 + Checkpoint + RuntimeNotificationChannel + AckLevel 四级确认
+- **v3.1 收集策略**: 三种结果收集模式 (SEQUENTIAL/BATCH_ALL/HYBRID) + LeadCollector + config JSON 控制 + progressive 共存
+- **v3.1 适配器扩展**: 新增 10 个 API 厂商 (OpenRouter/Together/Groq/Fireworks/Mistral/Perplexity/SiliconFlow/Moonshot/Baichuan/Yi) + 多模态能力声明
 
 ## Key Design Patterns
 
@@ -98,53 +79,60 @@ Adapters → adapters/model/ | Infra → infra/
 
 ### 策略与配置
 - **策略解释权唯一**: ContextPolicy→ContextEngineer, MemoryPolicy→MemoryManager, CapabilityPolicy→授权链
-- **ResolvedRunPolicyBundle**: RunPolicyResolver 唯一产出, frozen 后不可改
 - **Config→Policy链路**: FrameworkConfig → _bind_config_policies() → agent.get_*_policy() → apply_*_policy()
 - **配额硬软语义**: 硬(超出→拒绝) vs 软(超出→降级), 每个配额有唯一 Owner
-- **MemoryQuota执行**: content_length/tags_count/max_items 三层检查在 remember() 中
 
 ### 工具与权限
 - **工具命名**: `local::<name>`, `mcp::<srv>::<name>`, `a2a::<alias>::<name>`, `subagent::spawn_agent`
 - **权限链**: schema导出(可见性) → is_tool_allowed()(安全) → on_tool_call_requested()(agent hook)
-- **Hook/Decision分离**: 观察hooks→无返回值, 决策接口→结构化 Decision 模型
 - **batch_execute顺序**: asyncio.gather 保证结果按输入顺序返回
 
-### 上下文管理
-- **Context 组装**: System Core + Skill Addon → Frozen Prefix → + Memory Block → + Session History
-- **压缩**: 仅 LLM incremental summarization, frozen summary 跨迭代复用, 失败返回原始 groups
-- **XML 转义**: source_provider 对所有用户可控值执行 html.escape()
-- **Frozen Prefix**: system_core + skill_addon 缓存, hash 验证, 跨迭代复用
+### 子Agent + 长时交互 (v3.1)
+- **SubAgentStatus 15态**: PENDING→QUEUED→SCHEDULED→RUNNING→PAUSED/TERMINAL, PauseReason 正交
+- **DelegationEvent通道**: append-only, sequence_no 单调递增, AckLevel 四级 (NONE→RECEIVED→PROJECTED→HANDLED)
+- **HITL闭环**: sub-agent QUESTION event → DelegationExecutor → HITLHandler → user → resume_subagent
+- **三种收集策略**: SEQUENTIAL(逐个汇报) / BATCH_ALL(全部等待) / HYBRID(批次拉取, 默认)
+- **Config 控制**: `subagent.default_collection_strategy` + `collection_poll_interval_ms`, LLM 可 per-spawn 覆盖
+- **progressive 共存**: execution_mode=progressive 控制迭代内流式, collection_strategy 控制迭代间批次, 不冲突
 
 ### 记忆管理
 - **会话成对**: begin_run_session / end_run_session (finally), record_turn → CommitDecision
-- **记忆控制**: MemorySourceContext 审计, CandidateSource+Confidence 写入优先级
-- **SubAgent 记忆**: Isolated/InheritRead/SharedWrite, spawn 时冻结快照, SharedWrite 强制 subagent 源标记
-- **note 工具**: 接入 memory_manager.remember(), 持久化到 SQLite
+- **SubAgent 记忆**: Isolated/InheritRead/SharedWrite, spawn 时冻结快照
 
 ### 终止与错误
 - **终止6层**: LLM_STOP → MAX_ITERATIONS → OUTPUT_TRUNCATED → ERROR(3次) → USER_CANCEL → timeout
-- **TerminationKind**: NORMAL / ABORT / DEGRADE, 派生自 StopReason
-- **stuck loop**: 连续相同工具调用检测 → 提取上次结果 → 强制停止
-
-### 子Agent
-- **Factory纯装配**: 消费已解析配置, 不解释策略
-- **SubAgentScheduler/Runtime分离**: Scheduler(排队/配额) vs Runtime(执行/cancel)
-- **SubAgentStatus**: COMPLETED/FAILED/CANCELLED/REJECTED/DEGRADED 统一状态机
+- **TerminationKind**: NORMAL / ABORT / DEGRADE
 
 ### 不可变与边界
 - **不可变模型**: EffectiveRunConfig frozen, ToolMeta frozen, FrozenPromptPrefix frozen
-- **iteration_history**: append-only, 不可删除/替换/重排, 压缩不影响
-- **Framework vs Integration**: Core(runtime/tools/context/memory) vs Integration(auth/UI/DTOs)
+- **iteration_history**: append-only, 不可删除/替换/重排
 - **None语义**: None="不存在", 失败用 error 对象, 空集合用 []
 
 ## Commands
 ```bash
 pip install -e ".[dev]"           # Install
-pytest tests/                     # Tests (700 passed)
+pytest tests/                     # Tests (1358+ passed)
 python -m agent_framework.main    # Interactive (Mock, no API key)
-python -m agent_framework.main --config config/deepseek.json  # Real model
-python run_demo.py                # Demo
+python -m agent_framework.main --config config/deepseek.json      # Real model
+python -m agent_framework.main --config config/collection_sequential.json  # Mode A
 ```
+
+## Config: Collection Strategy
+```json
+{
+  "subagent": {
+    "default_collection_strategy": "HYBRID",
+    "collection_poll_interval_ms": 500
+  }
+}
+```
+Options: `SEQUENTIAL` (逐个, Mode A), `BATCH_ALL` (全部等待, Mode B), `HYBRID` (批次, Mode C 默认)
+
+## Config: LLM Adapters
+```json
+{"model": {"adapter_type": "openrouter", "api_key": "sk-or-...", "default_model_name": "anthropic/claude-sonnet-4"}}
+```
+Supported: `openai` `anthropic` `google` `litellm` `openrouter` `together` `groq` `fireworks` `mistral` `perplexity` `deepseek` `doubao` `qwen` `zhipu` `minimax` `siliconflow` `moonshot` `baichuan` `yi` `custom`
 
 ## File Conventions
 - pydantic v2 BaseModel / pydantic-settings BaseSettings

@@ -10,13 +10,12 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
 
 from agent_framework.models.memory import MemoryKind, MemoryRecord
 from agent_framework.models.message import Message
-
 
 # ── Shared fixtures ──────────────────────────────────────────
 
@@ -244,7 +243,8 @@ class TestPostgreSQLStore(StoreContractTests):
         with patch.dict("sys.modules", {"psycopg2": MagicMock(), "psycopg2.extras": MagicMock()}):
             with patch("psycopg2.connect", return_value=mock_conn):
                 with patch("psycopg2.extras.register_default_jsonb"):
-                    from agent_framework.memory.pg_store import PostgreSQLMemoryStore
+                    from agent_framework.memory.pg_store import \
+                        PostgreSQLMemoryStore
                     self.store = PostgreSQLMemoryStore.__new__(PostgreSQLMemoryStore)
                     self.store._conn = mock_conn
                     self.store._init_db()

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from enum import Enum
 
-
 # ── Sentinel node names ────────────────────────────────────────────
 
 START = "__start__"

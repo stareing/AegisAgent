@@ -13,12 +13,8 @@ from __future__ import annotations
 import pytest
 
 from agent_framework.infra.config import TracingConfig
-from agent_framework.infra.telemetry import (
-    TracingManager,
-    _NoopSpan,
-    _NOOP_SPAN,
-    _HAS_OTEL,
-)
+from agent_framework.infra.telemetry import (_HAS_OTEL, _NOOP_SPAN,
+                                             TracingManager, _NoopSpan)
 
 
 class TestTracingConfig:

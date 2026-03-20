@@ -1,27 +1,31 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, AsyncIterator, Protocol, runtime_checkable
+from typing import (TYPE_CHECKING, Any, AsyncIterator, Protocol,
+                    runtime_checkable)
 
-from agent_framework.models.memory import (
-    CommitDecision,
-    MemoryCandidate,
-    MemoryKind,
-    MemoryRecord,
-    MemorySourceContext,
-    RunSessionOutcome,
-)
-from agent_framework.models.message import Message, ModelResponse, ToolCallRequest
-from agent_framework.models.tool import ToolEntry, ToolExecutionMeta, ToolResult
+from agent_framework.models.memory import (CommitDecision, MemoryCandidate,
+                                           MemoryKind, MemoryRecord,
+                                           MemorySourceContext,
+                                           RunSessionOutcome)
+from agent_framework.models.message import (Message, ModelResponse,
+                                            ToolCallRequest)
+from agent_framework.models.tool import (ToolEntry, ToolExecutionMeta,
+                                         ToolResult)
 
 if TYPE_CHECKING:
     from agent_framework.adapters.model.base_adapter import ModelChunk
-    from agent_framework.models.agent import (
-        AgentState, ContextPolicy, IterationResult, MemoryPolicy, MemoryQuota, Skill,
-    )
+    from agent_framework.models.agent import (AgentState, ContextPolicy,
+                                              IterationResult, MemoryPolicy,
+                                              MemoryQuota, Skill)
     from agent_framework.models.context import ContextStats
-    from agent_framework.models.hook import HookContext, HookMeta, HookPoint, HookResult
+    from agent_framework.models.hook import (HookContext, HookMeta, HookPoint,
+                                             HookResult)
     from agent_framework.models.plugin import PluginManifest
-    from agent_framework.models.subagent import SubAgentHandle, SubAgentResult, SubAgentSpec
+    from agent_framework.models.subagent import (DelegationEvent, HITLRequest,
+                                                 HITLResponse,
+                                                 SubAgentCheckpoint,
+                                                 SubAgentHandle,
+                                                 SubAgentResult, SubAgentSpec)
 
 
 # ---------------------------------------------------------------------------
@@ -81,7 +85,7 @@ class ToolExecutorProtocol(Protocol):
 
 
 # ---------------------------------------------------------------------------
-# Delegation Executor
+# Delegation Executor — extended for long-term interaction (v3.1)
 # ---------------------------------------------------------------------------
 @runtime_checkable
 class DelegationExecutorProtocol(Protocol):
@@ -89,11 +93,34 @@ class DelegationExecutorProtocol(Protocol):
         self, spec: SubAgentSpec, parent_agent: Any
     ) -> SubAgentResult: ...
 
+    async def delegate_to_subagent_async(
+        self, spec: SubAgentSpec, parent_agent: Any
+    ) -> str: ...
+
+    async def collect_subagent_result(
+        self, spawn_id: str, wait: bool = True
+    ) -> SubAgentResult | None: ...
+
+    async def resume_subagent(
+        self,
+        spawn_id: str,
+        resume_payload: dict,
+        parent_agent: Any,
+    ) -> SubAgentResult: ...
+
+    async def cancel_subagent(self, spawn_id: str) -> None: ...
+
     async def delegate_to_a2a(
         self,
         agent_url: str,
         task_input: str,
         skill_id: str | None = None,
+    ) -> SubAgentResult: ...
+
+    async def resume_a2a(
+        self,
+        remote_task_id: str,
+        resume_payload: dict,
     ) -> SubAgentResult: ...
 
 
@@ -204,7 +231,7 @@ class ContextEngineerProtocol(Protocol):
 
 
 # ---------------------------------------------------------------------------
-# Sub-Agent Runtime
+# Sub-Agent Runtime — extended for long-term interaction (v3.1)
 # ---------------------------------------------------------------------------
 @runtime_checkable
 class SubAgentRuntimeProtocol(Protocol):
@@ -212,11 +239,73 @@ class SubAgentRuntimeProtocol(Protocol):
         self, spec: SubAgentSpec, parent_agent: Any
     ) -> SubAgentResult: ...
 
+    async def spawn_async(
+        self, spec: SubAgentSpec, parent_agent: Any
+    ) -> str: ...
+
+    async def collect_result(
+        self, spawn_id: str, wait: bool = True
+    ) -> SubAgentResult | None: ...
+
+    async def resume(
+        self,
+        spawn_id: str,
+        resume_payload: dict,
+        parent_agent: Any,
+    ) -> SubAgentResult: ...
+
     def get_active_children(
         self, parent_run_id: str
     ) -> list[SubAgentHandle]: ...
 
+    async def cancel(self, spawn_id: str) -> None: ...
+
     async def cancel_all(self, parent_run_id: str) -> int: ...
+
+
+# ---------------------------------------------------------------------------
+# Sub-Agent Interaction Channel (v3.1 PRD §7)
+# ---------------------------------------------------------------------------
+@runtime_checkable
+class SubAgentInteractionChannelProtocol(Protocol):
+    """Structured event channel between parent and child agents.
+
+    This is the truth channel for parent-child long-term interaction.
+    Do NOT use EventBus as a substitute.
+    Events are append-only; sequence_no is per-spawn_id and monotonic.
+    """
+
+    def append_event(self, event: DelegationEvent) -> None: ...
+
+    def list_events(
+        self,
+        spawn_id: str,
+        after_sequence_no: int | None = None,
+    ) -> list[DelegationEvent]: ...
+
+    def ack_event(self, spawn_id: str, event_id: str) -> None: ...
+
+    def get_latest_sequence_no(self, spawn_id: str) -> int: ...
+
+    def get_pending_events(
+        self, spawn_id: str
+    ) -> list[DelegationEvent]: ...
+
+
+# ---------------------------------------------------------------------------
+# HITL Handler (v3.1 PRD §9)
+# ---------------------------------------------------------------------------
+@runtime_checkable
+class HITLHandlerProtocol(Protocol):
+    """Handles human-in-the-loop requests from sub-agents.
+
+    Flow: sub-agent → QUESTION/CONFIRMATION event → DelegationExecutor
+    → HITLRequest → HITLHandler → user → HITLResponse → resume_subagent()
+    """
+
+    async def handle_hitl_request(
+        self, request: HITLRequest
+    ) -> HITLResponse: ...
 
 
 # ---------------------------------------------------------------------------

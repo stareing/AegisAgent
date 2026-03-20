@@ -15,34 +15,23 @@ import asyncio
 
 import pytest
 
-from agent_framework.models.hook import (
-    DENIABLE_HOOK_POINTS,
-    HookCategory,
-    HookContext,
-    HookExecutionMode,
-    HookFailurePolicy,
-    HookMeta,
-    HookPoint,
-    HookResult,
-    HookResultAction,
-)
-from agent_framework.hooks.protocol import AsyncHookProtocol, HookProtocol
-from agent_framework.hooks.registry import HookRegistry
-from agent_framework.hooks.executor import HookExecutor
-from agent_framework.hooks.errors import (
-    HookDeniedError,
-    HookRegistrationError,
-    HookTimeoutError,
-)
-from agent_framework.hooks.singleton import (
-    get_hook_executor,
-    get_hook_registry,
-    reset_hook_singletons,
-)
-from agent_framework.hooks.builtin.tool_guard_hook import ToolGuardHook
 from agent_framework.hooks.builtin.audit_hook import AuditNotifyHook
 from agent_framework.hooks.builtin.memory_review_hook import MemoryReviewHook
-
+from agent_framework.hooks.builtin.tool_guard_hook import ToolGuardHook
+from agent_framework.hooks.errors import (HookDeniedError,
+                                          HookRegistrationError,
+                                          HookTimeoutError)
+from agent_framework.hooks.executor import HookExecutor
+from agent_framework.hooks.protocol import AsyncHookProtocol, HookProtocol
+from agent_framework.hooks.registry import HookRegistry
+from agent_framework.hooks.singleton import (get_hook_executor,
+                                             get_hook_registry,
+                                             reset_hook_singletons)
+from agent_framework.models.hook import (DENIABLE_HOOK_POINTS, HookCategory,
+                                         HookContext, HookExecutionMode,
+                                         HookFailurePolicy, HookMeta,
+                                         HookPoint, HookResult,
+                                         HookResultAction)
 
 # ---------------------------------------------------------------------------
 # Test helpers
@@ -492,8 +481,8 @@ class TestArchitectureGuards:
         ctx = HookContext(payload={"key": "value"})
         assert isinstance(ctx.payload, dict)
         # Verify no reference to forbidden types in payload
-        from agent_framework.models.session import SessionState
         from agent_framework.models.agent import AgentState
+        from agent_framework.models.session import SessionState
         assert not isinstance(ctx.payload, (SessionState, AgentState))
 
     def test_all_deniable_points_are_pre_hooks(self) -> None:

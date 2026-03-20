@@ -101,7 +101,8 @@ async def call_llm_compress(
     Returns:
         Summary text string, or None on failure.
     """
-    from agent_framework.agent.prompt_templates import CONTEXT_COMPRESSION_PROMPT
+    from agent_framework.agent.prompt_templates import \
+        CONTEXT_COMPRESSION_PROMPT
 
     input_parts: list[str] = []
     if previous_summary:

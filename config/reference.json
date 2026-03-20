@@ -42,13 +42,17 @@
   },
 
   "subagent": {
-    "_comment": "Sub-agent spawning limits",
+    "_comment": "Sub-agent spawning limits and result collection",
     "max_sub_agents_per_run": 5,
     "max_concurrent_sub_agents": 3,
     "per_sub_agent_max_tokens": 4096,
     "default_deadline_ms": 60000,
     "default_max_iterations": 10,
-    "allow_recursive_spawn": false
+    "allow_recursive_spawn": false,
+    "default_collection_strategy": "HYBRID",
+    "_collection_strategy_options": "SEQUENTIAL | BATCH_ALL | HYBRID",
+    "_collection_strategy_note": "SEQUENTIAL=逐个汇报(Mode A), BATCH_ALL=完成汇总(Mode B), HYBRID=混合模式(Mode C, 推荐)",
+    "collection_poll_interval_ms": 500
   },
 
   "skills": {
