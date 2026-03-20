@@ -115,6 +115,25 @@ class TestSQLiteCheckpointStore:
         assert store.load_latest("sp2") is not None
         store.close()
 
+    def test_non_user_input_trigger_rejected(self, tmp_path):
+        """Only 'user_input' trigger is allowed for checkpoints."""
+        store = self._make_store(tmp_path)
+        with pytest.raises(ValueError, match="must be 'user_input'"):
+            store.save(
+                "sp1", self._make_agent_state(), self._make_session_state(),
+                trigger="auto_save",
+            )
+        store.close()
+
+    def test_user_input_trigger_accepted(self, tmp_path):
+        store = self._make_store(tmp_path)
+        ckpt_id = store.save(
+            "sp1", self._make_agent_state(), self._make_session_state(),
+            trigger="user_input",
+        )
+        assert ckpt_id.startswith("ckpt_")
+        store.close()
+
     def test_persistence_across_reopen(self, tmp_path):
         from agent_framework.subagent.checkpoint import SQLiteCheckpointStore
         db = str(tmp_path / "persist.db")

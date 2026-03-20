@@ -112,8 +112,24 @@ class SQLiteCheckpointStore:
         session_state: SessionState,
         checkpoint_level: CheckpointLevel = CheckpointLevel.STEP_RESUMABLE,
         summary: str = "",
+        trigger: str = "user_input",
     ) -> str:
-        """Save a checkpoint for a spawn_id. Returns checkpoint_id."""
+        """Save a checkpoint for a spawn_id. Returns checkpoint_id.
+
+        Args:
+            trigger: What triggered this checkpoint. Only "user_input" is
+                allowed — checkpoints must represent real user interaction
+                boundaries, not synthetic or automated save points.
+
+        Raises:
+            ValueError: If trigger is not "user_input".
+        """
+        if trigger != "user_input":
+            raise ValueError(
+                f"Checkpoint trigger must be 'user_input', got '{trigger}'. "
+                "Checkpoints are only valid at real user interaction boundaries."
+            )
+
         checkpoint_id = f"ckpt_{uuid.uuid4().hex[:12]}"
         agent_json = agent_state.model_dump_json()
         session_json = session_state.model_dump_json()

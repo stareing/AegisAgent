@@ -629,9 +629,11 @@ class SubAgentRuntime:
     def save_checkpoint(
         self, spawn_id: str, agent_state: Any, session_state: Any,
         summary: str = "",
+        trigger: str = "user_input",
     ) -> str | None:
         """Save a checkpoint for a running sub-agent.
 
+        Only allowed at real user interaction boundaries (trigger="user_input").
         Returns checkpoint_id on success, None if no checkpoint store configured.
         """
         if self._checkpoint_store is None:
@@ -645,6 +647,7 @@ class SubAgentRuntime:
             session_state=session_state,
             checkpoint_level=CheckpointLevel.STEP_RESUMABLE,
             summary=summary,
+            trigger=trigger,
         )
         return checkpoint_id
 
