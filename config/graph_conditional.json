@@ -1,0 +1,90 @@
+{
+  "graph": {
+    "name": "review_and_decide",
+    "description": "Analyze code, decide if it needs fixing, then fix or approve",
+
+    "state": {
+      "task": {"type": "str", "default": ""},
+      "analysis": {"type": "str", "default": ""},
+      "decision": {"type": "str", "default": ""},
+      "result": {"type": "str", "default": ""},
+      "steps": {"type": "list", "reducer": "add", "default": []}
+    },
+
+    "nodes": {
+      "analyzer": {
+        "type": "agent",
+        "task_key": "task",
+        "output_key": "analysis",
+        "system_prompt": "You are a code analyzer. Review the code and describe all issues found. End with either NEEDS_FIX or LOOKS_GOOD."
+      },
+      "router": {
+        "type": "passthrough",
+        "transform": "extract_decision"
+      },
+      "fixer": {
+        "type": "agent",
+        "task_key": "analysis",
+        "output_key": "result",
+        "system_prompt": "You are a code fixer. Fix the issues described in the analysis."
+      },
+      "approver": {
+        "type": "agent",
+        "task_key": "analysis",
+        "output_key": "result",
+        "system_prompt": "You are a code reviewer. Write a brief approval summary."
+      }
+    },
+
+    "edges": [
+      {"from": "__start__", "to": "analyzer"},
+      {"from": "analyzer", "to": "router"}
+    ],
+
+    "conditional_edges": [
+      {
+        "from": "router",
+        "condition": "route_by_decision",
+        "mapping": {
+          "NEEDS_FIX": "fixer",
+          "LOOKS_GOOD": "approver"
+        },
+        "default": "approver"
+      }
+    ],
+
+    "finish_nodes": ["fixer", "approver"],
+
+    "conditions": {
+      "route_by_decision": {
+        "field": "analysis",
+        "contains": {
+          "NEEDS_FIX": "NEEDS_FIX",
+          "LOOKS_GOOD": "LOOKS_GOOD"
+        },
+        "default": "LOOKS_GOOD"
+      },
+      "extract_decision": {
+        "field": "analysis",
+        "extract_last_word": true,
+        "output_key": "decision"
+      }
+    },
+
+    "entry_state": {
+      "task": "Review this function:\ndef add(a, b):\n    return a + b"
+    }
+  },
+
+  "model": {
+    "adapter_type": "deepseek",
+    "default_model_name": "deepseek-chat",
+    "temperature": 0.3,
+    "max_output_tokens": 4096,
+    "api_key": "${DEEPSEEK_API_KEY}",
+    "api_base": "https://api.deepseek.com"
+  },
+  "logging": {
+    "level": "INFO"
+  }
+}
