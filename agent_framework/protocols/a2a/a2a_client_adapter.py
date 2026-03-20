@@ -12,7 +12,7 @@ Fixes applied:
 
 from __future__ import annotations
 
-from typing import Any, AsyncIterator
+from typing import TYPE_CHECKING, Any, AsyncIterator
 
 from agent_framework.infra.logger import get_logger
 from agent_framework.models.subagent import (
@@ -22,6 +22,11 @@ from agent_framework.models.subagent import (
     SubAgentStatus,
 )
 from agent_framework.models.tool import ToolEntry, ToolMeta
+
+if TYPE_CHECKING:
+    from agent_framework.protocols.a2a.a2a_discovery_cache import (
+        SQLiteA2ADiscoveryCache,
+    )
 
 logger = get_logger(__name__)
 
@@ -76,17 +81,43 @@ class A2AClientAdapter:
     - Expose local framework as A2A server
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        discovery_cache: SQLiteA2ADiscoveryCache | None = None,
+        discovery_cache_ttl_seconds: int = 3600,
+    ) -> None:
         self._known_agents: dict[str, dict] = {}  # alias -> agent card info
         self._clients: dict[str, Any] = {}  # alias -> A2AClient
         self._capabilities: dict[str, DelegationCapabilities] = {}  # alias -> caps
+        self._discovery_cache = discovery_cache
+        self._discovery_cache_ttl_seconds = discovery_cache_ttl_seconds
 
     # ── Discovery ──────────────────────────────────────────────────
 
     async def discover_agent(
         self, agent_url: str, alias: str | None = None
     ) -> dict:
-        """Discover a remote agent via its A2A agent card."""
+        """Discover a remote agent via its A2A agent card.
+
+        When a discovery cache is configured, cached (non-expired) results
+        are returned immediately without making a network RPC.
+        """
+        # ── Cache lookup ──────────────────────────────────────────
+        if self._discovery_cache is not None:
+            cached = self._discovery_cache.get(agent_url)
+            if cached is not None:
+                effective_alias = alias or cached.get("name") or agent_url.split("/")[-1]
+                self._known_agents[effective_alias] = cached
+                # Restore lightweight capabilities from cached card
+                self._capabilities.setdefault(effective_alias, DelegationCapabilities())
+                logger.info(
+                    "a2a.agent_discovered_from_cache",
+                    alias=effective_alias,
+                    url=agent_url,
+                )
+                return cached
+
+        # ── Live discovery ────────────────────────────────────────
         try:
             from a2a.client import A2AClient
         except ImportError:
@@ -102,7 +133,7 @@ class A2AClientAdapter:
             effective_alias = alias or getattr(agent_card, "name", None) or agent_url.split("/")[-1]
 
             self._clients[effective_alias] = client
-            self._known_agents[effective_alias] = {
+            agent_info: dict = {
                 "url": agent_url,
                 "name": getattr(agent_card, "name", effective_alias),
                 "description": getattr(agent_card, "description", ""),
@@ -115,6 +146,7 @@ class A2AClientAdapter:
                     for s in getattr(agent_card, "skills", [])
                 ],
             }
+            self._known_agents[effective_alias] = agent_info
 
             # Extract DelegationCapabilities from agent card (boundary §10)
             remote_caps = getattr(agent_card, "capabilities", None)
@@ -128,14 +160,20 @@ class A2AClientAdapter:
             )
             self._capabilities[effective_alias] = caps
 
+            # ── Persist to cache ──────────────────────────────────
+            if self._discovery_cache is not None:
+                self._discovery_cache.put(
+                    agent_url, agent_info, self._discovery_cache_ttl_seconds
+                )
+
             logger.info(
                 "a2a.agent_discovered",
                 alias=effective_alias,
                 url=agent_url,
-                skills_count=len(self._known_agents[effective_alias]["skills"]),
+                skills_count=len(agent_info["skills"]),
                 supports_streaming=caps.supports_progress_events,
             )
-            return self._known_agents[effective_alias]
+            return agent_info
 
         except Exception as e:
             logger.error("a2a.discover_failed", url=agent_url, error=str(e))

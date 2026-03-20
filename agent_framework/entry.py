@@ -165,12 +165,20 @@ class AgentFramework:
 
         # Interaction channel for long-term parent-child delegation (v3.1)
         from agent_framework.subagent.hitl import QueueHITLHandler
-        from agent_framework.subagent.interaction_channel import \
-            InMemoryInteractionChannel
-
-        self._interaction_channel = InMemoryInteractionChannel(
-            max_events_per_spawn=self.config.long_interaction.max_delegation_events_per_subagent,
+        from agent_framework.subagent.interaction_channel import (
+            InMemoryInteractionChannel, SQLiteInteractionChannel,
         )
+
+        li_cfg = self.config.long_interaction
+        if li_cfg.channel_backend == "sqlite":
+            self._interaction_channel = SQLiteInteractionChannel(
+                db_path=li_cfg.channel_db_path,
+                max_events_per_spawn=li_cfg.max_delegation_events_per_subagent,
+            )
+        else:
+            self._interaction_channel = InMemoryInteractionChannel(
+                max_events_per_spawn=li_cfg.max_delegation_events_per_subagent,
+            )
         self._hitl_handler = QueueHITLHandler(
             max_pending_per_run=self.config.long_interaction.max_pending_hitl_requests_per_run,
         )
@@ -284,6 +292,9 @@ class AgentFramework:
                 max_spawn_depth=self.config.subagent.max_spawn_depth,
                 live_agent_ttl_seconds=self.config.subagent.live_agent_ttl_seconds,
                 max_live_agents_per_run=self.config.subagent.max_live_agents_per_run,
+                dynamic_pool=self.config.subagent.dynamic_pool,
+                min_concurrent=self.config.subagent.min_concurrent,
+                max_concurrent_ceiling=self.config.subagent.max_concurrent_ceiling,
             )
             self._deps.sub_agent_runtime = sub_runtime
             delegation_executor._sub_agent_runtime = sub_runtime
@@ -295,7 +306,7 @@ class AgentFramework:
                     type=StreamEventType.SUBAGENT_STREAM,
                     data={"spawn_id": spawn_id, "event_type": event.type.value, **event.data},
                 )
-                tool_executor._child_stream_queue.put_nowait(wrapped)
+                tool_executor.enqueue_child_stream_event(wrapped)
 
             sub_runtime._stream_sink = _child_stream_sink
         except Exception as e:
@@ -548,8 +559,15 @@ class AgentFramework:
         """Discover configured A2A agents and register their tools."""
         from agent_framework.protocols.a2a.a2a_client_adapter import \
             A2AClientAdapter
+        from agent_framework.protocols.a2a.a2a_discovery_cache import \
+            SQLiteA2ADiscoveryCache
 
-        self._a2a_adapter = A2AClientAdapter()
+        ttl = self.config.a2a.discovery_cache_ttl_seconds
+        self._a2a_discovery_cache = SQLiteA2ADiscoveryCache()
+        self._a2a_adapter = A2AClientAdapter(
+            discovery_cache=self._a2a_discovery_cache,
+            discovery_cache_ttl_seconds=ttl,
+        )
         if self._deps and self._deps.delegation_executor:
             self._deps.delegation_executor.set_a2a_adapter(self._a2a_adapter)
 
@@ -895,6 +913,8 @@ class AgentFramework:
             await self._mcp_manager.disconnect_all()
         if self._memory_store:
             self._memory_store.close()
+        if getattr(self, "_a2a_discovery_cache", None) is not None:
+            self._a2a_discovery_cache.close()
         from agent_framework.infra.telemetry import get_tracing_manager
         get_tracing_manager().shutdown()
         logger.info("framework.shutdown")

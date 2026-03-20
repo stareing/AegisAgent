@@ -9,6 +9,7 @@ from agent_framework.infra.logger import get_logger
 from agent_framework.models.subagent import (SubAgentHandle, SubAgentResult,
                                              SubAgentTaskRecord,
                                              SubAgentTaskStatus)
+from agent_framework.subagent.pool import DynamicConcurrencyController
 
 logger = get_logger(__name__)
 
@@ -36,10 +37,24 @@ class SubAgentScheduler:
         self,
         max_concurrent: int = 3,
         max_per_run: int = 5,
+        dynamic_pool: bool = False,
+        min_concurrent: int = 1,
+        max_concurrent_ceiling: int = 10,
     ) -> None:
         self._max_concurrent = max_concurrent
         self._max_per_run = max_per_run
-        self._semaphore = asyncio.Semaphore(max_concurrent)
+        self._dynamic_pool = dynamic_pool
+
+        if dynamic_pool:
+            self._concurrency_controller = DynamicConcurrencyController(
+                min_concurrent=min_concurrent,
+                max_concurrent=max_concurrent_ceiling,
+            )
+            self._semaphore: asyncio.Semaphore | None = None
+        else:
+            self._concurrency_controller = None
+            self._semaphore = asyncio.Semaphore(max_concurrent)
+
         self._tasks: dict[str, asyncio.Task] = {}  # spawn_id -> task
         self._results: dict[str, SubAgentResult] = {}  # spawn_id -> result
         self._run_counts: dict[str, int] = {}  # parent_run_id -> count
@@ -153,8 +168,13 @@ class SubAgentScheduler:
             # Using ensure_future + wait (not wait_for) avoids Python's
             # "coroutine was never awaited" warning on cancel/timeout.
             inner = asyncio.ensure_future(coro)
+            concurrency_gate = (
+                self._concurrency_controller
+                if self._concurrency_controller is not None
+                else self._semaphore
+            )
             try:
-                async with self._semaphore:
+                async with concurrency_gate:
                     timeout = deadline_ms / 1000.0 if deadline_ms > 0 else None
                     done, _ = await asyncio.wait(
                         {inner}, timeout=timeout

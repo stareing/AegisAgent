@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from agent_framework.models.message import Message, TokenUsage
 
@@ -440,6 +440,16 @@ class SubAgentHandle(BaseModel):
     waiting_reason: str | None = None
     resume_token: str | None = None
     capabilities: DelegationCapabilities = Field(default_factory=DelegationCapabilities)
+
+    @model_validator(mode="after")
+    def _validate_pause_reason_required(self) -> "SubAgentHandle":
+        """Paused states MUST carry a non-NONE pause_reason for explicitness."""
+        if is_paused_status(self.status) and self.pause_reason == PauseReason.NONE:
+            raise ValueError(
+                f"SubAgentHandle with paused status {self.status.value} "
+                f"requires an explicit pause_reason (got PauseReason.NONE)"
+            )
+        return self
 
 
 # ---------------------------------------------------------------------------

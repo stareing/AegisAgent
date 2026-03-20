@@ -33,6 +33,20 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+# Maximum number of events buffered in the child stream queue before
+# backpressure kicks in.  TOKEN events (high volume, low priority) are
+# dropped silently; all other event types force-drain the oldest items
+# to make room.
+_STREAM_QUEUE_MAX_SIZE: int = 1000
+
+# Event types that are considered low-priority and can be dropped when the
+# queue is full, rather than evicting existing items.
+_LOW_PRIORITY_EVENT_TYPES: frozenset[str] = frozenset({"token", "subagent_stream"})
+
+# Number of oldest items to drain when a high-priority event must be enqueued
+# into a full queue.
+_BACKPRESSURE_DRAIN_COUNT: int = 50
+
 
 class ToolExecutor:
     """Executes tool calls with validation, routing, and error handling.
@@ -95,7 +109,11 @@ class ToolExecutor:
         self._lead_collector: Any = None  # LeadCollector, created on first async spawn
         # Queue for real-time sub-agent stream events (TOKEN, TOOL_CALL, etc.)
         # Filled by SubAgentRuntime._stream_sink, drained by batch_execute_progressive.
-        self._child_stream_queue: asyncio.Queue = asyncio.Queue()
+        # Bounded to _STREAM_QUEUE_MAX_SIZE to prevent unbounded memory growth;
+        # backpressure logic lives in enqueue_child_stream_event().
+        self._child_stream_queue: asyncio.Queue = asyncio.Queue(
+            maxsize=_STREAM_QUEUE_MAX_SIZE
+        )
 
     @property
     def todo_service(self) -> TaskService:
@@ -117,6 +135,66 @@ class ToolExecutor:
     def set_current_session_messages(self, messages: list[Message]) -> None:
         """Called by RunCoordinator before each iteration for spawn seed building."""
         self._current_session_messages = list(messages or [])
+
+    # ------------------------------------------------------------------
+    # Backpressure-aware child stream enqueue
+    # ------------------------------------------------------------------
+
+    def enqueue_child_stream_event(self, event: Any) -> None:
+        """Put a StreamEvent into the child stream queue with backpressure.
+
+        Policy:
+        - If the queue has room, enqueue unconditionally.
+        - If full and the event carries a low-priority event_type (e.g. TOKEN),
+          drop it silently and log at debug level.
+        - If full and the event is high-priority (TOOL_CALL_START, TOOL_CALL_DONE,
+          ITERATION_START, etc.), drain the oldest items to make room.
+        """
+        if not self._child_stream_queue.full():
+            self._child_stream_queue.put_nowait(event)
+            return
+
+        # Determine the inner event_type carried in the wrapper
+        inner_type = self._extract_event_type(event)
+
+        if inner_type in _LOW_PRIORITY_EVENT_TYPES:
+            logger.debug(
+                "stream_queue.backpressure.drop",
+                event_type=inner_type,
+                queue_size=self._child_stream_queue.qsize(),
+            )
+            return
+
+        # High-priority event — force-drain oldest items to make room
+        drained = 0
+        while drained < _BACKPRESSURE_DRAIN_COUNT and not self._child_stream_queue.empty():
+            try:
+                self._child_stream_queue.get_nowait()
+                drained += 1
+            except asyncio.QueueEmpty:
+                break
+
+        logger.debug(
+            "stream_queue.backpressure.drain",
+            event_type=inner_type,
+            drained=drained,
+        )
+        self._child_stream_queue.put_nowait(event)
+
+    @staticmethod
+    def _extract_event_type(event: Any) -> str:
+        """Extract the logical event type string from a StreamEvent.
+
+        For SUBAGENT_STREAM wrappers the inner event_type lives in data;
+        otherwise we use the top-level type value.
+        """
+        if hasattr(event, "data") and isinstance(event.data, dict):
+            inner = event.data.get("event_type")
+            if inner is not None:
+                return str(inner)
+        if hasattr(event, "type"):
+            return str(event.type.value) if hasattr(event.type, "value") else str(event.type)
+        return ""
 
     async def execute(
         self, tool_call_request: ToolCallRequest, policy: CapabilityPolicy | None = None

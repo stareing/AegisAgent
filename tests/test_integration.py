@@ -879,7 +879,7 @@ class TestRegressionFixes:
         from agent_framework.entry import AgentFramework
 
         class FakeA2AAdapter:
-            def __init__(self):
+            def __init__(self, **kwargs):
                 self.discovered = []
 
             async def discover_agent(self, url, alias=None):

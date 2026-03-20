@@ -263,10 +263,29 @@ spawn_agent(task_input="Write tests for: func_a, func_b, func_c", wait=true)
 → Uses the previous result to know what to test.
 ```
 
-## collection_strategy (for async parallel spawns)
-- "HYBRID" (default): each batch_pull returns all currently-completed. Best general-purpose.
-- "SEQUENTIAL": returns exactly 1 per pull. Use when you need to decide after each.
-- "BATCH_ALL": waits for all, returns all at once. Use when only merged result matters.
+## collection_strategy — choosing the right mode for async spawns
+
+Pick based on task dependency and synthesis needs:
+
+**SEQUENTIAL** — tasks are dependent; each result informs the next action.
+- "Refactor module A, then update module B to use A's new API"
+- "Run lint, then fix only the reported errors"
+→ `spawn_agent(..., wait=false, collection_strategy="SEQUENTIAL")`
+→ `check_spawn_result()` returns 1 result at a time so you can react before continuing.
+
+**BATCH_ALL** — tasks are independent and you need ALL results before answering.
+- "Analyze 5 config files and compare their settings"
+- "Run the same test on 3 environments, report a unified pass/fail matrix"
+→ `spawn_agent(..., wait=false, collection_strategy="BATCH_ALL")`
+→ `check_spawn_result()` blocks until every agent finishes, then returns all at once.
+
+**HYBRID** (default) — tasks are independent; start processing as results arrive.
+- "Fix security issues in shell.py, web.py, and loop.py" (report each fix as it lands)
+- "Translate this document into 4 languages" (deliver each translation when ready)
+→ `spawn_agent(..., wait=false)` (HYBRID is the default)
+→ `check_spawn_result(batch_pull=true)` returns whatever is done so far; repeat until `is_final_batch=true`.
+
+Rule of thumb: dependent chain → SEQUENTIAL, need all before synthesis → BATCH_ALL, otherwise → HYBRID.
 
 ## Synthesis
 After all agents complete:

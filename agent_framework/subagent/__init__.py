@@ -10,6 +10,7 @@ from agent_framework.subagent.memory_scope import (
     IsolatedMemoryManager,
     SharedWriteMemoryManager,
 )
+from agent_framework.subagent.pool import DynamicConcurrencyController
 from agent_framework.subagent.runtime import SubAgentRuntime
 from agent_framework.subagent.scheduler import SubAgentScheduler
 
@@ -17,6 +18,7 @@ __all__ = [
     "IsolatedMemoryManager",
     "InheritReadMemoryManager",
     "SharedWriteMemoryManager",
+    "DynamicConcurrencyController",
     "SubAgentFactory",
     "SubAgentScheduler",
     "SubAgentRuntime",

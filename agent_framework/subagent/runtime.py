@@ -73,6 +73,9 @@ class SubAgentRuntime:
         max_spawn_depth: int = 1,
         live_agent_ttl_seconds: int = 300,
         max_live_agents_per_run: int = 3,
+        dynamic_pool: bool = False,
+        min_concurrent: int = 1,
+        max_concurrent_ceiling: int = 10,
     ) -> None:
         self._factory = SubAgentFactory(parent_deps)
         self._live_agent_ttl = live_agent_ttl_seconds
@@ -80,6 +83,9 @@ class SubAgentRuntime:
         self._scheduler = SubAgentScheduler(
             max_concurrent=max_concurrent,
             max_per_run=max_per_run,
+            dynamic_pool=dynamic_pool,
+            min_concurrent=min_concurrent,
+            max_concurrent_ceiling=max_concurrent_ceiling,
         )
         self._coordinator = coordinator
         self._parent_deps = parent_deps
@@ -91,6 +97,9 @@ class SubAgentRuntime:
         # Stream sink: receives child StreamEvents in real-time during spawn/send_message.
         # Signature: (spawn_id, event) -> None. Set by ToolExecutor before execution.
         self._stream_sink: Callable[[str, Any], None] | None = None
+        # Checkpoint store for suspend/resume persistence.
+        # Set externally (entry.py) when persistent checkpointing is enabled.
+        self._checkpoint_store: Any = None  # SQLiteCheckpointStore | None
 
     async def _run_child_stream_or_block(
         self,
@@ -616,6 +625,110 @@ class SubAgentRuntime:
             success=result.success,
         )
         return result
+
+    def save_checkpoint(
+        self, spawn_id: str, agent_state: Any, session_state: Any,
+        summary: str = "",
+    ) -> str | None:
+        """Save a checkpoint for a running sub-agent.
+
+        Returns checkpoint_id on success, None if no checkpoint store configured.
+        """
+        if self._checkpoint_store is None:
+            logger.debug("checkpoint.no_store", spawn_id=spawn_id)
+            return None
+
+        from agent_framework.models.subagent import CheckpointLevel
+        checkpoint_id = self._checkpoint_store.save(
+            spawn_id=spawn_id,
+            agent_state=agent_state,
+            session_state=session_state,
+            checkpoint_level=CheckpointLevel.STEP_RESUMABLE,
+            summary=summary,
+        )
+        return checkpoint_id
+
+    async def resume_from_checkpoint(
+        self, spawn_id: str, parent_agent: Any,
+        checkpoint_id: str | None = None,
+    ) -> SubAgentResult:
+        """Resume a sub-agent from a stored checkpoint.
+
+        If checkpoint_id is None, uses the latest checkpoint for spawn_id.
+        Restores AgentState + SessionState and continues execution.
+        """
+        if self._checkpoint_store is None:
+            return SubAgentResult(
+                spawn_id=spawn_id, success=False,
+                error="No checkpoint store configured",
+            )
+
+        # Load checkpoint
+        if checkpoint_id:
+            ckpt = self._checkpoint_store.load_by_id(checkpoint_id)
+        else:
+            ckpt = self._checkpoint_store.load_latest(spawn_id)
+
+        if ckpt is None:
+            return SubAgentResult(
+                spawn_id=spawn_id, success=False,
+                error=f"No checkpoint found for spawn_id={spawn_id}",
+            )
+
+        logger.info(
+            "subagent.resume_from_checkpoint",
+            spawn_id=spawn_id,
+            checkpoint_id=ckpt.checkpoint_id,
+            iteration_index=ckpt.iteration_index,
+            level=ckpt.checkpoint_level.value,
+        )
+
+        # Restore state
+        restored_agent_state = ckpt.restore_agent_state()
+        restored_session = ckpt.restore_session_state()
+
+        # Create agent + deps from factory
+        spec = SubAgentSpec(
+            parent_run_id=restored_agent_state.run_id,
+            spawn_id=spawn_id,
+            task_input=restored_agent_state.task,
+        )
+        try:
+            sub_agent, sub_deps = self._factory.create_agent_and_deps(
+                spec, parent_agent,
+            )
+        except Exception as e:
+            return SubAgentResult(
+                spawn_id=spawn_id, success=False,
+                error=f"Failed to create agent for checkpoint resume: {e}",
+            )
+
+        coordinator = self._coordinator
+        if coordinator is None:
+            from agent_framework.agent.coordinator import RunCoordinator
+            coordinator = RunCoordinator()
+
+        # Run with restored session as initial context
+        try:
+            run_result = await self._run_child_stream_or_block(
+                coordinator, sub_agent, sub_deps,
+                restored_agent_state.task,
+                restored_session.get_messages(),
+                spawn_id=spawn_id,
+            )
+            return SubAgentResult(
+                spawn_id=spawn_id,
+                success=run_result.success,
+                final_answer=run_result.final_answer,
+                error=run_result.error,
+                usage=run_result.usage,
+                iterations_used=run_result.iterations_used,
+            )
+        except Exception as e:
+            return SubAgentResult(
+                spawn_id=spawn_id, success=False,
+                error=f"Checkpoint resume execution failed: {e}",
+            )
 
     async def cancel(self, spawn_id: str) -> None:
         """Cancel a single sub-agent by spawn_id.
