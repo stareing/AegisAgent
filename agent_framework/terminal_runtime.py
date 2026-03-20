@@ -942,6 +942,80 @@ async def _cmd_memory_toggle(fw: AgentFramework, mock: InteractiveMockModel | No
         print(f"  {_red('用法:')} /memory-toggle on|off")
 
 
+@_register_cmd("checkpoints", "列出可恢复的快照", usage="/checkpoints [spawn_id]", category="会话")
+async def _cmd_checkpoints(
+    fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str,
+) -> None:
+    runtime = getattr(fw._deps, "sub_agent_runtime", None) if hasattr(fw, "_deps") else None
+    store = getattr(runtime, "_checkpoint_store", None) if runtime else None
+    if store is None:
+        print(f"  {_yellow('快照未启用 (无 checkpoint store)')}")
+        return
+
+    spawn_id = args.strip() or f"repl_{state.conversation_id[:12]}"
+    checkpoints = store.list_checkpoints(spawn_id)
+    if not checkpoints:
+        print(f"  {_dim(f'暂无快照 (spawn: {spawn_id})')}")
+        return
+
+    print(f"\n  {_bold(_yellow(f'快照列表 ({spawn_id}):'))}")
+    for ckpt in checkpoints[:10]:
+        cid = ckpt["checkpoint_id"]
+        idx = ckpt["iteration_index"]
+        summary = ckpt["summary"][:60]
+        ts = ckpt["created_at"][:19]
+        print(f"    {_cyan(cid)}  iter={idx}  {ts}  {_dim(summary)}")
+    print()
+
+
+@_register_cmd("resume", "从快照恢复对话", usage="/resume [checkpoint_id]", category="会话")
+async def _cmd_resume(
+    fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str,
+) -> None:
+    runtime = getattr(fw._deps, "sub_agent_runtime", None) if hasattr(fw, "_deps") else None
+    store = getattr(runtime, "_checkpoint_store", None) if runtime else None
+    if store is None:
+        print(f"  {_yellow('快照未启用 (无 checkpoint store)')}")
+        return
+
+    checkpoint_id = args.strip() or None
+    spawn_id = f"repl_{state.conversation_id[:12]}"
+
+    # Load checkpoint
+    if checkpoint_id:
+        ckpt = store.load_by_id(checkpoint_id)
+    else:
+        ckpt = store.load_latest(spawn_id)
+
+    if ckpt is None:
+        print(f"  {_red('未找到快照')} {_dim(f'(spawn: {spawn_id})')}")
+        print(f"  {_dim('使用 /checkpoints 查看可用快照')}")
+        return
+
+    # Restore session messages into REPL state
+    restored_session = ckpt.restore_session_state()
+    restored_msgs = restored_session.get_messages()
+
+    state.history.clear()
+    state.history.extend(restored_msgs)
+    state.turn_count = ckpt.iteration_index
+
+    print(f"  {_green('已恢复快照:')}")
+    print(f"    ID:    {_cyan(ckpt.checkpoint_id)}")
+    print(f"    轮次:  {ckpt.iteration_index}")
+    print(f"    消息:  {len(restored_msgs)} 条")
+    print(f"    摘要:  {ckpt.summary[:80]}")
+    print()
+
+    # Show last few messages as context
+    tail = restored_msgs[-4:] if len(restored_msgs) > 4 else restored_msgs
+    for msg in tail:
+        role_tag = _green("You") if msg.role == "user" else _cyan("Agent")
+        content_preview = (msg.content or "")[:100]
+        print(f"    {_dim(role_tag + ':')} {content_preview}")
+    print(f"\n  {_dim('对话已恢复，继续输入即可。')}")
+
+
 @_register_cmd("demo", "运行内置演示场景", usage="/demo [weather|skill]", category="演示")
 async def _cmd_demo(fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str) -> None:
     demos = {
