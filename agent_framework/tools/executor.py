@@ -521,6 +521,8 @@ class ToolExecutor:
             return await self._subagent_send_message(args)
         if entry.meta.name == "close_agent":
             return await self._subagent_close(args)
+        if entry.meta.name == "resume_checkpoint":
+            return await self._subagent_resume_checkpoint(args)
         return await self._subagent_spawn(args)
 
     # ── Sub-agent operations ─────────────────────────────────
@@ -546,6 +548,11 @@ class ToolExecutor:
         """Close a LONG_LIVED sub-agent."""
         from agent_framework.tools.builtin.spawn_agent import execute_close_agent
         return await execute_close_agent(self, args)
+
+    async def _subagent_resume_checkpoint(self, args: dict) -> dict:
+        """Resume a sub-agent from a saved checkpoint."""
+        from agent_framework.tools.builtin.spawn_agent import execute_resume_checkpoint
+        return await execute_resume_checkpoint(self, args)
 
     def _ensure_lead_collector(self, strategy_str: str) -> None:
         """Create LeadCollector on first async spawn if not exists.

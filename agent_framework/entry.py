@@ -299,6 +299,13 @@ class AgentFramework:
             self._deps.sub_agent_runtime = sub_runtime
             delegation_executor._sub_agent_runtime = sub_runtime
 
+            # Wire checkpoint store for persistent state snapshots
+            try:
+                from agent_framework.subagent.checkpoint import SQLiteCheckpointStore
+                sub_runtime._checkpoint_store = SQLiteCheckpointStore()
+            except Exception:
+                pass  # Checkpoint is optional; degrades gracefully
+
             # Wire stream sink: child events → tool executor queue → parent stream
             def _child_stream_sink(spawn_id: str, event: Any) -> None:
                 from agent_framework.models.stream import StreamEvent, StreamEventType

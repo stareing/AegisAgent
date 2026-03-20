@@ -335,6 +335,58 @@ async def execute_close_agent(executor: ToolExecutor, args: dict) -> dict:
     return {"spawn_id": spawn_id, "closed": closed}
 
 
+@tool(
+    name="resume_checkpoint",
+    description=(
+        "Resume a sub-agent from a saved checkpoint. "
+        "Restores the exact conversation state and continues execution. "
+        "Use after a crash or when a previously suspended agent needs to continue."
+    ),
+    category="delegation",
+    require_confirm=False,
+    tags=["system", "delegation", "subagent"],
+    namespace=SYSTEM_NAMESPACE,
+    source="subagent",
+)
+async def resume_checkpoint(
+    spawn_id: str,
+    checkpoint_id: str = "",
+) -> dict:
+    """Resume a sub-agent from a checkpoint.
+
+    Args:
+        spawn_id: The spawn_id of the sub-agent to resume.
+        checkpoint_id: Specific checkpoint to resume from. If empty, uses the latest.
+
+    Returns:
+        DelegationSummary dict with the agent's response after resumption.
+    """
+    raise RuntimeError(
+        "resume_checkpoint should not be called directly. "
+        "It must be routed through the ToolExecutor."
+    )
+
+
+async def execute_resume_checkpoint(executor: ToolExecutor, args: dict) -> dict[str, Any]:
+    """Execute resume_checkpoint via ToolExecutor-owned dependencies/state."""
+    from agent_framework.subagent.delegation import DelegationExecutor
+
+    spawn_id = args.get("spawn_id", "")
+    checkpoint_id = args.get("checkpoint_id", "") or None
+    if not spawn_id:
+        return {"error": "spawn_id is required"}
+
+    parent_agent = executor._parent_agent_getter() if executor._parent_agent_getter else None
+    result = await executor._delegation.resume_from_checkpoint(
+        spawn_id, parent_agent, checkpoint_id=checkpoint_id,
+    )
+
+    summary = DelegationExecutor.summarize_result(result).model_dump()
+    summary["resumed_from_checkpoint"] = True
+    summary["checkpoint_id"] = checkpoint_id or "latest"
+    return summary
+
+
 def ensure_lead_collector(executor: ToolExecutor, strategy_str: str) -> None:
     """Create LeadCollector on first async spawn if not exists."""
     if executor._lead_collector is not None:

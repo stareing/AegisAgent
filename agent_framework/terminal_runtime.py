@@ -1454,6 +1454,45 @@ async def _execute_with_progressive(
     return format_result(result, include_trace=True)
 
 
+def _auto_checkpoint(fw: AgentFramework, state: ReplState, user_input: str) -> None:
+    """Save a checkpoint after each terminal user interaction.
+
+    Only triggers at real user input boundaries. Silent on failure —
+    checkpointing is optional and must not interrupt the REPL.
+    """
+    try:
+        runtime = getattr(fw._deps, "sub_agent_runtime", None) if hasattr(fw, "_deps") else None
+        if runtime is None or getattr(runtime, "_checkpoint_store", None) is None:
+            return
+
+        from agent_framework.models.agent import AgentState
+        from agent_framework.models.session import SessionState
+
+        # Build lightweight state snapshot from REPL history
+        session = SessionState(
+            session_id=state.conversation_id,
+            run_id=f"repl_turn_{state.turn_count}",
+        )
+        for msg in state.history:
+            session.append_message(msg)
+
+        agent_state = AgentState(
+            run_id=session.run_id,
+            task=user_input,
+            iteration_count=state.turn_count,
+        )
+
+        runtime._checkpoint_store.save(
+            spawn_id=f"repl_{state.conversation_id[:12]}",
+            agent_state=agent_state,
+            session_state=session,
+            summary=f"Turn {state.turn_count}: {user_input[:80]}",
+            trigger="user_input",
+        )
+    except Exception:
+        pass  # Checkpoint failure must not break REPL
+
+
 async def run_classic_repl(fw: AgentFramework, mock_model: InteractiveMockModel | None) -> None:
     import uuid
     from pathlib import Path
@@ -1496,6 +1535,8 @@ async def run_classic_repl(fw: AgentFramework, mock_model: InteractiveMockModel 
         try:
             output = await _execute_with_progressive(fw, mock_model, state, user_input)
             print(output)
+            # Auto-checkpoint after each successful user interaction
+            _auto_checkpoint(fw, state, user_input)
         except Exception as exc:
             print(f"\n  {_red('运行错误:')}")
             print(f"  {exc}")
