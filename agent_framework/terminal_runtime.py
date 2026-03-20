@@ -1397,6 +1397,38 @@ async def _execute_with_progressive(
             else:
                 print(f"  {_dim(f'[{tag} {idx}/{total}]')} {status}: {display}")
 
+        elif event.type == StreamEventType.SUBAGENT_STREAM:
+            inner = event.data.get("event_type", "")
+            sid = event.data.get("spawn_id", "")[:8]
+            if inner == "token":
+                text = event.data.get("text", "")
+                # Track newlines for prefix insertion
+                if not hasattr(state, "_subagent_at_newline"):
+                    state._subagent_at_newline = True
+                if state._subagent_at_newline:
+                    print(f"  {_dim('│')} ", end="", flush=True)
+                    state._subagent_at_newline = False
+                for ch in text:
+                    if ch == "\n":
+                        print(flush=True)
+                        print(f"  {_dim('│')} ", end="", flush=True)
+                    else:
+                        print(ch, end="", flush=True)
+            elif inner == "tool_call_start":
+                tool_name = event.data.get("tool_name", "?")
+                print(f"\n  {_dim('│')} {_dim('[tool]')} {_cyan(tool_name)}", end="", flush=True)
+                state._subagent_at_newline = False
+            elif inner == "tool_call_done":
+                success = event.data.get("success", False)
+                marker = _green(" [ok]") if success else _red(" [fail]")
+                print(marker, flush=True)
+                state._subagent_at_newline = True
+            elif inner == "iteration_start":
+                idx = event.data.get("iteration_index", 0)
+                if idx > 0:
+                    print(f"\n  {_dim('│')} {_dim(f'--- iter #{idx + 1}')}")
+                    state._subagent_at_newline = True
+
         elif event.type == StreamEventType.DONE:
             result = event.data.get("result")
             if result and result.success:

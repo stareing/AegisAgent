@@ -51,10 +51,10 @@ from agent_framework.memory.sqlite_store import SQLiteMemoryStore
 from agent_framework.models.agent import AgentRunResult, Skill
 from agent_framework.models.message import ContentPart, Message
 from agent_framework.models.session import SessionState
+from agent_framework.subagent.delegation import DelegationExecutor
 from agent_framework.tools.catalog import GlobalToolCatalog
 from agent_framework.tools.confirmation import (AutoApproveConfirmationHandler,
                                                 CLIConfirmationHandler)
-from agent_framework.subagent.delegation import DelegationExecutor
 from agent_framework.tools.executor import ToolExecutor
 from agent_framework.tools.registry import ToolRegistry
 
@@ -164,9 +164,9 @@ class AgentFramework:
             confirmation = CLIConfirmationHandler()
 
         # Interaction channel for long-term parent-child delegation (v3.1)
+        from agent_framework.subagent.hitl import QueueHITLHandler
         from agent_framework.subagent.interaction_channel import \
             InMemoryInteractionChannel
-        from agent_framework.subagent.hitl import QueueHITLHandler
 
         self._interaction_channel = InMemoryInteractionChannel(
             max_events_per_spawn=self.config.long_interaction.max_delegation_events_per_subagent,
@@ -287,6 +287,17 @@ class AgentFramework:
             )
             self._deps.sub_agent_runtime = sub_runtime
             delegation_executor._sub_agent_runtime = sub_runtime
+
+            # Wire stream sink: child events → tool executor queue → parent stream
+            def _child_stream_sink(spawn_id: str, event: Any) -> None:
+                from agent_framework.models.stream import StreamEvent, StreamEventType
+                wrapped = StreamEvent(
+                    type=StreamEventType.SUBAGENT_STREAM,
+                    data={"spawn_id": spawn_id, "event_type": event.type.value, **event.data},
+                )
+                tool_executor._child_stream_queue.put_nowait(wrapped)
+
+            sub_runtime._stream_sink = _child_stream_sink
         except Exception as e:
             logger.warning("subagent_runtime.init_failed", error=str(e))
 

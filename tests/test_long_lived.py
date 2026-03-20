@@ -16,13 +16,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agent_framework.models.subagent import (
-    SpawnMode,
-    SubAgentStatus,
-    validate_status_transition,
-    InvalidStatusTransitionError,
-)
-
+from agent_framework.models.subagent import (InvalidStatusTransitionError,
+                                             SpawnMode, SubAgentStatus,
+                                             validate_status_transition)
 
 # ---------------------------------------------------------------------------
 # Status: IDLE
@@ -79,7 +75,8 @@ class TestLiveAgentPool:
         assert len(live.session_messages) == 0
 
     def test_close_live_agent(self):
-        from agent_framework.subagent.runtime import SubAgentRuntime, _LiveAgent
+        from agent_framework.subagent.runtime import (SubAgentRuntime,
+                                                      _LiveAgent)
         runtime = SubAgentRuntime.__new__(SubAgentRuntime)
         runtime._live_agents = {
             "sp1": _LiveAgent(agent=MagicMock(), deps=MagicMock()),
@@ -88,8 +85,9 @@ class TestLiveAgentPool:
         assert runtime.close_live_agent("sp1") is False  # Already removed
 
     def test_get_live_agent_status(self):
-        from agent_framework.subagent.runtime import SubAgentRuntime, _LiveAgent
         from agent_framework.models.subagent import SubAgentHandle
+        from agent_framework.subagent.runtime import (SubAgentRuntime,
+                                                      _LiveAgent)
         runtime = SubAgentRuntime.__new__(SubAgentRuntime)
         runtime._live_agents = {
             "sp1": _LiveAgent(
@@ -118,7 +116,8 @@ class TestLiveAgentPool:
 class TestTTLEviction:
 
     def test_evict_expired(self):
-        from agent_framework.subagent.runtime import SubAgentRuntime, _LiveAgent
+        from agent_framework.subagent.runtime import (SubAgentRuntime,
+                                                      _LiveAgent)
         runtime = SubAgentRuntime.__new__(SubAgentRuntime)
         runtime._live_agent_ttl = 1  # 1 second TTL
         runtime._live_agents = {
@@ -137,13 +136,39 @@ class TestTTLEviction:
         assert "sp2" in runtime._live_agents
 
     def test_evict_none_when_all_fresh(self):
-        from agent_framework.subagent.runtime import SubAgentRuntime, _LiveAgent
+        from agent_framework.subagent.runtime import (SubAgentRuntime,
+                                                      _LiveAgent)
         runtime = SubAgentRuntime.__new__(SubAgentRuntime)
         runtime._live_agent_ttl = 300
         runtime._live_agents = {
             "sp1": _LiveAgent(agent=MagicMock(), deps=MagicMock(), last_active=time.monotonic()),
         }
         assert runtime.evict_expired_live_agents() == 0
+
+    def test_lazy_evict_on_send_message(self):
+        """_lazy_evict runs automatically before send_message, removing expired agents."""
+        from agent_framework.subagent.runtime import (SubAgentRuntime,
+                                                      _LiveAgent)
+        runtime = SubAgentRuntime.__new__(SubAgentRuntime)
+        runtime._live_agent_ttl = 1
+        runtime._live_agents = {
+            "sp_expired": _LiveAgent(
+                agent=MagicMock(), deps=MagicMock(),
+                last_active=time.monotonic() - 10,
+            ),
+        }
+        # _lazy_evict is called inside send_message before lookup
+        runtime._lazy_evict()
+        assert "sp_expired" not in runtime._live_agents
+
+    def test_lazy_evict_noop_when_empty(self):
+        """_lazy_evict does nothing when no live agents exist."""
+        from agent_framework.subagent.runtime import SubAgentRuntime
+        runtime = SubAgentRuntime.__new__(SubAgentRuntime)
+        runtime._live_agent_ttl = 1
+        runtime._live_agents = {}
+        runtime._lazy_evict()  # Should not raise
+        assert len(runtime._live_agents) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -153,8 +178,9 @@ class TestTTLEviction:
 class TestParentRunCleanup:
 
     def test_cleanup_by_run_id(self):
-        from agent_framework.subagent.runtime import SubAgentRuntime, _LiveAgent
         from agent_framework.models.subagent import SubAgentHandle
+        from agent_framework.subagent.runtime import (SubAgentRuntime,
+                                                      _LiveAgent)
         runtime = SubAgentRuntime.__new__(SubAgentRuntime)
         runtime._live_agents = {
             "sp1": _LiveAgent(
@@ -172,7 +198,8 @@ class TestParentRunCleanup:
         assert "sp2" in runtime._live_agents
 
     def test_cleanup_all(self):
-        from agent_framework.subagent.runtime import SubAgentRuntime, _LiveAgent
+        from agent_framework.subagent.runtime import (SubAgentRuntime,
+                                                      _LiveAgent)
         runtime = SubAgentRuntime.__new__(SubAgentRuntime)
         runtime._live_agents = {
             "sp1": _LiveAgent(agent=MagicMock(), deps=MagicMock()),
@@ -194,19 +221,23 @@ class TestSendMessage:
         from agent_framework.subagent.runtime import SubAgentRuntime
         runtime = SubAgentRuntime.__new__(SubAgentRuntime)
         runtime._live_agents = {}
+        runtime._live_agent_ttl = 300
         result = await runtime.send_message("nonexistent", "hello")
         assert not result.success
         assert "No LONG_LIVED agent" in result.error
 
     @pytest.mark.asyncio
     async def test_send_message_accumulates_session(self):
-        from agent_framework.subagent.runtime import SubAgentRuntime, _LiveAgent
-        from agent_framework.models.subagent import SubAgentHandle
         from agent_framework.models.message import Message
+        from agent_framework.models.subagent import SubAgentHandle
+        from agent_framework.subagent.runtime import (SubAgentRuntime,
+                                                      _LiveAgent)
 
         runtime = SubAgentRuntime.__new__(SubAgentRuntime)
         runtime._active = {}
         runtime._coordinator = None
+        runtime._live_agent_ttl = 300
+        runtime._stream_sink = None
 
         mock_agent = MagicMock()
         mock_deps = MagicMock()
@@ -266,21 +297,111 @@ class TestSendMessage:
 
 
 # ---------------------------------------------------------------------------
+# Stream sink forwarding
+# ---------------------------------------------------------------------------
+
+class TestStreamSink:
+    """Verify _run_child_stream_or_block forwards events via _stream_sink."""
+
+    @pytest.mark.asyncio
+    async def test_stream_sink_receives_child_events(self):
+        """When _stream_sink is set, spawn uses run_stream and forwards non-DONE events."""
+        from agent_framework.models.agent import AgentRunResult
+        from agent_framework.models.message import TokenUsage
+        from agent_framework.models.stream import StreamEvent, StreamEventType
+        from agent_framework.subagent.runtime import SubAgentRuntime
+
+        runtime = SubAgentRuntime.__new__(SubAgentRuntime)
+        runtime._live_agent_ttl = 300
+        runtime._stream_sink = None
+
+        # Prepare mock events that run_stream would yield
+        fake_result = AgentRunResult(
+            success=True, final_answer="done", iterations_used=1,
+            usage=TokenUsage(total_tokens=10),
+        )
+        fake_events = [
+            StreamEvent(type=StreamEventType.ITERATION_START, data={"iteration_index": 0}),
+            StreamEvent(type=StreamEventType.TOKEN, data={"text": "hello"}),
+            StreamEvent(type=StreamEventType.TOOL_CALL_START, data={"tool_name": "read", "tool_call_id": "tc1", "arguments": {}}),
+            StreamEvent(type=StreamEventType.TOOL_CALL_DONE, data={"tool_name": "read", "tool_call_id": "tc1", "success": True, "output": "ok"}),
+            StreamEvent(type=StreamEventType.DONE, data={"result": fake_result}),
+        ]
+
+        async def _mock_run_stream(*args, **kwargs):
+            for e in fake_events:
+                yield e
+
+        mock_coordinator = MagicMock()
+        mock_coordinator.run_stream = _mock_run_stream
+
+        collected: list[tuple[str, StreamEvent]] = []
+
+        def _sink(spawn_id: str, event: StreamEvent) -> None:
+            collected.append((spawn_id, event))
+
+        runtime._stream_sink = _sink
+
+        result = await runtime._run_child_stream_or_block(
+            mock_coordinator, MagicMock(), MagicMock(),
+            "test task", None, spawn_id="sp_test",
+        )
+
+        assert result.success
+        assert result.final_answer == "done"
+        # DONE should NOT be forwarded to sink — only 4 non-DONE events
+        assert len(collected) == 4
+        assert all(sid == "sp_test" for sid, _ in collected)
+        event_types = [e.type for _, e in collected]
+        assert StreamEventType.ITERATION_START in event_types
+        assert StreamEventType.TOKEN in event_types
+        assert StreamEventType.TOOL_CALL_START in event_types
+        assert StreamEventType.TOOL_CALL_DONE in event_types
+
+    @pytest.mark.asyncio
+    async def test_no_sink_falls_back_to_blocking_run(self):
+        """When _stream_sink is None, uses coordinator.run() instead of run_stream()."""
+        from agent_framework.models.agent import AgentRunResult
+        from agent_framework.models.message import TokenUsage
+        from agent_framework.subagent.runtime import SubAgentRuntime
+
+        runtime = SubAgentRuntime.__new__(SubAgentRuntime)
+        runtime._stream_sink = None
+
+        fake_result = AgentRunResult(
+            success=True, final_answer="blocked", iterations_used=1,
+            usage=TokenUsage(total_tokens=5),
+        )
+        mock_coordinator = MagicMock()
+        mock_coordinator.run = AsyncMock(return_value=fake_result)
+
+        result = await runtime._run_child_stream_or_block(
+            mock_coordinator, MagicMock(), MagicMock(),
+            "test task", None, spawn_id="sp_block",
+        )
+        assert result.success
+        assert result.final_answer == "blocked"
+        mock_coordinator.run.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
 # ToolExecutor routing
 # ---------------------------------------------------------------------------
 
 class TestToolExecutorRouting:
 
     def test_route_send_message(self):
-        from agent_framework.tools.executor import ToolExecutor
         import inspect
+
+        from agent_framework.tools.executor import ToolExecutor
         source = inspect.getsource(ToolExecutor._route_subagent)
         assert "send_message" in source
         assert "_subagent_send_message" in source
 
     def test_route_close_agent(self):
-        from agent_framework.tools.executor import ToolExecutor
         import inspect
+
+        from agent_framework.tools.executor import ToolExecutor
         source = inspect.getsource(ToolExecutor._route_subagent)
         assert "close_agent" in source
         assert "_subagent_close" in source
@@ -333,11 +454,13 @@ class TestConfig:
 class TestPrompt:
 
     def test_prompt_teaches_long_lived(self):
-        from agent_framework.agent.prompt_templates import ORCHESTRATOR_SYSTEM_PROMPT
+        from agent_framework.agent.prompt_templates import \
+            ORCHESTRATOR_SYSTEM_PROMPT
         assert "LONG_LIVED" in ORCHESTRATOR_SYSTEM_PROMPT
         assert "send_message" in ORCHESTRATOR_SYSTEM_PROMPT
         assert "close_agent" in ORCHESTRATOR_SYSTEM_PROMPT
 
     def test_prompt_teaches_when_to_use(self):
-        from agent_framework.agent.prompt_templates import ORCHESTRATOR_SYSTEM_PROMPT
+        from agent_framework.agent.prompt_templates import \
+            ORCHESTRATOR_SYSTEM_PROMPT
         assert "multi-turn" in ORCHESTRATOR_SYSTEM_PROMPT or "multiple rounds" in ORCHESTRATOR_SYSTEM_PROMPT

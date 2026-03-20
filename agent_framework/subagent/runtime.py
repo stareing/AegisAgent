@@ -4,6 +4,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from agent_framework.infra.logger import get_logger
@@ -87,11 +88,71 @@ class SubAgentRuntime:
         self._live_agents: dict[str, _LiveAgent] = {}
         # active_children truth source — only SubAgentRuntime maintains this
         self._active: dict[str, SubAgentHandle] = {}  # spawn_id -> handle
+        # Stream sink: receives child StreamEvents in real-time during spawn/send_message.
+        # Signature: (spawn_id, event) -> None. Set by ToolExecutor before execution.
+        self._stream_sink: Callable[[str, Any], None] | None = None
+
+    async def _run_child_stream_or_block(
+        self,
+        coordinator: RunCoordinator,
+        agent: Any,
+        deps: Any,
+        task: str,
+        initial_session_messages: list[Message] | None,
+        spawn_id: str,
+    ) -> Any:
+        """Run child via run_stream() if sink is set, else blocking run().
+
+        When _stream_sink is configured, iterates run_stream() and forwards
+        all non-terminal events (TOKEN, TOOL_CALL_START, etc.) to the sink
+        so they can be displayed in real-time. Returns the AgentRunResult.
+        """
+        if self._stream_sink is None:
+            return await coordinator.run(
+                agent, deps, task,
+                initial_session_messages=initial_session_messages,
+            )
+
+        from agent_framework.models.stream import StreamEventType
+
+        run_result = None
+        async for event in coordinator.run_stream(
+            agent, deps, task,
+            initial_session_messages=initial_session_messages,
+        ):
+            if event.type == StreamEventType.DONE:
+                run_result = event.data.get("result")
+            elif event.type == StreamEventType.ERROR:
+                # Build a minimal failed result
+                from agent_framework.models.agent import AgentRunResult
+                from agent_framework.models.message import TokenUsage
+                run_result = AgentRunResult(
+                    success=False,
+                    error=event.data.get("error", "unknown error"),
+                    final_answer=None,
+                    iterations_used=0,
+                    usage=TokenUsage(),
+                )
+            else:
+                self._stream_sink(spawn_id, event)
+
+        if run_result is None:
+            from agent_framework.models.agent import AgentRunResult
+            from agent_framework.models.message import TokenUsage
+            run_result = AgentRunResult(
+                success=False,
+                error="run_stream yielded no DONE event",
+                final_answer=None,
+                iterations_used=0,
+                usage=TokenUsage(),
+            )
+        return run_result
 
     async def spawn(
         self, spec: SubAgentSpec, parent_agent: Any
     ) -> SubAgentResult:
         """Spawn a sub-agent and wait for its result."""
+        self._lazy_evict()
         # Assign spawn_id if not set
         if not spec.spawn_id:
             spec.spawn_id = uuid.uuid4().hex[:12]
@@ -208,11 +269,10 @@ class SubAgentRuntime:
                 child_run_id=child_run_id,
                 task_id=task_record.subagent_task_id,
             )
-            run_result = await coordinator.run(
-                sub_agent,
-                sub_deps,
-                spec.task_input,
-                initial_session_messages=initial_session_messages,
+            run_result = await self._run_child_stream_or_block(
+                coordinator, sub_agent, sub_deps,
+                spec.task_input, initial_session_messages,
+                spawn_id=spec.spawn_id,
             )
 
             task_record.status = (
@@ -613,6 +673,7 @@ class SubAgentRuntime:
         The agent wakes up with the full prior conversation + new message,
         runs to completion, then returns to IDLE.
         """
+        self._lazy_evict()
         live = self._live_agents.get(spawn_id)
         if live is None:
             return SubAgentResult(
@@ -650,11 +711,10 @@ class SubAgentRuntime:
             coordinator = RunCoordinator()
 
         try:
-            run_result = await coordinator.run(
-                live.agent,
-                live.deps,
-                message,
-                initial_session_messages=list(live.session_messages),
+            run_result = await self._run_child_stream_or_block(
+                coordinator, live.agent, live.deps,
+                message, list(live.session_messages),
+                spawn_id=spawn_id,
             )
 
             # Update session: append this exchange
@@ -730,6 +790,16 @@ class SubAgentRuntime:
                 cleaned=len(to_remove),
             )
         return len(to_remove)
+
+    def _lazy_evict(self) -> None:
+        """Lazily evict expired LONG_LIVED agents on access.
+
+        Called automatically before spawn() and send_message() so that
+        stale agents are cleaned up without needing a background timer.
+        Only runs when there are live agents to check.
+        """
+        if self._live_agents:
+            self.evict_expired_live_agents()
 
     def evict_expired_live_agents(self) -> int:
         """Evict LONG_LIVED agents that exceeded TTL. Called during drain."""

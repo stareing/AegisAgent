@@ -517,6 +517,24 @@ class AegisAgentApp(App[None]):
                     if iteration_index > 0:
                         self._append_chat(f"\n{_ITER_PREFIX}#{iteration_index + 1}")
 
+                elif event.type == StreamEventType.SUBAGENT_STREAM:
+                    inner = event.data.get("event_type", "")
+                    if inner == "token":
+                        text = event.data.get("text", "")
+                        if text:
+                            self._append_chat_raw(f"│ {text}" if "\n" not in text else text.replace("\n", "\n│ "))
+                    elif inner == "tool_call_start":
+                        tool_name = event.data.get("tool_name", "?")
+                        self._append_chat(f"\n  │ {_TOOL_PREFIX}{tool_name}")
+                    elif inner == "tool_call_done":
+                        success = event.data.get("success", False)
+                        marker = _TOOL_OK if success else _TOOL_FAIL
+                        self._append_chat_raw(f" {marker}")
+                    elif inner == "iteration_start":
+                        idx = event.data.get("iteration_index", 0)
+                        if idx > 0:
+                            self._append_chat(f"\n  │ --- iter #{idx + 1}")
+
                 elif event.type == StreamEventType.DONE:
                     elapsed = time.monotonic() - t0
                     result = event.data.get("result")

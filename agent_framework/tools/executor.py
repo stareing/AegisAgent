@@ -93,6 +93,9 @@ class ToolExecutor:
         self._collection_poll_interval_ms: int = collection_poll_interval_ms
         # Lead collector for multi-agent result collection strategies
         self._lead_collector: Any = None  # LeadCollector, created on first async spawn
+        # Queue for real-time sub-agent stream events (TOKEN, TOOL_CALL, etc.)
+        # Filled by SubAgentRuntime._stream_sink, drained by batch_execute_progressive.
+        self._child_stream_queue: asyncio.Queue = asyncio.Queue()
 
     @property
     def todo_service(self) -> TaskService:
@@ -262,21 +265,46 @@ class ToolExecutor:
 
     async def batch_execute_progressive(
         self, tool_call_requests: list[ToolCallRequest], policy: CapabilityPolicy | None = None
-    ) -> AsyncIterator[tuple[ToolResult, ToolExecutionMeta]]:
-        """Execute concurrently, yield results as each tool completes (fastest first).
+    ) -> AsyncIterator[tuple[ToolResult, ToolExecutionMeta] | Any]:
+        """Execute concurrently, yield results as each tool completes.
 
-        Unlike batch_execute which waits for all, this yields each result
-        immediately upon completion. Order is by completion time, not input order.
+        Also drains _child_stream_queue in real-time, yielding StreamEvent
+        objects interleaved with (ToolResult, ToolExecutionMeta) tuples.
+        Consumers must check the type of each yielded item.
         """
+        from agent_framework.models.stream import StreamEvent
+
         sem = asyncio.Semaphore(self._max_concurrent)
+        done_queue: asyncio.Queue[tuple[ToolResult, ToolExecutionMeta]] = asyncio.Queue()
 
-        async def _run(req: ToolCallRequest) -> tuple[ToolResult, ToolExecutionMeta]:
+        async def _run(req: ToolCallRequest) -> None:
             async with sem:
-                return await self.execute(req, policy=policy)
+                result = await self.execute(req, policy=policy)
+            await done_queue.put(result)
 
-        tasks = {asyncio.create_task(_run(r)): r for r in tool_call_requests}
-        for coro in asyncio.as_completed(tasks.keys()):
-            yield await coro
+        tasks = [asyncio.create_task(_run(r)) for r in tool_call_requests]
+        remaining = len(tasks)
+
+        while remaining > 0:
+            # Drain child stream events accumulated so far
+            while not self._child_stream_queue.empty():
+                child_event = self._child_stream_queue.get_nowait()
+                if isinstance(child_event, StreamEvent):
+                    yield child_event
+
+            # Wait for next tool completion with short timeout to keep draining
+            try:
+                result_tuple = await asyncio.wait_for(done_queue.get(), timeout=0.05)
+                remaining -= 1
+                yield result_tuple
+            except asyncio.TimeoutError:
+                continue
+
+        # Final drain after all tools complete
+        while not self._child_stream_queue.empty():
+            child_event = self._child_stream_queue.get_nowait()
+            if isinstance(child_event, StreamEvent):
+                yield child_event
 
     def is_tool_allowed(self, tool_name: str, policy: CapabilityPolicy) -> bool:
         """Hard runtime gate for tool permission ceiling.
