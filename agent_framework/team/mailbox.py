@@ -1,4 +1,4 @@
-"""TeamMailbox — bridge between Team protocol (MailEvent) and AgentBus (BusEnvelope).
+"""TeamMailbox -- bridge between Team protocol (MailEvent) and AgentBus (BusEnvelope).
 
 Converts typed MailEvents into BusEnvelopes for transport, and converts
 BusEnvelopes back to MailEvents on read. Handles payload validation,
@@ -85,11 +85,11 @@ class TeamMailbox:
         """Reply to a MailEvent. Sets correlation_id and routes to original sender.
 
         event_type defaults based on the original event:
-        - QUESTION → ANSWER
-        - PLAN_SUBMISSION → APPROVAL_RESPONSE
-        - SHUTDOWN_REQUEST → SHUTDOWN_ACK
-        - TASK_HANDOFF_REQUEST → TASK_HANDOFF_RESPONSE
-        - anything else → uses explicit event_type or ANSWER fallback
+        - QUESTION -> ANSWER
+        - PLAN_SUBMISSION -> APPROVAL_RESPONSE
+        - SHUTDOWN_REQUEST -> SHUTDOWN_ACK
+        - TASK_HANDOFF_REQUEST -> TASK_HANDOFF_RESPONSE
+        - anything else -> uses explicit event_type or ANSWER fallback
 
         Auto-injects request_id from original if not in reply payload.
         """
@@ -177,7 +177,7 @@ class TeamMailbox:
     ) -> list[Any]:
         """Read pending messages for an agent. Only marks returned messages as delivered.
 
-        When limit is set, only drains up to limit messages — the rest
+        When limit is set, only drains up to limit messages -- the rest
         stay pending for the next read. No messages are silently lost.
         """
         address = BusAddress(
@@ -185,7 +185,10 @@ class TeamMailbox:
             group=self._registry.get_team_id(),
         )
         if limit:
-            envelopes = self._bus.drain_n(address, limit)
+            # Peek first, then selectively drain only the ones we return
+            envelopes = self._bus.peek(address)[:limit]
+            for env in envelopes:
+                self._bus._persistence.mark_delivered(env.envelope_id)
         else:
             envelopes = self._bus.drain(address)
         events = [self._envelope_to_mail(env) for env in envelopes]

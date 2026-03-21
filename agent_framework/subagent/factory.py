@@ -132,11 +132,6 @@ class SubAgentFactory:
             all_tools, _BLOCKED_CATEGORIES, spec.tool_category_whitelist
         )
 
-        # Per-tool name whitelist (from TEAM.md allowed-tools)
-        if spec.tool_name_whitelist:
-            name_set = set(spec.tool_name_whitelist)
-            allowed_names = [n for n in allowed_names if n in name_set]
-
         tool_registry = ScopedToolRegistry(
             source=self._parent_deps.tool_registry,
             whitelist=allowed_names,
@@ -155,9 +150,8 @@ class SubAgentFactory:
 
         # Propagate team context from parent executor to child
         # so spawned teammates can use team()/mail() tools.
-        # Use sub_agent_id (tm_xxx) to match the identity registered in TeamRegistry.
-        scoped_tool_executor._current_spawn_id = sub_agent_id
-        for attr in ("_team_coordinator", "_team_mailbox", "_current_team_id"):
+        scoped_tool_executor._current_spawn_id = spec.spawn_id or sub_agent_id
+        for attr in ("_team_coordinator", "_team_mailbox", "_current_team_id", "_team_show_identity"):
             parent_val = getattr(parent_executor, attr, None)
             if parent_val is not None:
                 setattr(scoped_tool_executor, attr, parent_val)

@@ -34,9 +34,9 @@ _LEAD_ACTIONS = frozenset({
         "Lead-only actions: create, spawn, assign, approve, reject, answer, shutdown, collect. "
         "All agents: status."
     ),
-    category="team",
+    category="delegation",
     require_confirm=False,
-    tags=["team"],
+    tags=["system", "delegation", "team"],
     namespace=SYSTEM_NAMESPACE,
     source="subagent",
 )
@@ -65,49 +65,54 @@ async def execute_team(executor: ToolExecutor, args: dict) -> dict[str, Any]:
 
     action = args.get("action", "")
 
-    # Permission check
+    # Identity: included only when _team_show_identity is True
+    agent_id = getattr(executor, "_current_spawn_id", "")
     agent_role = getattr(executor, "_current_agent_role", "teammate")
+    show_identity = getattr(executor, "_team_show_identity", False)
+    identity = {"_your_id": agent_id, "_your_role": agent_role} if show_identity else {}
+
+    # Permission check
     if action in _LEAD_ACTIONS and agent_role != "lead":
-        return {"error": f"Permission denied: '{action}' is a lead-only action"}
+        return {**identity, "error": f"Permission denied: '{action}' is a lead-only action"}
 
     if action == "create":
         team_id = coordinator.create_team(args.get("name", ""))
-        return {"team_id": team_id, "created": True}
+        return {**identity, "team_id": team_id, "created": True}
 
     if action == "spawn":
-        agent_id = await coordinator.spawn_teammate(
+        spawned_id = await coordinator.spawn_teammate(
             role=args.get("role", "teammate"),
             task_input=args.get("task", ""),
             skill_id=args.get("skill_id") or None,
         )
-        return {"agent_id": agent_id, "spawned": True}
+        return {**identity, "agent_id": spawned_id, "spawned": True}
 
     if action == "assign":
         coordinator.assign_task(args.get("task", ""), args.get("agent_id", ""))
-        return {"assigned": True}
+        return {**identity, "assigned": True}
 
     if action == "approve":
         coordinator.approve_plan(args.get("request_id", ""), args.get("feedback", ""))
-        return {"approved": True}
+        return {**identity, "approved": True}
 
     if action == "reject":
         coordinator.reject_plan(args.get("request_id", ""), args.get("feedback", ""))
-        return {"rejected": True}
+        return {**identity, "rejected": True}
 
     if action == "answer":
         coordinator.answer_question(
             args.get("request_id", ""), args.get("answer", ""),
             to_agent=args.get("agent_id", ""),
         )
-        return {"answered": True}
+        return {**identity, "answered": True}
 
     if action == "shutdown":
-        agent_id = args.get("agent_id", "")
-        if agent_id:
-            rid = coordinator.shutdown_teammate(agent_id, args.get("reason", ""))
-            return {"request_id": rid, "shutdown_requested": True}
+        target = args.get("agent_id", "")
+        if target:
+            rid = coordinator.shutdown_teammate(target, args.get("reason", ""))
+            return {**identity, "request_id": rid, "shutdown_requested": True}
         rids = coordinator.shutdown_team()
-        return {"request_ids": rids, "team_shutdown_requested": True}
+        return {**identity, "request_ids": rids, "team_shutdown_requested": True}
 
     if action == "status":
         caller = getattr(executor, "_current_spawn_id", "")
@@ -116,20 +121,20 @@ async def execute_team(executor: ToolExecutor, args: dict) -> dict[str, Any]:
 
     if action == "collect":
         processed = coordinator.process_inbox()
-        return {"events_processed": len(processed), "events": processed}
+        return {**identity, "events_processed": len(processed), "events": processed}
 
-    return {"error": f"Unknown team action: {action}"}
+    return {**identity, "error": f"Unknown team action: {action}"}
 
 
 @tool(
     name="mail",
     description=(
-        "Mailbox: send/broadcast/read/ack/reply/publish/subscribe/unsubscribe events between agents. "
+        "Mailbox: send/broadcast/read/ack/reply/publish/subscribe events between agents. "
         "All team members can use all mail actions."
     ),
-    category="team",
+    category="delegation",
     require_confirm=False,
-    tags=["team"],
+    tags=["system", "delegation", "team"],
     namespace=SYSTEM_NAMESPACE,
     source="subagent",
 )
@@ -158,6 +163,10 @@ async def execute_mail(executor: ToolExecutor, args: dict) -> dict[str, Any]:
     agent_id = getattr(executor, "_current_spawn_id", "")
     agent_role = getattr(executor, "_current_agent_role", "teammate")
     team_id = getattr(executor, "_current_team_id", "")
+    show_identity = getattr(executor, "_team_show_identity", False)
+
+    # Identity: included only when _team_show_identity is True
+    identity = {"_your_id": agent_id, "_your_role": agent_role} if show_identity else {}
 
     # Build result base — optionally inject identity
     def _with_identity(result: dict) -> dict:
@@ -167,6 +176,14 @@ async def execute_mail(executor: ToolExecutor, args: dict) -> dict[str, Any]:
         return result
 
     if action == "send":
+        to_agent = args.get("to", "")
+        # Guard: cannot send to yourself
+        if to_agent == agent_id:
+            return {
+                **identity,
+                "error": f"Cannot send to yourself. You are '{agent_id}' (role={agent_role}). "
+                         f"Use mail(action='send', to='<other_agent_id>') to message a teammate.",
+            }
         from agent_framework.models.team import MailEvent, MailEventType
 
         to = args.get("to", "")
@@ -200,7 +217,7 @@ async def execute_mail(executor: ToolExecutor, args: dict) -> dict[str, Any]:
             payload=args.get("payload") or {"message": args.get("message", "")},
         )
         sent_list = mailbox.broadcast(event)
-        return {"broadcast": True, "recipients": len(sent_list)}
+        return {**identity, "broadcast": True, "recipients": len(sent_list)}
 
     if action == "read":
         limit_val = args.get("limit") or None
@@ -221,43 +238,43 @@ async def execute_mail(executor: ToolExecutor, args: dict) -> dict[str, Any]:
     if action == "ack":
         event_id = args.get("event_id", "")
         if not event_id:
-            return {"error": "event_id required"}
+            return {**identity, "error": "event_id required"}
         mailbox.ack(agent_id, event_id)
-        return {"acked": True}
+        return {**identity, "acked": True}
 
     if action == "reply":
         event_id = args.get("event_id", "")
         if not event_id:
-            return {"error": "event_id required for reply"}
+            return {**identity, "error": "event_id required for reply"}
         reply_event = mailbox.reply(
             event_id, args.get("payload") or {"message": args.get("message", "")},
             source=agent_id,
-            event_type=args.get("event_type"),  # Explicit override if provided
+            event_type=args.get("event_type"),
         )
-        return {"replied": True, "event_id": reply_event.event_id}
+        return {**identity, "replied": True, "event_id": reply_event.event_id}
 
     if action == "publish":
         topic = args.get("topic", "")
         if not topic:
-            return {"error": "topic required for publish"}
+            return {**identity, "error": "topic required for publish"}
         sent_list = mailbox.publish(
             topic, args.get("payload") or {"message": args.get("message", "")},
             source=agent_id, team_id=team_id,
         )
-        return {"published": True, "recipients": len(sent_list)}
+        return {**identity, "published": True, "recipients": len(sent_list)}
 
     if action == "subscribe":
         pattern = args.get("topic_pattern", "")
         if not pattern:
-            return {"error": "topic_pattern required for subscribe"}
+            return {**identity, "error": "topic_pattern required for subscribe"}
         mailbox.subscribe(agent_id, pattern)
-        return {"subscribed": True, "pattern": pattern}
+        return {**identity, "subscribed": True, "pattern": pattern}
 
     if action == "unsubscribe":
         pattern = args.get("topic_pattern", "")
         if not pattern:
-            return {"error": "topic_pattern required for unsubscribe"}
+            return {**identity, "error": "topic_pattern required for unsubscribe"}
         mailbox.unsubscribe(agent_id, pattern)
-        return {"unsubscribed": True, "pattern": pattern}
+        return {**identity, "unsubscribed": True, "pattern": pattern}
 
-    return {"error": f"Unknown mail action: {action}"}
+    return {**identity, "error": f"Unknown mail action: {action}"}

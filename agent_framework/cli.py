@@ -12,7 +12,8 @@ from agent_framework.terminal_runtime import (build_argument_parser,
                                               build_framework_from_args,
                                               format_missing_textual_message,
                                               run_classic_repl,
-                                              run_single_task)
+                                              run_single_task,
+                                              _setup_team)
 
 
 def run(argv: Sequence[str] | None = None) -> int:
@@ -26,6 +27,15 @@ def run(argv: Sequence[str] | None = None) -> int:
         if os.environ.get("DEBUG"):
             traceback.print_exc()
         return 1
+
+    # Auto-start team mode if --team flag
+    if getattr(args, "team", False):
+        try:
+            team_name = framework.config.team.name or "agent_team"
+            _setup_team(framework, team_name)
+            print(f"  Team 模式已启动: {team_name}")
+        except Exception as exc:
+            print(f"  Team 启动失败: {exc}")
 
     if args.task:
         try:

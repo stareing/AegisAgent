@@ -1017,71 +1017,23 @@ async def _cmd_resume(
     print(f"\n  {_dim('对话已恢复，继续输入即可。')}")
 
 
-@_register_cmd("team-list", "列出已发现的团队定义", category="团队")
-async def _cmd_team_list(
-    fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str,
-) -> None:
-    teams = getattr(fw, "_discovered_teams", [])
-    if not teams:
-        print(f"  {_dim('未发现角色定义 (在 .agent-team/<name>/TEAM.md 下放置)')}")
-        return
-    print(f"\n  {_bold(_yellow(f'已发现 {len(teams)} 个 Team 角色:'))}")
-    for t in teams:
-        fm = t.get("frontmatter", {})
-        name = t.get("team_id", "?")
-        desc = fm.get("description", "")
-        tools = fm.get("allowed-tools", [])
-        path = t.get("path", "")
-        print(f"  {_cyan(name)}")
-        if desc:
-            print(f"    {_dim(desc)}")
-        if tools:
-            print(f"    allowed-tools: {', '.join(tools)}")
-        if path:
-            print(f"    {_dim(str(path))}")
-        print()
-
-
-@_register_cmd("team-start", "启动 Agent Team", usage="/team-start [team_name]", category="团队")
+@_register_cmd("team-start", "启动 Agent Team 模式", usage="/team-start [team_name]", category="团队")
 async def _cmd_team_start(
     fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str,
 ) -> None:
     if hasattr(state, "_team_coordinator") and state._team_coordinator is not None:
         print(f"  {_yellow('Team 已启动')}: {state._team_coordinator.team_id}")
         return
-
-    team_name = args.strip()
-
-    # Try to match a discovered team definition
-    discovered = getattr(fw, "_discovered_teams", [])
-    matched_def = None
-    if team_name:
-        for t in discovered:
-            if t.get("team_id") == team_name:
-                matched_def = t
-                break
-
-    if not team_name:
-        if discovered:
-            # Auto-select first discovered team
-            matched_def = discovered[0]
-            team_name = matched_def["team_id"]
-        else:
-            team_name = "default_team"
-
+    team_name = args.strip() or "default_team"
     try:
         team_env = _setup_team(fw, team_name)
         state._team_coordinator = team_env["coordinator"]
         state._team_mailbox = team_env["mailbox"]
         state._team_registry = team_env["registry"]
-
         print(f"  {_green('Team 已启动')}: {team_name}")
         print(f"    team_id: {state._team_coordinator.team_id}")
-        discovered = getattr(fw, "_discovered_teams", [])
-        if discovered:
-            role_names = [t.get("team_id", "?") for t in discovered]
-            print(f"    可用角色: {', '.join(role_names)}")
         print(f"    工具: team(action=...) + mail(action=...)")
+        print(f"    示例: team(action='spawn', role='coder', task='fix bug')")
     except Exception as e:
         print(f"  {_red(f'Team 启动失败: {e}')}")
 
@@ -1107,6 +1059,27 @@ async def _cmd_team_status(
     if status["pending_shutdowns"]:
         print(f"    待关闭: {status['pending_shutdowns']}")
     print()
+
+
+@_register_cmd("team-identity", "开关 team 身份显示", usage="/team-identity on|off", category="团队")
+async def _cmd_team_identity(
+    fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str,
+) -> None:
+    executor = getattr(fw._deps, "tool_executor", None) if hasattr(fw, "_deps") else None
+    if executor is None:
+        print(f"  {_yellow('框架未初始化')}")
+        return
+    val = args.strip().lower()
+    if val in ("on", "true", "1"):
+        executor._team_show_identity = True
+        print(f"  {_green('team 身份显示: 已开启')} (工具返回会包含 _your_id/_your_role)")
+    elif val in ("off", "false", "0"):
+        executor._team_show_identity = False
+        print(f"  {_yellow('team 身份显示: 已关闭')} (默认模式)")
+    else:
+        current = getattr(executor, "_team_show_identity", False)
+        print(f"  当前: {'开启' if current else '关闭 (默认)'}")
+        print(f"  用法: /team-identity on|off")
 
 
 @_register_cmd("team-inbox", "查看 Lead 收件箱", category="团队")
@@ -1687,14 +1660,6 @@ def _setup_team(fw: AgentFramework, team_name: str) -> dict:
         executor._current_agent_role = "lead"
         executor._current_team_id = team_id
         executor._current_spawn_id = lead_id
-
-    # Register discovered role definitions for tool whitelist enforcement
-    discovered = getattr(fw, "_discovered_teams", [])
-    for role_def in discovered:
-        role_name = role_def.get("team_id", "")
-        fm = role_def.get("frontmatter", {})
-        if role_name:
-            coordinator.register_role_definition(role_name, fm)
 
     return {
         "bus": bus,
