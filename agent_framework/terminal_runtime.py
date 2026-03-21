@@ -1755,17 +1755,18 @@ async def run_classic_repl(fw: AgentFramework, mock_model: InteractiveMockModel 
     _team_display_task = None
 
     async def _display_team_notifications():
-        """Display LLM-summarized team notifications from framework core."""
+        """Display raw team result notifications. Main agent processes on next turn."""
         while True:
             await asyncio.sleep(2)
             try:
                 notifications = fw.drain_team_notifications()
                 if not notifications:
                     continue
+                print(f"\n  {_yellow('📨 Team 任务完成:')}")
                 for n in notifications:
-                    print(f"\n  {_yellow('📨 Team 通知:')}")
-                    print(f"  {_green('Agent')} > {n['llm_response']}\n")
-                    print(f"{_bold(_green('> '))}", end="", flush=True)
+                    status_icon = _green("✓") if n["status"] == "completed" else _red("✗")
+                    print(f"    {status_icon} {_cyan(n['role'])}: {n['summary'][:150]}")
+                print(f"{_bold(_green('> '))}", end="", flush=True)
             except Exception:
                 pass
 

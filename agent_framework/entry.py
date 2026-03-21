@@ -456,40 +456,21 @@ class AgentFramework:
                     pass  # Duplicate role, skip
         coordinator._discovered_teams_raw = self._discovered_teams
 
-        # Register auto-summary callback — when teammate completes,
-        # trigger fw.run() to summarize results for user.
-        self._team_run_lock = asyncio.Lock()
+        # Callback: when teammate completes, store raw result for main agent.
+        # Main agent sees it in next turn via drain or UI display.
+        self._pending_team_notifications: list[dict] = []
 
         async def _on_team_result(role: str, status: str, summary: str,
                                    agent_id: str, task: str) -> None:
-            async with self._team_run_lock:
-                prompt = (
-                    f"[TEAM NOTIFICATION] Team 成员 '{role}' 完成了任务。\n"
-                    f"状态: {status}\n"
-                    f"任务: {task}\n"
-                    f"结果: {summary}\n\n"
-                    f"请向用户简洁汇报这个结果。"
-                )
-                try:
-                    result = await self.run(prompt)
-                    if result.success and result.final_answer:
-                        # Store for display — the terminal/API layer reads this
-                        if not hasattr(self, "_pending_team_notifications"):
-                            self._pending_team_notifications = []
-                        self._pending_team_notifications.append({
-                            "role": role,
-                            "status": status,
-                            "summary": summary,
-                            "task": task,
-                            "agent_id": agent_id,
-                            "llm_response": result.final_answer,
-                        })
-                except Exception as e:
-                    logger.warning("team.auto_summary_failed", error=str(e))
+            self._pending_team_notifications.append({
+                "role": role,
+                "status": status,
+                "summary": summary,
+                "task": task,
+                "agent_id": agent_id,
+            })
 
         coordinator._on_result_callback = _on_team_result
-
-        self._pending_team_notifications: list[dict] = []
 
         logger.info(
             "teams.auto_initialized",
