@@ -166,6 +166,26 @@ class AgentBus:
             self._persistence.mark_delivered(env.envelope_id)
         return result
 
+    def drain_n(
+        self,
+        address: BusAddress,
+        limit: int,
+        topic_pattern: str = "**",
+    ) -> list[BusEnvelope]:
+        """Pull up to limit pending messages. Only marks returned ones as delivered."""
+        pending = self._persistence.load_pending(
+            address.agent_id, group=address.group,
+        )
+        result = []
+        for env in pending:
+            if len(result) >= limit:
+                break
+            if not topic_matches(topic_pattern, env.topic):
+                continue
+            result.append(env)
+            self._persistence.mark_delivered(env.envelope_id)
+        return result
+
     def peek(
         self,
         address: BusAddress,

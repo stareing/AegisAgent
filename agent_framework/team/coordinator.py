@@ -106,10 +106,27 @@ class TeamCoordinator:
         # Actually spawn sub-agent via runtime
         if self._runtime is not None:
             from agent_framework.models.subagent import SpawnMode, SubAgentSpec
+
+            # Inject team protocol instructions into the task so the
+            # spawned agent knows it's a teammate and can use team/mail tools
+            team_task = (
+                f"[TEAM PROTOCOL] You are a teammate in team '{self._team_id}'. "
+                f"Your role is '{role}'. Your agent_id is '{agent_id}'. "
+                f"The lead agent_id is '{self._lead_id}'. "
+                f"You have access to team() and mail() tools. "
+                f"When you finish your task, use mail(action='send', to='{self._lead_id}', "
+                f"event_type='PROGRESS_NOTICE', payload={{\"status\": \"completed\", "
+                f"\"summary\": \"<your result>\"}}) to report back. "
+                f"If you need help, use mail(action='send', to='{self._lead_id}', "
+                f"event_type='QUESTION', payload={{\"request_id\": \"q1\", "
+                f"\"question\": \"<your question>\"}}).\n\n"
+                f"[TASK] {task_input}"
+            )
+
             spec = SubAgentSpec(
                 parent_run_id=self._team_id,
                 spawn_id=spawn_id,
-                task_input=task_input,
+                task_input=team_task,
                 mode=SpawnMode.EPHEMERAL,
                 skill_id=skill_id,
                 max_iterations=10,
@@ -275,29 +292,35 @@ class TeamCoordinator:
         return {"type": "progress", "from": event.from_agent, "payload": event.payload}
 
     def _handle_shutdown_ack(self, event: Any) -> dict:
-        """Advance shutdown to COMPLETED."""
+        """Advance shutdown: cancel runtime FIRST, then mark SHUTDOWN, then complete request.
+
+        Order: runtime.cancel → registry.SHUTDOWN → shutdowns.complete
+        This ensures "SHUTDOWN = runtime actually stopped".
+        """
+        from agent_framework.models.team import TeamMemberStatus
+        member = self._registry.get(event.from_agent)
+        runtime_cancelled = False
+
+        # Step 1: Cancel runtime (before marking complete)
+        if self._runtime is not None and member:
+            try:
+                import asyncio
+                asyncio.ensure_future(self._runtime.cancel(member.spawn_id))
+                runtime_cancelled = True
+            except Exception:
+                pass
+
+        # Step 2: Update registry to SHUTDOWN
+        if member and member.status != TeamMemberStatus.SHUTDOWN:
+            self._registry.update_status(event.from_agent, TeamMemberStatus.SHUTDOWN)
+
+        # Step 3: Complete shutdown request (last — confirms full shutdown)
         request_id = event.payload.get("request_id", "")
         if request_id:
             try:
                 self._shutdowns.complete(request_id)
             except Exception:
-                pass  # Already completed
-        from agent_framework.models.team import TeamMemberStatus
-        member = self._registry.get(event.from_agent)
-        if member and member.status != TeamMemberStatus.SHUTDOWN:
-            self._registry.update_status(event.from_agent, TeamMemberStatus.SHUTDOWN)
-
-        # Actually cancel the sub-agent runtime to release resources
-        if self._runtime is not None and member:
-            try:
-                import asyncio
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    asyncio.ensure_future(self._runtime.cancel(member.spawn_id))
-                else:
-                    loop.run_until_complete(self._runtime.cancel(member.spawn_id))
-            except Exception:
-                pass  # Best-effort cleanup
+                pass
 
         return {"type": "shutdown_ack", "from": event.from_agent, "runtime_cancelled": True}
 

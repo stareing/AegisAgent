@@ -34,9 +34,9 @@ _LEAD_ACTIONS = frozenset({
         "Lead-only actions: create, spawn, assign, approve, reject, answer, shutdown, collect. "
         "All agents: status."
     ),
-    category="delegation",
+    category="team",
     require_confirm=False,
-    tags=["system", "delegation", "team"],
+    tags=["team"],
     namespace=SYSTEM_NAMESPACE,
     source="subagent",
 )
@@ -125,9 +125,9 @@ async def execute_team(executor: ToolExecutor, args: dict) -> dict[str, Any]:
         "Mailbox: send/broadcast/read/ack/reply/publish/subscribe events between agents. "
         "All team members can use all mail actions."
     ),
-    category="delegation",
+    category="team",
     require_confirm=False,
-    tags=["system", "delegation", "team"],
+    tags=["team"],
     namespace=SYSTEM_NAMESPACE,
     source="subagent",
 )
@@ -216,6 +216,7 @@ async def execute_mail(executor: ToolExecutor, args: dict) -> dict[str, Any]:
         reply_event = mailbox.reply(
             event_id, args.get("payload") or {"message": args.get("message", "")},
             source=agent_id,
+            event_type=args.get("event_type"),  # Explicit override if provided
         )
         return {"replied": True, "event_id": reply_event.event_id}
 

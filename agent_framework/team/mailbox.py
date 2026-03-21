@@ -185,10 +185,7 @@ class TeamMailbox:
             group=self._registry.get_team_id(),
         )
         if limit:
-            # Peek first, then selectively drain only the ones we return
-            envelopes = self._bus.peek(address)[:limit]
-            for env in envelopes:
-                self._bus._persistence.mark_delivered(env.envelope_id)
+            envelopes = self._bus.drain_n(address, limit)
         else:
             envelopes = self._bus.drain(address)
         events = [self._envelope_to_mail(env) for env in envelopes]
