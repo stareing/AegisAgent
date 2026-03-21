@@ -51,10 +51,16 @@ class TeamCoordinator:
         self._plans = plan_registry
         self._shutdowns = shutdown_registry
         self._runtime = sub_agent_runtime
+        self._pending_requests: dict[str, str] = {}
+        self._role_definitions: dict[str, dict] = {}
 
     @property
     def team_id(self) -> str:
         return self._team_id
+
+    def register_role_definition(self, role_name: str, frontmatter: dict) -> None:
+        """Register a TEAM.md role definition for tool whitelist enforcement."""
+        self._role_definitions[role_name] = frontmatter
 
     # ── Team lifecycle ─────────────────────────────────────────
 
