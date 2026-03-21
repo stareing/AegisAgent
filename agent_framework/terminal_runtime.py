@@ -224,6 +224,7 @@ def build_argument_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--mock", action="store_true", help="强制使用 Mock 模型")
     parser.add_argument("--auto-approve", dest="auto_approve", action="store_true", help="自动批准工具调用")
     parser.add_argument("--no-approve", dest="auto_approve", action="store_false", help="工具调用需要手动确认")
+    parser.add_argument("--team", action="store_true", help="启动 Agent Team 模式")
     parser.set_defaults(auto_approve=True)
     return parser
 
@@ -1016,6 +1017,68 @@ async def _cmd_resume(
     print(f"\n  {_dim('对话已恢复，继续输入即可。')}")
 
 
+@_register_cmd("team-start", "启动 Agent Team 模式", usage="/team-start [team_name]", category="团队")
+async def _cmd_team_start(
+    fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str,
+) -> None:
+    if hasattr(state, "_team_coordinator") and state._team_coordinator is not None:
+        print(f"  {_yellow('Team 已启动')}: {state._team_coordinator.team_id}")
+        return
+    team_name = args.strip() or "default_team"
+    try:
+        team_env = _setup_team(fw, team_name)
+        state._team_coordinator = team_env["coordinator"]
+        state._team_mailbox = team_env["mailbox"]
+        state._team_registry = team_env["registry"]
+        print(f"  {_green('Team 已启动')}: {team_name}")
+        print(f"    team_id: {state._team_coordinator.team_id}")
+        print(f"    工具: team(action=...) + mail(action=...)")
+        print(f"    示例: team(action='spawn', role='coder', task='fix bug')")
+    except Exception as e:
+        print(f"  {_red(f'Team 启动失败: {e}')}")
+
+
+@_register_cmd("team-status", "查看团队状态", category="团队")
+async def _cmd_team_status(
+    fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str,
+) -> None:
+    coord = getattr(state, "_team_coordinator", None)
+    if coord is None:
+        print(f"  {_yellow('Team 未启动，使用 /team-start 启动')}")
+        return
+    status = coord.get_team_status()
+    tid = status["team_id"]
+    print(f"\n  {_bold(_yellow(f'Team: {tid}'))}")
+    print(f"    Lead: {status['lead']}")
+    print(f"    成员: {status['member_count']}")
+    for m in status["members"]:
+        role_color = _green if m["role"] == "lead" else _cyan
+        print(f"      {role_color(m['agent_id'])} ({m['role']}) — {m['status']}")
+    if status["pending_plans"]:
+        print(f"    待审计划: {status['pending_plans']}")
+    if status["pending_shutdowns"]:
+        print(f"    待关闭: {status['pending_shutdowns']}")
+    print()
+
+
+@_register_cmd("team-inbox", "查看 Lead 收件箱", category="团队")
+async def _cmd_team_inbox(
+    fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str,
+) -> None:
+    coord = getattr(state, "_team_coordinator", None)
+    if coord is None:
+        print(f"  {_yellow('Team 未启动')}")
+        return
+    processed = coord.process_inbox()
+    if not processed:
+        print(f"  {_dim('收件箱为空')}")
+        return
+    print(f"\n  {_bold(_yellow(f'处理了 {len(processed)} 条事件:'))}")
+    for evt in processed:
+        print(f"    [{evt.get('type', '?')}] from={evt.get('from', '?')} {_dim(str({k: v for k, v in evt.items() if k not in ('type', 'from')}))}")
+    print()
+
+
 @_register_cmd("demo", "运行内置演示场景", usage="/demo [weather|skill]", category="演示")
 async def _cmd_demo(fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str) -> None:
     demos = {
@@ -1526,6 +1589,64 @@ async def _execute_with_progressive(
 
     # Non-progressive: use standard format
     return format_result(result, include_trace=True)
+
+
+def _setup_team(fw: AgentFramework, team_name: str) -> dict:
+    """Initialize Agent Team components and wire into framework."""
+    import uuid
+    from agent_framework.notification.bus import AgentBus
+    from agent_framework.notification.persistence import InMemoryBusPersistence, SQLiteBusPersistence
+    from agent_framework.team.registry import TeamRegistry
+    from agent_framework.team.plan_registry import PlanRegistry
+    from agent_framework.team.shutdown_registry import ShutdownRegistry
+    from agent_framework.team.mailbox import TeamMailbox
+    from agent_framework.team.coordinator import TeamCoordinator
+
+    team_id = f"team_{uuid.uuid4().hex[:8]}"
+
+    # Choose bus backend
+    team_cfg = fw.config.team
+    if team_cfg.bus_backend == "sqlite":
+        persistence = SQLiteBusPersistence(db_path=team_cfg.bus_db_path)
+    else:
+        persistence = InMemoryBusPersistence()
+
+    bus = AgentBus(persistence=persistence)
+    registry = TeamRegistry(team_id)
+    plan_reg = PlanRegistry()
+    shutdown_reg = ShutdownRegistry()
+    mailbox = TeamMailbox(bus, registry)
+
+    lead_id = getattr(fw._agent, "agent_id", "lead") if hasattr(fw, "_agent") else "lead"
+    runtime = getattr(fw._deps, "sub_agent_runtime", None) if hasattr(fw, "_deps") else None
+
+    coordinator = TeamCoordinator(
+        team_id=team_id,
+        lead_agent_id=lead_id,
+        mailbox=mailbox,
+        team_registry=registry,
+        plan_registry=plan_reg,
+        shutdown_registry=shutdown_reg,
+        sub_agent_runtime=runtime,
+    )
+    coordinator.create_team(team_name)
+
+    # Wire team tools into tool executor
+    if hasattr(fw, "_deps") and hasattr(fw._deps, "tool_executor"):
+        executor = fw._deps.tool_executor
+        executor._team_coordinator = coordinator
+        executor._team_mailbox = mailbox
+        executor._current_agent_role = "lead"
+        executor._current_team_id = team_id
+
+    return {
+        "bus": bus,
+        "registry": registry,
+        "plan_registry": plan_reg,
+        "shutdown_registry": shutdown_reg,
+        "mailbox": mailbox,
+        "coordinator": coordinator,
+    }
 
 
 def _auto_checkpoint(fw: AgentFramework, state: ReplState, user_input: str) -> None:

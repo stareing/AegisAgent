@@ -179,6 +179,27 @@ class A2AConfig(BaseModel):
     discovery_cache_ttl_seconds: int = 3600
 
 
+class TeammateConfig(BaseModel):
+    """Configuration for a single teammate in a team."""
+    role: str = "teammate"
+    skill_id: str | None = None
+    system_prompt_addon: str = ""
+    max_iterations: int = 10
+
+
+class TeamConfig(BaseModel):
+    """Configuration for Agent Team collaboration."""
+    enabled: bool = False
+    name: str = ""
+    claim_policy: str = "SELF_CLAIM_WITH_APPROVAL"
+    max_teammates: int = 5
+    shutdown_timeout_ms: int = 30000
+    plan_approval_required_risk_levels: list[str] = Field(default_factory=lambda: ["medium", "high"])
+    bus_backend: str = "memory"
+    bus_db_path: str = "data/agent_bus.db"
+    teammates: list[TeammateConfig] = Field(default_factory=list)
+
+
 class LoggingConfig(BaseModel):
     log_dir: str = "logs"
     json_output: bool = True
@@ -232,6 +253,7 @@ class FrameworkConfig(BaseSettings):
     skills: SkillsConfig = Field(default_factory=SkillsConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     a2a: A2AConfig = Field(default_factory=A2AConfig)
+    team: TeamConfig = Field(default_factory=lambda: TeamConfig())
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     tracing: TracingConfig = Field(default_factory=TracingConfig)
 

@@ -25,13 +25,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from agent_framework.subagent.lead_collector import (
-    BatchResult,
-    CollectionStrategy,
-    LeadCollector,
-    is_still_running,
-)
-
+from agent_framework.subagent.lead_collector import (BatchResult,
+                                                     CollectionStrategy,
+                                                     LeadCollector,
+                                                     is_still_running)
 
 # ---------------------------------------------------------------------------
 # Helpers: simulate N agents with controlled completion timing
@@ -969,7 +966,8 @@ class TestBoundaryPollTimeout:
 
     @pytest.mark.asyncio
     async def test_sequential_timeout_raises(self):
-        from agent_framework.subagent.lead_collector import CollectionTimeoutError
+        from agent_framework.subagent.lead_collector import \
+            CollectionTimeoutError
         lc = LeadCollector(
             strategy=CollectionStrategy.SEQUENTIAL,
             poll_interval_ms=1,
@@ -986,7 +984,8 @@ class TestBoundaryPollTimeout:
 
     @pytest.mark.asyncio
     async def test_hybrid_timeout_raises(self):
-        from agent_framework.subagent.lead_collector import CollectionTimeoutError
+        from agent_framework.subagent.lead_collector import \
+            CollectionTimeoutError
         lc = LeadCollector(
             strategy=CollectionStrategy.HYBRID,
             poll_interval_ms=1,

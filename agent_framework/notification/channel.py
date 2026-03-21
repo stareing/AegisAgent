@@ -49,6 +49,8 @@ class RuntimeNotificationChannel:
         self._last_seen_seq: dict[str, int] = {}
         # Track spawn_ids we're monitoring for delegation events
         self._monitored_spawns: set[str] = set()
+        # Optional AgentBus adapters — forward events to bus when configured
+        self._bus_adapters: dict[str, Any] = {}  # name -> adapter instance
 
     @property
     def bg_notifier(self) -> BackgroundNotifier:
@@ -58,6 +60,10 @@ class RuntimeNotificationChannel:
     def set_interaction_channel(self, channel: InMemoryInteractionChannel) -> None:
         """Wire the interaction channel (may be set after construction)."""
         self._interaction_channel = channel
+
+    def set_bus_adapter(self, name: str, adapter: Any) -> None:
+        """Register a bus adapter for event forwarding."""
+        self._bus_adapters[name] = adapter
 
     def monitor_spawn(self, spawn_id: str) -> None:
         """Register a spawn_id for delegation event monitoring."""
@@ -77,6 +83,7 @@ class RuntimeNotificationChannel:
         notifications: list[RuntimeNotification] = []
 
         # 1. Drain background tasks
+        bg_adapter = self._bus_adapters.get("background")
         bg_results = self._bg_notifier.drain()
         for bg in bg_results:
             notifications.append(RuntimeNotification(
@@ -90,8 +97,18 @@ class RuntimeNotificationChannel:
                     "timed_out": bg.timed_out,
                 },
             ))
+            # Forward to AgentBus if adapter configured
+            if bg_adapter is not None:
+                try:
+                    bg_adapter.forward_background_result(
+                        bg.task_id, bg.command, bg.output,
+                        bg.exit_code, bg.timed_out,
+                    )
+                except Exception:
+                    pass
 
         # 2. Drain delegation events + advance ack_level to RECEIVED (§4)
+        delegation_adapter = self._bus_adapters.get("delegation")
         if self._interaction_channel is not None:
             for spawn_id in list(self._monitored_spawns):
                 last_seq = self._last_seen_seq.get(spawn_id, 0)
@@ -116,6 +133,15 @@ class RuntimeNotificationChannel:
                     self._interaction_channel.ack_event(
                         spawn_id, event.event_id, AckLevel.RECEIVED
                     )
+                    # Forward to AgentBus if adapter configured
+                    if delegation_adapter is not None:
+                        try:
+                            delegation_adapter.forward_delegation_event(
+                                event.event_id, event.spawn_id,
+                                event.event_type.value, event.payload,
+                            )
+                        except Exception:
+                            pass
 
         return notifications
 
