@@ -476,16 +476,9 @@ class AgentLoop:
         if model_response.tool_calls:
             progressive = getattr(effective_config, "progressive_tool_results", False)
             total_tools = len(model_response.tool_calls)
-            # Enable progressive mode when configured AND either:
-            # - Multiple tools (original batch streaming)
-            # - Single spawn_agent/send_message (sub-agent output streaming)
-            has_delegation_tool = any(
-                tc.function_name in ("spawn_agent", "send_message")
-                for tc in model_response.tool_calls
-            )
             is_progressive = (
                 progressive
-                and (total_tools > 1 or has_delegation_tool)
+                and total_tools > 1
                 and hasattr(type(loop_deps.tool_executor), "batch_execute_progressive")
             )
 

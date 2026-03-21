@@ -349,9 +349,6 @@ class ToolExecutor:
         Also drains _child_stream_queue in real-time, yielding StreamEvent
         objects interleaved with (ToolResult, ToolExecutionMeta) tuples.
         Consumers must check the type of each yielded item.
-
-        Uses asyncio.wait on both queues simultaneously to avoid
-        idle polling when no child stream events are present.
         """
         from agent_framework.models.stream import StreamEvent
 
@@ -365,48 +362,21 @@ class ToolExecutor:
 
         tasks = [asyncio.create_task(_run(r)) for r in tool_call_requests]
         remaining = len(tasks)
-        has_child_stream = self._child_stream_queue.maxsize > 0
 
         while remaining > 0:
-            # Create competing wait tasks for both queues
-            done_waiter = asyncio.create_task(done_queue.get())
-            child_waiter = asyncio.create_task(
-                self._child_stream_queue.get()
-            ) if has_child_stream else None
-
-            pending_futures = {done_waiter}
-            if child_waiter:
-                pending_futures.add(child_waiter)
-
-            # Wait for EITHER a tool completion OR a child stream event
-            finished, _ = await asyncio.wait(
-                pending_futures, return_when=asyncio.FIRST_COMPLETED,
-            )
-
-            for fut in finished:
-                if fut is done_waiter:
-                    remaining -= 1
-                    yield fut.result()
-                elif fut is child_waiter:
-                    event = fut.result()
-                    if isinstance(event, StreamEvent):
-                        yield event
-                    # Re-arm child waiter in next iteration
-                    child_waiter = None
-
-            # Cancel unfinished waiters
-            for fut in pending_futures - finished:
-                fut.cancel()
-                try:
-                    await fut
-                except (asyncio.CancelledError, Exception):
-                    pass
-
-            # Drain any additional child events accumulated during tool execution
+            # Drain child stream events accumulated so far
             while not self._child_stream_queue.empty():
                 child_event = self._child_stream_queue.get_nowait()
                 if isinstance(child_event, StreamEvent):
                     yield child_event
+
+            # Wait for next tool completion with short timeout to keep draining
+            try:
+                result_tuple = await asyncio.wait_for(done_queue.get(), timeout=0.05)
+                remaining -= 1
+                yield result_tuple
+            except asyncio.TimeoutError:
+                continue
 
         # Final drain after all tools complete
         while not self._child_stream_queue.empty():
