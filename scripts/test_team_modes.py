@@ -112,7 +112,7 @@ async def mode_a(fw, env) -> bool:
     step(2, "等待 teammate 执行完成 (8s)")
     await asyncio.sleep(8)
 
-    # Step 3: Lead collect — 检查 inbox 中的 PROGRESS_NOTICE
+    # Step 3: Lead collect — 必须在 inbox 中找到 PROGRESS_NOTICE(completed)
     step(3, "Lead collect 结果 (检查 inbox)")
     lead_id = coordinator._lead_id
     lead_inbox = mailbox.read_inbox(lead_id)
@@ -125,12 +125,8 @@ async def mode_a(fw, env) -> bool:
         summary = progress_msgs[0].payload.get("summary", "")[:100]
         ok(f"Collect 收到完成结果: {summary}")
     else:
-        # Fallback: LLM 可能已经在 spawn 时消费了结果
-        answer = await llm(fw, "调用 team(action='collect') 收集结果")
-        info(f"LLM collect 回复: {answer[:150]}")
-        if not lead_inbox:
-            fail("Lead inbox 空且 LLM 无协议结果")
-            errors.append("collect")
+        fail(f"未收到 PROGRESS_NOTICE(completed) (inbox 有 {len(lead_inbox)} 条其他消息)")
+        errors.append("collect")
 
     # Step 4: 检查状态
     step(4, "检查 coder 状态")
