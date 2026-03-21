@@ -112,15 +112,25 @@ async def mode_a(fw, env) -> bool:
     step(2, "等待 teammate 执行完成 (8s)")
     await asyncio.sleep(8)
 
-    # Step 3: Lead collect
-    step(3, "Lead collect 结果")
-    answer = await llm(fw,
-        "调用 team(action='collect') 收集所有 teammate 的结果"
-    )
-    if "2+3" in answer or "5" in answer or "collect" in answer.lower():
-        ok("Collect 返回结果")
+    # Step 3: Lead collect — 检查 inbox 中的 PROGRESS_NOTICE
+    step(3, "Lead collect 结果 (检查 inbox)")
+    lead_id = coordinator._lead_id
+    lead_inbox = mailbox.read_inbox(lead_id)
+    progress_msgs = [
+        e for e in lead_inbox
+        if e.event_type.value == "PROGRESS_NOTICE"
+        and e.payload.get("status") == "completed"
+    ]
+    if progress_msgs:
+        summary = progress_msgs[0].payload.get("summary", "")[:100]
+        ok(f"Collect 收到完成结果: {summary}")
     else:
-        info(f"回复: {answer[:150]}")
+        # Fallback: LLM 可能已经在 spawn 时消费了结果
+        answer = await llm(fw, "调用 team(action='collect') 收集结果")
+        info(f"LLM collect 回复: {answer[:150]}")
+        if not lead_inbox:
+            fail("Lead inbox 空且 LLM 无协议结果")
+            errors.append("collect")
 
     # Step 4: 检查状态
     step(4, "检查 coder 状态")
@@ -196,14 +206,15 @@ async def mode_b(fw, env) -> bool:
         "mail(action='broadcast', event_type='BROADCAST_NOTICE', "
         "payload={\"message\": \"项目启动，各就位\"})"
     )
-    # Verify at least one teammate received
+    # Verify at least one teammate received broadcast
     if non_lead:
         inbox = mailbox.read_inbox(non_lead[0].agent_id)
         broadcast_msgs = [e for e in inbox if "各就位" in str(e.payload)]
         if broadcast_msgs:
             ok(f"{non_lead[0].agent_id} 收到广播")
         else:
-            info(f"{non_lead[0].agent_id} inbox: {len(inbox)} msgs (广播可能已被前面消费)")
+            fail(f"{non_lead[0].agent_id} 未收到广播 (inbox 有 {len(inbox)} 条其他消息)")
+            errors.append("broadcast")
 
     return len(errors) == 0
 
