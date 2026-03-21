@@ -434,36 +434,26 @@ class AgentFramework:
         executor._current_team_id = team_id
         executor._current_spawn_id = lead_id
 
-        # Auto-spawn all discovered roles as teammates
-        import asyncio
-
-        async def _spawn_all() -> None:
-            for role_def in self._discovered_teams:
-                role_name = role_def.get("team_id", "")
-                desc = role_def.get("frontmatter", {}).get("description", "Ready")
-                # Standby task — agent reports ready and goes IDLE.
-                # Real work happens when assign_task() is called.
-                task = f"You are '{role_name}'. {desc} Report ready and wait."
+        # Register discovered roles in registry (IDLE, ready for assign_task).
+        # No real sub-agents spawned — assign_task() spawns them on demand.
+        from datetime import datetime, timezone
+        from agent_framework.models.team import TeamMember, TeamMemberStatus
+        for role_def in self._discovered_teams:
+            role_name = role_def.get("team_id", "")
+            if role_name:
                 try:
-                    await coordinator.spawn_teammate(role=role_name, task_input=task)
-                except Exception as e:
-                    logger.warning("teams.auto_spawn_failed", role=role_name, error=str(e))
-            # Store raw definitions for assign_task to look up body
-            coordinator._discovered_teams_raw = self._discovered_teams
-
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                asyncio.ensure_future(_spawn_all())
-            else:
-                loop.run_until_complete(_spawn_all())
-        except RuntimeError:
-            asyncio.run(_spawn_all())
-
-        # Reset quota — auto-spawned team members don't count toward
-        # the per-run sub-agent limit. Only user-initiated spawns count.
-        if runtime is not None:
-            runtime._scheduler._run_counts.pop(team_id, None)
+                    member = TeamMember(
+                        agent_id=f"role_{role_name}",
+                        team_id=team_id,
+                        role=role_name,
+                        status=TeamMemberStatus.IDLE,
+                        joined_at=datetime.now(timezone.utc),
+                        updated_at=datetime.now(timezone.utc),
+                    )
+                    registry.register(member)
+                except Exception:
+                    pass  # Duplicate role, skip
+        coordinator._discovered_teams_raw = self._discovered_teams
 
         logger.info(
             "teams.auto_initialized",
