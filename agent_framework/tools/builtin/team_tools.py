@@ -122,7 +122,7 @@ async def execute_team(executor: ToolExecutor, args: dict) -> dict[str, Any]:
 @tool(
     name="mail",
     description=(
-        "Mailbox: send/broadcast/read/ack/reply/publish/subscribe events between agents. "
+        "Mailbox: send/broadcast/read/ack/reply/publish/subscribe/unsubscribe events between agents. "
         "All team members can use all mail actions."
     ),
     category="team",
@@ -236,5 +236,12 @@ async def execute_mail(executor: ToolExecutor, args: dict) -> dict[str, Any]:
             return {"error": "topic_pattern required for subscribe"}
         mailbox.subscribe(agent_id, pattern)
         return {"subscribed": True, "pattern": pattern}
+
+    if action == "unsubscribe":
+        pattern = args.get("topic_pattern", "")
+        if not pattern:
+            return {"error": "topic_pattern required for unsubscribe"}
+        mailbox.unsubscribe(agent_id, pattern)
+        return {"unsubscribed": True, "pattern": pattern}
 
     return {"error": f"Unknown mail action: {action}"}

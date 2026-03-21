@@ -51,6 +51,8 @@ class TeamCoordinator:
         self._plans = plan_registry
         self._shutdowns = shutdown_registry
         self._runtime = sub_agent_runtime
+        # Map request_id → from_agent for safe answer routing
+        self._pending_requests: dict[str, str] = {}
 
     @property
     def team_id(self) -> str:
@@ -89,7 +91,8 @@ class TeamCoordinator:
                                                   TeamMember, TeamMemberStatus)
 
         spawn_id = uuid.uuid4().hex[:12]
-        agent_id = f"tm_{spawn_id}"
+        # Must match factory's sub_agent_id format: sub_{spawn_id}
+        agent_id = f"sub_{spawn_id}"
 
         # Write state first
         member = TeamMember(
@@ -269,17 +272,22 @@ class TeamCoordinator:
         return handler(event)
 
     def _handle_question(self, event: Any) -> dict:
-        """Record question for Lead to answer."""
+        """Record question and save request_id → from_agent mapping."""
+        req_id = event.request_id or event.payload.get("request_id", "")
+        if req_id:
+            self._pending_requests[req_id] = event.from_agent
         return {
             "type": "question",
             "from": event.from_agent,
-            "request_id": event.request_id,
+            "request_id": req_id,
             "question": event.payload.get("question", ""),
         }
 
     def _handle_plan(self, event: Any) -> dict:
-        """Record plan submission for Lead to review."""
+        """Record plan and save request_id → from_agent mapping."""
         request_id = event.payload.get("request_id", "")
+        if request_id:
+            self._pending_requests[request_id] = event.from_agent
         return {
             "type": "plan_submission",
             "from": event.from_agent,
@@ -371,16 +379,33 @@ class TeamCoordinator:
             payload={"request_id": request_id, "approved": False, "feedback": feedback},
         ))
 
-    def answer_question(self, request_id: str, answer: str, to_agent: str) -> None:
-        """Answer a teammate's question."""
+    def answer_question(self, request_id: str, answer: str, to_agent: str = "") -> None:
+        """Answer a teammate's question.
+
+        Resolves the recipient from _pending_requests if to_agent is not
+        provided. This prevents broadcasting the answer to all teammates.
+        """
         from agent_framework.models.team import MailEvent, MailEventType
+
+        # Resolve recipient: explicit to_agent > saved mapping > error
+        recipient = to_agent or self._pending_requests.get(request_id, "")
+        if not recipient:
+            logger.warning(
+                "team.answer.no_recipient",
+                request_id=request_id,
+                hint="Cannot determine who asked this question",
+            )
+            return
+
         self._mailbox.send(MailEvent(
             team_id=self._team_id,
             from_agent=self._lead_id,
-            to_agent=to_agent,
+            to_agent=recipient,
             event_type=MailEventType.ANSWER,
             payload={"request_id": request_id, "answer": answer},
         ))
+        # Clean up mapping
+        self._pending_requests.pop(request_id, None)
 
     # ── Shutdown ───────────────────────────────────────────────
 

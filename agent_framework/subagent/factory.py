@@ -150,7 +150,8 @@ class SubAgentFactory:
 
         # Propagate team context from parent executor to child
         # so spawned teammates can use team()/mail() tools.
-        scoped_tool_executor._current_spawn_id = spec.spawn_id or sub_agent_id
+        # Use sub_agent_id (tm_xxx) to match the identity registered in TeamRegistry.
+        scoped_tool_executor._current_spawn_id = sub_agent_id
         for attr in ("_team_coordinator", "_team_mailbox", "_current_team_id"):
             parent_val = getattr(parent_executor, attr, None)
             if parent_val is not None:
