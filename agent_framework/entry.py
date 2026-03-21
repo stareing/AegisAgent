@@ -235,11 +235,13 @@ class AgentFramework:
             ))
 
         # Load file-based skills from directories (SKILL.md)
+        # Searches both "skills/" and ".skills/" (dot-prefixed, like .agent-team/)
         import pathlib
         skill_dirs: list[pathlib.Path] = []
-        project_skills = pathlib.Path.cwd() / "skills"
-        if project_skills.is_dir():
-            skill_dirs.append(project_skills)
+        for skill_dir_name in ("skills", ".skills"):
+            project_skills = pathlib.Path.cwd() / skill_dir_name
+            if project_skills.is_dir():
+                skill_dirs.append(project_skills)
         user_skills = pathlib.Path.home() / ".agent" / "skills"
         if user_skills.is_dir():
             skill_dirs.append(user_skills)

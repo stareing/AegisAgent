@@ -868,14 +868,22 @@ class TeamCoordinator:
                 # Spawn the sub-agent (awaited — runs reliably)
                 actual_sid = await self._runtime.spawn_async(spec, None)
             except Exception as exc:
+                error_msg = str(exc)
                 logger.error(
                     "team.assign.spawn_failed",
                     agent_id=member.agent_id,
                     role=role,
-                    error=str(exc),
+                    error=error_msg,
+                )
+                # Quota exceeded or transient errors → reset to IDLE so member
+                # can be retried. Only mark FAILED for permanent errors.
+                is_quota_error = "quota exceeded" in error_msg.lower()
+                recovery_status = (
+                    TeamMemberStatus.IDLE if is_quota_error
+                    else TeamMemberStatus.FAILED
                 )
                 try:
-                    self._registry.update_status(member.agent_id, TeamMemberStatus.FAILED)
+                    self._registry.update_status(member.agent_id, recovery_status)
                 except Exception:
                     pass
                 self._mailbox.send(MailEvent(

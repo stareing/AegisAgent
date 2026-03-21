@@ -264,6 +264,12 @@ class SubAgentScheduler:
                 )
             finally:
                 self._tasks.pop(spawn_id, None)
+                # Release quota slot — completed sub-agents no longer count
+                # against max_per_run, allowing new spawns to take their place.
+                if parent_run_id in self._run_counts:
+                    self._run_counts[parent_run_id] = max(
+                        0, self._run_counts[parent_run_id] - 1
+                    )
                 # Ensure inner task is fully cleaned up
                 if not inner.done():
                     inner.cancel()
