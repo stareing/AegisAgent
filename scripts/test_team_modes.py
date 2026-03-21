@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""四种 Team 协作模式全量验证 — 真实 LLM 驱动。
+"""四种 Team 协作模式全量验证。
 
-验证:
-  模式 A: 星型 — Lead spawn → assign → teammate 汇报 → Lead collect
-  模式 B: 网状 — Teammate 直接通信 + 广播
-  模式 C: 发布/订阅 — topic 驱动
-  模式 D: 请求/响应 — correlation 闭环
+模式 A: LLM 驱动 — Lead 通过 team()/mail() 工具 spawn + collect
+模式 B/C/D: mailbox API 精确验证 — 绕过 LLM 的不确定性，
+  直接调用 mailbox.send/subscribe/publish/reply 验证路由、
+  投递、订阅隔离、correlation 匹配等协议语义。
 
 使用:
     python scripts/test_team_modes.py
