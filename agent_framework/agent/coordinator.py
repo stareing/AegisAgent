@@ -927,10 +927,38 @@ class RunCoordinator:
            event_to_hitl_request → forward_hitl_request → resume_subagent,
            then advance to HANDLED (boundary §6)
         """
-        if not self._notification_channel.has_pending:
+        # Drain team inbox into notification channel (if team is active)
+        team_notifications: list = []
+        try:
+            _executor = getattr(deps, "tool_executor", None) if deps else None
+            _mailbox = getattr(_executor, "_team_mailbox", None) if _executor else None
+            _lead = getattr(_executor, "_current_spawn_id", "") if _executor else ""
+            if _mailbox and _lead:
+                team_events = _mailbox.read_inbox(_lead)
+                if team_events:
+                    from agent_framework.models.subagent import RuntimeNotification, RuntimeNotificationType
+                    for evt in team_events:
+                        team_notifications.append(RuntimeNotification(
+                            notification_id=f"team_{evt.event_id}",
+                            notification_type=RuntimeNotificationType.DELEGATION_EVENT,
+                            payload={
+                                "event_id": evt.event_id,
+                                "spawn_id": evt.from_agent,
+                                "event_type": evt.event_type.value,
+                                "sequence_no": 0,
+                                "data": evt.payload,
+                                "requires_ack": False,
+                            },
+                        ))
+        except Exception:
+            pass  # Team not configured or mock executor
+
+        if not self._notification_channel.has_pending and not team_notifications:
             return
 
         notifications = self._notification_channel.drain_all()
+        notifications.extend(team_notifications)
+
         if not notifications:
             return
 
@@ -955,6 +983,9 @@ class RunCoordinator:
             event_id = n.payload.get("event_id", "")
             event_type = n.payload.get("event_type", "")
 
+            # Skip ack for team events (they use AgentBus, not InteractionChannel)
+            if n.notification_id.startswith("team_"):
+                continue
             if spawn_id and event_id:
                 self._notification_channel.mark_projected(spawn_id, event_id)
 
