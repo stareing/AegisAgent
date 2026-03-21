@@ -122,7 +122,8 @@ class TeamCoordinator:
                 task_input=task_input,
                 mode=SpawnMode.EPHEMERAL,
                 skill_id=skill_id,
-                max_iterations=10,
+                max_iterations=20,
+                deadline_ms=0,  # No timeout for team tasks
             )
             # Spawn async — returns immediately, runs in background
             actual_spawn_id = await self._runtime.spawn_async(spec, None)
@@ -415,7 +416,8 @@ class TeamCoordinator:
                 task_input=team_task,
                 mode=SpawnMode.EPHEMERAL,
                 tool_name_whitelist=role_def.get("allowed-tools"),
-                max_iterations=10,
+                max_iterations=20,
+                deadline_ms=0,  # No timeout for team tasks
             )
             # Spawn the sub-agent (awaited — runs reliably)
             actual_sid = await self._runtime.spawn_async(spec, None)
