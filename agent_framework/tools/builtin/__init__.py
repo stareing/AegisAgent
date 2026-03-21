@@ -88,6 +88,7 @@ def register_all_builtins(
     #   run_command — redundant with bash_exec
     #   get_env — bash "echo $VAR" covers this
     from agent_framework.tools.builtin.spawn_agent import spawn_agent, check_spawn_result, send_message, close_agent
+    from agent_framework.tools.builtin.team_tools import team, mail
     from agent_framework.tools.builtin.code_edit import edit_file  # notebook_edit: niche, use write_file
     from agent_framework.tools.builtin.search import grep_search, glob_files
     from agent_framework.tools.builtin.shell import (
@@ -118,6 +119,8 @@ def register_all_builtins(
         think,
         # Delegation
         spawn_agent, check_spawn_result, send_message, close_agent,
+        # Team
+        team, mail,
         # Skills
         invoke_skill,
         # Memory admin (not exposed to Agent by default — requires capability policy)
