@@ -1751,9 +1751,64 @@ async def run_classic_repl(fw: AgentFramework, mock_model: InteractiveMockModel 
             print()
     else:
         state.conversation_id = str(uuid.uuid4())
+    # Background team result poller
+    _team_poll_task = None
+
+    async def _poll_team_results():
+        """Background task: poll team inbox, auto-trigger LLM summary when results arrive."""
+        while True:
+            await asyncio.sleep(2)
+            try:
+                executor = getattr(fw._deps, "tool_executor", None) if hasattr(fw, "_deps") else None
+                if executor is None:
+                    continue
+                mailbox = getattr(executor, "_team_mailbox", None)
+                lead_id = getattr(executor, "_current_spawn_id", "")
+                if not mailbox or not lead_id:
+                    continue
+                # Peek (don't drain) to check for pending results
+                from agent_framework.notification.envelope import BusAddress
+                address = BusAddress(agent_id=lead_id, group=getattr(executor, "_current_team_id", ""))
+                pending = mailbox._bus.peek(address)
+                if not pending:
+                    continue
+                # Results arrived! Drain and format
+                events = mailbox.read_inbox(lead_id)
+                if not events:
+                    continue
+                # Display notification + transition WORKING → IDLE
+                print(f"\n  {_yellow('📨 Team 后台通知:')}")
+                coord = getattr(executor, "_team_coordinator", None)
+                for evt in events:
+                    role = evt.payload.get("role", evt.from_agent)
+                    summary = evt.payload.get("summary", str(evt.payload)[:150])
+                    evt_status = evt.payload.get("status", evt.event_type.value)
+                    status_icon = _green("✓") if evt_status == "completed" else (
+                        _red("✗") if evt_status in ("failed", "error") else _yellow("…")
+                    )
+                    print(f"    {status_icon} {_cyan(str(role))}: {summary[:120]}")
+                    # Now transition to IDLE (result has been displayed)
+                    if coord and evt_status == "completed":
+                        from agent_framework.models.team import TeamMemberStatus
+                        agent_id = evt.payload.get("spawn_id", "")
+                        # Find by role or spawn_id
+                        for member in coord._registry.list_members():
+                            if member.role == role or member.agent_id == f"role_{role}":
+                                try:
+                                    coord._registry.update_status(member.agent_id, TeamMemberStatus.IDLE)
+                                except Exception:
+                                    pass
+                                break
+                print(f"  {_dim('(输入任意内容继续)')}\n{_bold(_green('> '))}", end="", flush=True)
+            except Exception:
+                pass
+
+    _team_poll_task = asyncio.create_task(_poll_team_results())
+
     while True:
         try:
-            user_input = input(f"{_bold(_green('> '))}").strip()
+            user_input = await asyncio.to_thread(input, f"{_bold(_green('> '))}")
+            user_input = user_input.strip()
         except (EOFError, KeyboardInterrupt):
             print(f"\n{_dim('再见!')}")
             break
@@ -1770,13 +1825,15 @@ async def run_classic_repl(fw: AgentFramework, mock_model: InteractiveMockModel 
         try:
             output = await _execute_with_progressive(fw, mock_model, state, user_input)
             print(output)
-            # Auto-checkpoint after each successful user interaction
             _auto_checkpoint(fw, state, user_input)
         except Exception as exc:
             print(f"\n  {_red('运行错误:')}")
             print(f"  {exc}")
             if os.environ.get("DEBUG"):
                 traceback.print_exc()
+
+    if _team_poll_task:
+        _team_poll_task.cancel()
     # 退出时持久化会话历史
     if fw._memory_store:
         state.save_to_db(fw._memory_store, project_id)

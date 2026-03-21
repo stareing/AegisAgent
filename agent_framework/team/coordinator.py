@@ -202,12 +202,14 @@ class TeamCoordinator:
                     },
                 ))
 
-                # Update member status
-                new_status = TeamMemberStatus.IDLE if result.success else TeamMemberStatus.FAILED
-                try:
-                    self._registry.update_status(agent_id, new_status)
-                except Exception:
-                    pass
+                # Status stays WORKING until result is displayed to user.
+                # The terminal poll loop sets IDLE after showing the notification.
+                # Only set FAILED immediately (irrecoverable).
+                if not result.success:
+                    try:
+                        self._registry.update_status(agent_id, TeamMemberStatus.FAILED)
+                    except Exception:
+                        pass
 
                 logger.info(
                     "team.teammate_completed",
@@ -369,7 +371,7 @@ class TeamCoordinator:
             "role": role,
             "task": task_description[:100],
             "executing": self._runtime is not None,
-            "next_step": "Use team(action='collect') to get results when the task completes.",
+            "note": "Task running in background. Results will be delivered automatically via notification.",
         }
 
     async def _assign_task_async(self, task_description: str, agent_id: str) -> None:
