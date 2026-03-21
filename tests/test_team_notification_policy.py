@@ -2,7 +2,7 @@
 
 Verifies:
 1. Default policy escalates TASK_COMPLETED, TASK_FAILED, QUESTION, ERROR.
-2. Default mail escalation covers PROGRESS_NOTICE, ERROR_NOTICE, QUESTION.
+2. Default mail escalation covers ERROR_NOTICE, QUESTION.
 3. Topic prefix matching for pub/sub mode.
 4. Disabled policy blocks all escalation.
 5. from_config creates valid policy.
@@ -39,9 +39,9 @@ class TestDefaultPolicy:
 
 
 class TestMailEventEscalation:
-    def test_progress_notice_escalates(self):
+    def test_progress_notice_does_not_escalate_by_default(self):
         policy = TeamNotificationPolicy()
-        assert policy.should_escalate_mail_event(MailEventType.PROGRESS_NOTICE)
+        assert not policy.should_escalate_mail_event(MailEventType.PROGRESS_NOTICE)
 
     def test_error_notice_escalates(self):
         policy = TeamNotificationPolicy()
@@ -93,7 +93,7 @@ class TestDisabledPolicy:
 
     def test_disabled_blocks_mail_event(self):
         policy = TeamNotificationPolicy(enabled=False)
-        assert not policy.should_escalate_mail_event(MailEventType.PROGRESS_NOTICE)
+        assert not policy.should_escalate_mail_event(MailEventType.ERROR_NOTICE)
 
     def test_disabled_blocks_topic(self):
         policy = TeamNotificationPolicy(enabled=False)

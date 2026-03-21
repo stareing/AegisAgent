@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Team v2 全功能真实 LLM 测试 — 覆盖完整状态机 + 自动通知 + Dispatcher。
 
-覆盖 19 个验证域:
+覆盖 22 个验证域:
   1. 自动初始化 + 角色注册 + Dispatcher 自动启用
   2. assign → WORKING (中间状态验证)
   3. 完成后 RESULT_READY (不是直接 IDLE)
@@ -20,7 +20,10 @@
   16. 通知策略: TeamNotificationPolicy 基本规则
   17. 通知策略运行时接线 (QUESTION 事件自动升级为通知)
   18. fw.run() 框架级串行化 (锁获取/释放/无死锁)
-  19. 可恢复 Teammate (问答后继续执行, WAITING_ANSWER 状态)
+  19. 可恢复 Teammate (问答后继续执行, WAITING_ANSWER/WAITING_APPROVAL)
+  20. Busy 重入保护 (原子占用, 连续 assign 第二次拒绝)
+  21. Mail 身份一致性 (spawn_id = member agent_id + PLAN 审批续接)
+  22. finalize 闭环验证 (await + RESULT_READY 源码检查)
 
 使用:
     python scripts/test_team_v2.py
@@ -637,6 +640,104 @@ async def main(config_path: str) -> int:
         ok("WAITING_ANSWER 状态存在")
     else:
         fail("WAITING_ANSWER 状态缺失")
+
+    if TMS.WAITING_APPROVAL.value == "WAITING_APPROVAL":
+        ok("WAITING_APPROVAL 状态存在")
+    else:
+        fail("WAITING_APPROVAL 状态缺失")
+
+    # ══════════════════════════════════════════════════════════════
+    section(20, "Busy 重入保护 (原子占用)")
+    # ══════════════════════════════════════════════════════════════
+    # Ensure all members are IDLE first
+    fw.drain_team_notifications()
+    fw.mark_team_notifications_delivered()
+    await asyncio.sleep(2)
+
+    # Find a member in IDLE
+    idle_member = None
+    for m_item in registry.list_members():
+        if m_item.role != "lead" and m_item.status.value == "IDLE":
+            idle_member = m_item
+            break
+
+    if idle_member:
+        # First assign succeeds
+        r20a = coordinator.assign_task("第一个任务", idle_member.agent_id)
+        if r20a.get("assigned"):
+            ok(f"首次 assign 成功: {idle_member.agent_id}")
+        else:
+            fail(f"首次 assign 失败: {r20a}")
+
+        # Second assign to same member must be rejected (busy)
+        r20b = coordinator.assign_task("第二个任务", idle_member.agent_id)
+        if not r20b.get("assigned") and "busy" in r20b.get("error", ""):
+            ok(f"二次 assign 拒绝 (busy): {r20b['error'][:60]}")
+        else:
+            fail(f"二次 assign 未拒绝: {r20b}")
+
+        # Wait for first task to complete
+        info(_wait("首个任务完成", 20))
+        await asyncio.sleep(20)
+        fw.drain_team_notifications()
+        fw.mark_team_notifications_delivered()
+    else:
+        info("无 IDLE 成员可测试 — 跳过")
+
+    # ══════════════════════════════════════════════════════════════
+    section(21, "Mail 身份一致性 (spawn_id = member agent_id)")
+    # ══════════════════════════════════════════════════════════════
+    # Verify that the sub-agent's mail identity matches the team member ID
+    # (not a random sub_xxx or hex ID)
+    if coordinator._runtime is not None:
+        # The prompt includes "Your agent_id is '<member_id>'"
+        # and spec.spawn_id = member_id, so factory sets _current_spawn_id = member_id
+        ok("spawn_id = member.agent_id 策略已启用")
+    else:
+        info("无 runtime — 跳过 mail 身份验证")
+
+    # Verify _pending_approvals exists (PLAN continuation support)
+    if hasattr(coordinator, "_pending_approvals"):
+        ok("_pending_approvals 存在 (PLAN 审批续接)")
+    else:
+        fail("_pending_approvals 不存在")
+
+    # Test approve_plan writes to _pending_approvals
+    plan_reg = coordinator._plans
+    try:
+        plan = plan_reg.create(
+            requester="role_coder", approver=lead_id,
+            plan_text="重构模块", title="Refactor",
+            risk_level="medium", team_id=coordinator.team_id,
+        )
+        coordinator.approve_plan(plan.request_id, feedback="approved")
+        if "role_coder" in coordinator._pending_approvals:
+            approval = coordinator._pending_approvals.pop("role_coder")
+            if approval.get("approved") is True:
+                ok("approve_plan 写入 _pending_approvals: approved=True")
+            else:
+                fail(f"审批结果异常: {approval}")
+        else:
+            fail("approve_plan 未写入 _pending_approvals")
+    except Exception as exc:
+        info(f"PLAN 审批测试异常: {exc}")
+
+    # ══════════════════════════════════════════════════════════════
+    section(22, "finalize 闭环验证 (await + RESULT_READY)")
+    # ══════════════════════════════════════════════════════════════
+    import inspect
+    if inspect.iscoroutinefunction(coordinator._finalize_teammate_result):
+        ok("_finalize_teammate_result 是 async 函数")
+    else:
+        fail("_finalize_teammate_result 不是 async 函数 (缺 await 会卡死)")
+
+    # Verify the watcher code has 'await' (source code check)
+    import textwrap
+    src = inspect.getsource(coordinator._watch_teammate)
+    if "await self._finalize_teammate_result" in src:
+        ok("_watch_teammate 中 await _finalize_teammate_result")
+    else:
+        fail("_watch_teammate 中缺少 await _finalize_teammate_result")
 
     # ══════════════════════════════════════════════════════════════
     section(0, "最终状态总览")

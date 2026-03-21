@@ -184,6 +184,26 @@ class TestCheckPendingPlan:
         progress_events = [e for e in events if e.event_type == MailEventType.PROGRESS_NOTICE]
         assert len(progress_events) == 1
 
+    def test_peek_inbox_does_not_consume_messages(self, team_setup):
+        coordinator, mailbox, registry = team_setup
+
+        progress = MailEvent(
+            team_id="test_team",
+            from_agent="sub_coder",
+            to_agent="lead_001",
+            event_type=MailEventType.PROGRESS_NOTICE,
+            payload={"status": "50%"},
+        )
+        mailbox.send(progress)
+
+        peeked = mailbox.peek_inbox("lead_001")
+        assert len(peeked) == 1
+        assert peeked[0].event_type == MailEventType.PROGRESS_NOTICE
+
+        drained = mailbox.read_inbox("lead_001")
+        assert len(drained) == 1
+        assert drained[0].event_type == MailEventType.PROGRESS_NOTICE
+
 
 class TestWaitForApproval:
     @pytest.mark.asyncio

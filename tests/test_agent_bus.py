@@ -567,9 +567,10 @@ def _setup_team():
 
     now = _dt.now(_tz.utc)
     for aid, role in [("lead", "lead"), ("coder", "coder"), ("reviewer", "reviewer")]:
+        status = TeamMemberStatus.WORKING if role == "lead" else TeamMemberStatus.IDLE
         registry.register(TeamMember(
             agent_id=aid, team_id="team_e2e", role=role,
-            status=TeamMemberStatus.WORKING, joined_at=now, updated_at=now,
+            status=status, joined_at=now, updated_at=now,
         ))
 
     coord = TeamCoordinator("team_e2e", "lead", mailbox, registry, plan_reg, shutdown_reg)

@@ -340,7 +340,7 @@ class TeamCoordinator:
                                    agent_id=agent_id, role=role)
 
             # This is the final result — no pending question or answer timeout
-            self._finalize_teammate_result(
+            await self._finalize_teammate_result(
                 agent_id=agent_id, spawn_id=current_spawn_id,
                 role=role, task=task, result=result,
             )
@@ -474,7 +474,8 @@ class TeamCoordinator:
         import uuid as _uuid
         from agent_framework.models.subagent import SpawnMode, SubAgentSpec
 
-        new_spawn_id = _uuid.uuid4().hex[:12]
+        # Use the member's agent_id as spawn_id for identity consistency
+        new_spawn_id = agent_id
         role_def = self._role_definitions.get(role, {})
         body = ""
         for td in getattr(self, "_discovered_teams_raw", []):
@@ -509,10 +510,11 @@ class TeamCoordinator:
         )
 
         try:
-            await self._runtime.spawn_async(spec, None)
+            actual_sid = await self._runtime.spawn_async(spec, None)
             logger.info("team.continuation_spawned", agent_id=agent_id,
-                         role=role, new_spawn_id=new_spawn_id)
-            return new_spawn_id
+                         role=role, new_spawn_id=new_spawn_id,
+                         actual_sid=actual_sid)
+            return actual_sid
         except Exception as exc:
             logger.error("team.continuation_spawn_error", error=str(exc))
             return None
@@ -744,35 +746,65 @@ class TeamCoordinator:
                 return m
         return None
 
+    def _validate_assignment_target(self, agent_id: str):
+        """Return the resolved member if it can accept a new task."""
+        from agent_framework.models.team import BUSY_MEMBER_STATUSES
+
+        member = self._resolve_member(agent_id)
+        if member is None:
+            return None, f"Unknown teammate: {agent_id}"
+        if member.status in BUSY_MEMBER_STATUSES:
+            return None, (
+                f"Teammate '{member.agent_id}' is busy "
+                f"(status={member.status.value}) and cannot accept a new task yet."
+            )
+        return member, ""
+
     def assign_task(self, task_description: str, agent_id: str) -> dict:
         """Assign a task to a teammate. Sync wrapper around _assign_task_async.
 
-        When called from async context (tool executor), spawns real sub-agent.
-        When called from sync context (tests), just sends MailEvent.
+        Atomically claims the member (IDLE → WORKING) before scheduling
+        async spawn, preventing race conditions from concurrent assigns.
         """
-        import asyncio
+        from agent_framework.models.team import MailEvent, MailEventType, TeamMemberStatus
+
+        member, error = self._validate_assignment_target(agent_id)
+        if member is None:
+            return {
+                "assigned": False,
+                "agent_id": agent_id,
+                "task": task_description[:100],
+                "error": error,
+            }
+
+        role = member.role
+
+        # Atomically claim: IDLE → WORKING *before* scheduling async work.
+        # This prevents a second assign_task() in the same tick from seeing IDLE.
         try:
-            loop = asyncio.get_running_loop()
-            # We're in async context — schedule the spawn
-            asyncio.ensure_future(self._assign_task_async(task_description, agent_id))
-        except RuntimeError:
-            pass  # No running loop — sync test, skip spawn
+            self._registry.update_status(member.agent_id, TeamMemberStatus.WORKING)
+        except Exception:
+            pass
 
-        from agent_framework.models.team import MailEvent, MailEventType
-        member = self._resolve_member(agent_id)
-        role = member.role if member else "teammate"
-
+        # Send TASK_ASSIGNMENT mail (single point — not duplicated in async path)
         self._mailbox.send(MailEvent(
             team_id=self._team_id,
             from_agent=self._lead_id,
-            to_agent=member.agent_id if member else agent_id,
+            to_agent=member.agent_id,
             event_type=MailEventType.TASK_ASSIGNMENT,
             payload={"task": task_description},
         ))
 
+        import asyncio
+        try:
+            asyncio.get_running_loop()
+            asyncio.ensure_future(self._assign_task_async(task_description, member.agent_id))
+        except RuntimeError:
+            pass  # No running loop — sync test, skip spawn
+
         return {
             "assigned": True,
-            "agent_id": member.agent_id if member else agent_id,
+            "agent_id": member.agent_id,
             "role": role,
             "task": task_description[:100],
             "executing": self._runtime is not None,
@@ -780,33 +812,35 @@ class TeamCoordinator:
         }
 
     async def _assign_task_async(self, task_description: str, agent_id: str) -> None:
-        """Async implementation: spawn real sub-agent to execute the task."""
+        """Async implementation: spawn real sub-agent to execute the task.
+
+        Called after assign_task() has already claimed the member (IDLE → WORKING)
+        and sent the TASK_ASSIGNMENT mail. This method only spawns the sub-agent.
+        """
         from agent_framework.models.team import MailEvent, MailEventType, TeamMemberStatus
 
         member = self._resolve_member(agent_id)
-        role = member.role if member else "teammate"
+        if member is None:
+            logger.warning("team.assign_async.member_not_found", agent_id=agent_id)
+            return
+        role = member.role
         role_def = self._role_definitions.get(role, {})
         body = ""
-        # Look up TEAM.md body from discovered definitions
         for td in getattr(self, "_discovered_teams_raw", []):
             if td.get("team_id") == role:
                 body = td.get("body", "")
                 break
 
-        # Update status to WORKING
-        if member and member.status != TeamMemberStatus.WORKING:
-            try:
-                self._registry.update_status(member.agent_id, TeamMemberStatus.WORKING)
-            except Exception:
-                pass
-
-        # Actually spawn a sub-agent to execute the task
+        # Spawn the sub-agent (member already claimed as WORKING by assign_task)
         if self._runtime is not None:
             import uuid as _uuid
             from agent_framework.models.subagent import SpawnMode, SubAgentSpec
 
-            spawn_id = _uuid.uuid4().hex[:12]
             my_id = member.agent_id if member else agent_id
+            # Use member's agent_id as spawn_id so the factory sets
+            # _current_spawn_id = my_id — ensuring mail from_agent matches
+            # the team registry identity (not a random sub_xxx id).
+            spawn_id = my_id
             team_task = (
                 f"[TEAM PROTOCOL] You are '{role}' in team '{self._team_id}'. "
                 f"Your agent_id is '{my_id}'. "
@@ -830,8 +864,28 @@ class TeamCoordinator:
                 max_iterations=20,
                 deadline_ms=0,  # No timeout for team tasks
             )
-            # Spawn the sub-agent (awaited — runs reliably)
-            actual_sid = await self._runtime.spawn_async(spec, None)
+            try:
+                # Spawn the sub-agent (awaited — runs reliably)
+                actual_sid = await self._runtime.spawn_async(spec, None)
+            except Exception as exc:
+                logger.error(
+                    "team.assign.spawn_failed",
+                    agent_id=member.agent_id,
+                    role=role,
+                    error=str(exc),
+                )
+                try:
+                    self._registry.update_status(member.agent_id, TeamMemberStatus.FAILED)
+                except Exception:
+                    pass
+                self._mailbox.send(MailEvent(
+                    team_id=self._team_id,
+                    from_agent=member.agent_id,
+                    to_agent=self._lead_id,
+                    event_type=MailEventType.ERROR_NOTICE,
+                    payload={"error": f"Failed to start teammate task: {exc}"},
+                ))
+                return
 
             # Background watcher reports result to Lead inbox
             import asyncio
@@ -844,20 +898,15 @@ class TeamCoordinator:
 
             asyncio.create_task(_safe_watch(
                 member.agent_id if member else agent_id,
-                spawn_id, role, task_description,
+                actual_sid, role, task_description,
             ))
 
-            logger.info("team.assign.spawned", role=role, spawn_id=spawn_id,
+            logger.info("team.assign.spawned", role=role,
+                         spawn_id=spawn_id, actual_sid=actual_sid,
                          task=task_description[:80])
 
-        # Also send MailEvent for protocol tracking
-        self._mailbox.send(MailEvent(
-            team_id=self._team_id,
-            from_agent=self._lead_id,
-            to_agent=member.agent_id if member else agent_id,
-            event_type=MailEventType.TASK_ASSIGNMENT,
-            payload={"task": task_description},
-        ))
+        # NOTE: TASK_ASSIGNMENT MailEvent is already sent by the sync wrapper
+        # assign_task() — do not send a second one here.
 
         return {
             "assigned": True,

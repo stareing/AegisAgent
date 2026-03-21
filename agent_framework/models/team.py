@@ -101,6 +101,17 @@ TERMINAL_MEMBER_STATUSES: frozenset[TeamMemberStatus] = frozenset({
     TeamMemberStatus.FAILED,
 })
 
+# Busy statuses that must not accept a new assignment.
+BUSY_MEMBER_STATUSES: frozenset[TeamMemberStatus] = frozenset({
+    TeamMemberStatus.SPAWNING,
+    TeamMemberStatus.WORKING,
+    TeamMemberStatus.WAITING_APPROVAL,
+    TeamMemberStatus.WAITING_ANSWER,
+    TeamMemberStatus.RESULT_READY,
+    TeamMemberStatus.NOTIFYING,
+    TeamMemberStatus.SHUTDOWN_REQUESTED,
+})
+
 
 # ---------------------------------------------------------------------------
 # TeamMember — mutable member record

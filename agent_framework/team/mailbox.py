@@ -207,6 +207,19 @@ class TeamMailbox:
             if env.requires_ack
         ]
 
+    def peek_inbox(
+        self, agent_id: str, limit: int | None = None,
+    ) -> list[Any]:
+        """Peek pending messages for an agent without consuming them."""
+        address = BusAddress(
+            agent_id=agent_id,
+            group=self._registry.get_team_id(),
+        )
+        envelopes = self._bus.peek(address)
+        if limit is not None:
+            envelopes = envelopes[:limit]
+        return [self._envelope_to_mail(env) for env in envelopes]
+
     def ack(self, agent_id: str, event_id: str) -> None:
         """Acknowledge receipt of a message."""
         from agent_framework.models.subagent import AckLevel

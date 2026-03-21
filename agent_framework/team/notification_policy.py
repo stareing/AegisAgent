@@ -21,7 +21,6 @@ _DEFAULT_ESCALATION_TYPES: frozenset[TeamNotificationType] = frozenset({
 
 # Default mail event types that escalate (for Mode B/C/D)
 _DEFAULT_MAIL_ESCALATION_TYPES: frozenset[MailEventType] = frozenset({
-    MailEventType.PROGRESS_NOTICE,
     MailEventType.ERROR_NOTICE,
     MailEventType.QUESTION,
 })

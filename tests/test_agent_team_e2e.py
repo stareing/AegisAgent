@@ -59,7 +59,7 @@ def team_stack():
             agent_id=agent_id,
             team_id=TEAM_ID,
             role=role,
-            status=TeamMemberStatus.WORKING,
+            status=TeamMemberStatus.IDLE,
         )
         registry.register(member)
         return TeammateRuntime(

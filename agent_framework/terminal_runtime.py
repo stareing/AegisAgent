@@ -1108,13 +1108,23 @@ async def _cmd_team_inbox(
     if coord is None:
         print(f"  {_yellow('Team 未启动')}")
         return
-    processed = coord.process_inbox()
-    if not processed:
+    mailbox = getattr(coord, "_mailbox", None)
+    lead_id = getattr(coord, "_lead_id", "")
+    if mailbox is None or not lead_id:
+        print(f"  {_yellow('Team 收件箱不可用')}")
+        return
+    events = mailbox.peek_inbox(lead_id)
+    if not events:
         print(f"  {_dim('收件箱为空')}")
         return
-    print(f"\n  {_bold(_yellow(f'处理了 {len(processed)} 条事件:'))}")
-    for evt in processed:
-        print(f"    [{evt.get('type', '?')}] from={evt.get('from', '?')} {_dim(str({k: v for k, v in evt.items() if k not in ('type', 'from')}))}")
+    print(f"\n  {_bold(_yellow(f'收件箱中有 {len(events)} 条待处理事件:'))}")
+    for evt in events:
+        payload = dict(evt.payload)
+        if evt.request_id:
+            payload["request_id"] = evt.request_id
+        if evt.correlation_id:
+            payload["correlation_id"] = evt.correlation_id
+        print(f"    [{evt.event_type.value.lower()}] from={evt.from_agent} {_dim(str(payload))}")
     print()
 
 
