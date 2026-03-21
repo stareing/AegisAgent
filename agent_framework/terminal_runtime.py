@@ -1751,95 +1751,25 @@ async def run_classic_repl(fw: AgentFramework, mock_model: InteractiveMockModel 
             print()
     else:
         state.conversation_id = str(uuid.uuid4())
-    # Background team result poller — detects completed tasks and triggers LLM summary
-    _team_poll_task = None
-    _team_poll_busy = False  # Prevent re-entry while LLM is summarizing
+    # Background display loop — shows team auto-summary notifications from framework
+    _team_display_task = None
 
-    async def _poll_team_results():
-        """Background task: poll team inbox, trigger LLM to summarize results."""
-        nonlocal _team_poll_busy
+    async def _display_team_notifications():
+        """Display LLM-summarized team notifications from framework core."""
         while True:
-            await asyncio.sleep(3)
-            if _team_poll_busy:
-                continue
+            await asyncio.sleep(2)
             try:
-                executor = getattr(fw._deps, "tool_executor", None) if hasattr(fw, "_deps") else None
-                if not executor:
+                notifications = fw.drain_team_notifications()
+                if not notifications:
                     continue
-                mailbox = getattr(executor, "_team_mailbox", None)
-                lead_id = getattr(executor, "_current_spawn_id", "")
-                if not mailbox or not lead_id:
-                    continue
-                coord = getattr(executor, "_team_coordinator", None)
-
-                # Peek for pending results
-                from agent_framework.notification.envelope import BusAddress
-                address = BusAddress(agent_id=lead_id, group=getattr(executor, "_current_team_id", ""))
-                pending = mailbox._bus.peek(address)
-                if not pending:
-                    continue
-
-                # Drain results
-                events = mailbox.read_inbox(lead_id)
-                if not events:
-                    continue
-
-                _team_poll_busy = True
-
-                # Transition WORKING → IDLE by agent_id (precise match)
-                from agent_framework.models.team import TeamMemberStatus
-                summaries = []
-                for evt in events:
-                    role = evt.payload.get("role", evt.from_agent)
-                    summary = evt.payload.get("summary", str(evt.payload)[:200])
-                    evt_status = evt.payload.get("status", "")
-                    summaries.append(f"[{role}] ({evt_status}): {summary}")
-
-                    if coord:
-                        # Match by role_<name> agent_id (registered format)
-                        target_id = f"role_{role}" if not role.startswith("role_") else role
-                        member = coord._registry.get(target_id)
-                        if member and evt_status == "completed":
-                            try:
-                                coord._registry.update_status(target_id, TeamMemberStatus.IDLE)
-                            except Exception:
-                                pass
-
-                # Trigger LLM to summarize results
-                notification_text = "\n".join(summaries)
-                prompt = (
-                    f"[TEAM NOTIFICATION] 以下 team 成员已完成任务并汇报了结果，"
-                    f"请向用户总结汇报：\n{notification_text}"
-                )
-
-                print(f"\n  {_yellow('📨 Team 任务完成:')}")
-                try:
-                    result = await fw.run(
-                        prompt,
-                        initial_session_messages=state.history,
-                        user_id=state.user_id,
-                    )
-                    answer = result.final_answer or ""
-                    if answer:
-                        print(f"\n  {_green('Agent')} > {answer}\n")
-                        if result.success:
-                            state.append_turn(prompt, result)
-                    else:
-                        # Fallback: print raw summaries
-                        for s in summaries:
-                            print(f"    {_dim(s[:120])}")
-                except Exception as e:
-                    # Fallback: print raw
-                    for s in summaries:
-                        print(f"    {_dim(s[:120])}")
-
-                print(f"{_bold(_green('> '))}", end="", flush=True)
-                _team_poll_busy = False
-
+                for n in notifications:
+                    print(f"\n  {_yellow('📨 Team 通知:')}")
+                    print(f"  {_green('Agent')} > {n['llm_response']}\n")
+                    print(f"{_bold(_green('> '))}", end="", flush=True)
             except Exception:
-                _team_poll_busy = False
+                pass
 
-    _team_poll_task = asyncio.create_task(_poll_team_results())
+    _team_display_task = asyncio.create_task(_display_team_notifications())
 
     while True:
         try:

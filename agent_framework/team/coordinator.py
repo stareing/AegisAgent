@@ -53,6 +53,9 @@ class TeamCoordinator:
         self._runtime = sub_agent_runtime
         self._pending_requests: dict[str, str] = {}
         self._role_definitions: dict[str, dict] = {}
+        # Auto-run callback: called with (prompt, events) when team results arrive.
+        # Set by AgentFramework to trigger LLM auto-summary.
+        self._on_result_callback: Any = None
 
     @property
     def team_id(self) -> str:
@@ -202,20 +205,32 @@ class TeamCoordinator:
                     },
                 ))
 
-                # Status stays WORKING until result is displayed to user.
-                # The terminal poll loop sets IDLE after showing the notification.
-                # Only set FAILED immediately (irrecoverable).
-                if not result.success:
-                    try:
-                        self._registry.update_status(agent_id, TeamMemberStatus.FAILED)
-                    except Exception:
-                        pass
+                # Update status
+                new_status = TeamMemberStatus.IDLE if result.success else TeamMemberStatus.FAILED
+                try:
+                    self._registry.update_status(agent_id, new_status)
+                except Exception:
+                    pass
 
                 logger.info(
                     "team.teammate_completed",
                     agent_id=agent_id, spawn_id=spawn_id,
                     success=result.success,
                 )
+
+                # Trigger auto-summary callback (framework-level)
+                if self._on_result_callback is not None:
+                    try:
+                        await self._on_result_callback(
+                            role=role,
+                            status=status,
+                            summary=summary[:2000],
+                            agent_id=agent_id,
+                            task=task[:200],
+                        )
+                    except Exception as cb_err:
+                        logger.warning("team.result_callback_failed", error=str(cb_err))
+
                 return
 
             await asyncio.sleep(0.5)

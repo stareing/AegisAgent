@@ -391,6 +391,7 @@ class AgentFramework:
 
     def _auto_init_team(self) -> None:
         """Auto-initialize team from discovered .agent-team/ definitions."""
+        import asyncio
         import uuid
         from agent_framework.notification.bus import AgentBus
         from agent_framework.notification.persistence import InMemoryBusPersistence
@@ -455,12 +456,58 @@ class AgentFramework:
                     pass  # Duplicate role, skip
         coordinator._discovered_teams_raw = self._discovered_teams
 
+        # Register auto-summary callback — when teammate completes,
+        # trigger fw.run() to summarize results for user.
+        self._team_run_lock = asyncio.Lock()
+
+        async def _on_team_result(role: str, status: str, summary: str,
+                                   agent_id: str, task: str) -> None:
+            async with self._team_run_lock:
+                prompt = (
+                    f"[TEAM NOTIFICATION] Team 成员 '{role}' 完成了任务。\n"
+                    f"状态: {status}\n"
+                    f"任务: {task}\n"
+                    f"结果: {summary}\n\n"
+                    f"请向用户简洁汇报这个结果。"
+                )
+                try:
+                    result = await self.run(prompt)
+                    if result.success and result.final_answer:
+                        # Store for display — the terminal/API layer reads this
+                        if not hasattr(self, "_pending_team_notifications"):
+                            self._pending_team_notifications = []
+                        self._pending_team_notifications.append({
+                            "role": role,
+                            "status": status,
+                            "summary": summary,
+                            "task": task,
+                            "agent_id": agent_id,
+                            "llm_response": result.final_answer,
+                        })
+                except Exception as e:
+                    logger.warning("team.auto_summary_failed", error=str(e))
+
+        coordinator._on_result_callback = _on_team_result
+
+        self._pending_team_notifications: list[dict] = []
+
         logger.info(
             "teams.auto_initialized",
             team_id=team_id, lead=lead_id,
             roles=[t["team_id"] for t in self._discovered_teams],
-            auto_spawned=True,
         )
+
+    def drain_team_notifications(self) -> list[dict]:
+        """Drain pending auto-summary notifications (for UI layers).
+
+        Returns list of {role, status, summary, task, agent_id, llm_response}.
+        Each notification has already been summarized by LLM.
+        """
+        if not hasattr(self, "_pending_team_notifications"):
+            return []
+        notifications = list(self._pending_team_notifications)
+        self._pending_team_notifications.clear()
+        return notifications
 
     def _bind_config_policies(self, agent: Any) -> None:
         """Override agent's default policy methods with config-sourced values.
