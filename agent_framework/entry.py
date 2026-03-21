@@ -440,14 +440,16 @@ class AgentFramework:
         async def _spawn_all() -> None:
             for role_def in self._discovered_teams:
                 role_name = role_def.get("team_id", "")
-                fm = role_def.get("frontmatter", {})
-                desc = fm.get("description", "Awaiting task assignment")
-                body = role_def.get("body", "")
-                task = body if body else desc
+                desc = role_def.get("frontmatter", {}).get("description", "Ready")
+                # Standby task — agent reports ready and goes IDLE.
+                # Real work happens when assign_task() is called.
+                task = f"You are '{role_name}'. {desc} Report ready and wait."
                 try:
                     await coordinator.spawn_teammate(role=role_name, task_input=task)
                 except Exception as e:
                     logger.warning("teams.auto_spawn_failed", role=role_name, error=str(e))
+            # Store raw definitions for assign_task to look up body
+            coordinator._discovered_teams_raw = self._discovered_teams
 
         try:
             loop = asyncio.get_event_loop()

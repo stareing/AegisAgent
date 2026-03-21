@@ -324,12 +324,83 @@ class TeamCoordinator:
     # ── Task management ───────────────────────────────────────
 
     def assign_task(self, task_description: str, agent_id: str) -> None:
-        """Assign a task to a teammate."""
-        from agent_framework.models.team import MailEvent, MailEventType
+        """Assign a task to a teammate by spawning a real sub-agent execution.
+
+        Finds the teammate's role, then runs the task via SubAgentRuntime.
+        The result is reported back to Lead's mailbox automatically.
+        """
+        from agent_framework.models.team import MailEvent, MailEventType, TeamMemberStatus
+
+        # Find the member's role to get TEAM.md context
+        member = self._registry.get(agent_id)
+        if member is None:
+            # Try by role name
+            for m in self._registry.list_members():
+                if m.role == agent_id or m.agent_id == agent_id:
+                    member = m
+                    break
+
+        role = member.role if member else "teammate"
+        role_def = self._role_definitions.get(role, {})
+        body = ""
+        # Look up TEAM.md body from discovered definitions
+        for td in getattr(self, "_discovered_teams_raw", []):
+            if td.get("team_id") == role:
+                body = td.get("body", "")
+                break
+
+        # Update status to WORKING
+        if member and member.status != TeamMemberStatus.WORKING:
+            try:
+                self._registry.update_status(member.agent_id, TeamMemberStatus.WORKING)
+            except Exception:
+                pass
+
+        # Actually spawn a sub-agent to execute the task
+        if self._runtime is not None:
+            import uuid as _uuid
+            from agent_framework.models.subagent import SpawnMode, SubAgentSpec
+
+            spawn_id = _uuid.uuid4().hex[:12]
+            team_task = (
+                f"[TEAM PROTOCOL] You are '{role}' in team '{self._team_id}'. "
+                f"Your agent_id is '{member.agent_id if member else agent_id}'. "
+                f"The lead agent_id is '{self._lead_id}'. "
+                f"Report results via mail(action='send', to='{self._lead_id}', "
+                f"event_type='PROGRESS_NOTICE', payload={{\"status\": \"completed\", "
+                f"\"summary\": \"<result>\"}}).\n\n"
+            )
+            if body:
+                team_task += f"[ROLE INSTRUCTIONS]\n{body}\n\n"
+            team_task += f"[TASK] {task_description}"
+
+            spec = SubAgentSpec(
+                parent_run_id=self._team_id,
+                spawn_id=spawn_id,
+                task_input=team_task,
+                mode=SpawnMode.EPHEMERAL,
+                tool_name_whitelist=role_def.get("allowed-tools"),
+                max_iterations=10,
+            )
+            import asyncio
+
+            async def _spawn_and_watch() -> None:
+                try:
+                    await self._runtime.spawn_async(spec, None)
+                    await self._watch_teammate(
+                        member.agent_id if member else agent_id,
+                        spawn_id, role, task_description,
+                    )
+                except Exception:
+                    pass
+
+            asyncio.ensure_future(_spawn_and_watch())
+
+        # Also send MailEvent for protocol tracking
         self._mailbox.send(MailEvent(
             team_id=self._team_id,
             from_agent=self._lead_id,
-            to_agent=agent_id,
+            to_agent=member.agent_id if member else agent_id,
             event_type=MailEventType.TASK_ASSIGNMENT,
             payload={"task": task_description},
         ))
