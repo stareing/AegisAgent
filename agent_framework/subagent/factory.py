@@ -74,6 +74,9 @@ class SubAgentFactory:
 
     def __init__(self, parent_deps: AgentRuntimeDeps) -> None:
         self._parent_deps = parent_deps
+        # Reuse a single in-memory SQLite store for ephemeral sub-agent memory
+        # (ISOLATED/INHERIT_READ). Avoids repeated sqlite3.connect + CREATE TABLE.
+        self._ephemeral_store: SQLiteMemoryStore | None = None
 
     def create_agent_and_deps(
         self,
@@ -185,19 +188,25 @@ class SubAgentFactory:
             )
 
         if scope == MemoryScope.INHERIT_READ:
-            # Create a local store for the sub-agent's own writes
-            local_store = SQLiteMemoryStore(db_path=":memory:")
             # v2.4 §10: capture frozen snapshot of parent memories at spawn time
             snapshot = self._capture_parent_snapshot(parent_mm, parent_agent)
             mgr = InheritReadMemoryManager(
-                store=local_store,
+                store=self._get_or_create_ephemeral_store(),
                 parent_snapshot=snapshot,
             )
             return mgr
 
-        # ISOLATED (default)
-        local_store = SQLiteMemoryStore(db_path=":memory:")
-        return IsolatedMemoryManager(store=local_store)
+        # ISOLATED (default) — lightweight manager, no real store needed
+        return IsolatedMemoryManager(store=self._get_or_create_ephemeral_store())
+
+    def _get_or_create_ephemeral_store(self) -> SQLiteMemoryStore:
+        """Return a shared in-memory store for sub-agent memory.
+
+        Avoids creating a new SQLite connection + table for every spawn.
+        """
+        if self._ephemeral_store is None:
+            self._ephemeral_store = SQLiteMemoryStore(db_path=":memory:")
+        return self._ephemeral_store
 
     def _capture_parent_snapshot(
         self,
