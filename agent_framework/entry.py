@@ -434,10 +434,35 @@ class AgentFramework:
         executor._current_team_id = team_id
         executor._current_spawn_id = lead_id
 
+        # Auto-spawn all discovered roles as teammates
+        import asyncio
+
+        async def _spawn_all() -> None:
+            for role_def in self._discovered_teams:
+                role_name = role_def.get("team_id", "")
+                fm = role_def.get("frontmatter", {})
+                desc = fm.get("description", "Awaiting task assignment")
+                body = role_def.get("body", "")
+                task = body if body else desc
+                try:
+                    await coordinator.spawn_teammate(role=role_name, task_input=task)
+                except Exception as e:
+                    logger.warning("teams.auto_spawn_failed", role=role_name, error=str(e))
+
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(_spawn_all())
+            else:
+                loop.run_until_complete(_spawn_all())
+        except RuntimeError:
+            asyncio.run(_spawn_all())
+
         logger.info(
             "teams.auto_initialized",
             team_id=team_id, lead=lead_id,
             roles=[t["team_id"] for t in self._discovered_teams],
+            auto_spawned=True,
         )
 
     def _bind_config_policies(self, agent: Any) -> None:
