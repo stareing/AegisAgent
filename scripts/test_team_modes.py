@@ -156,7 +156,7 @@ async def mode_b(fw, env) -> bool:
         "1) team(action='spawn', role='writer', task='等待指令') "
         "2) team(action='spawn', role='reviewer', task='等待指令')"
     )
-    await asyncio.sleep(3)
+    await asyncio.sleep(5)
     members = registry.list_members()
     non_lead = [m for m in members if m.role != "lead"]
     if len(non_lead) >= 2:
@@ -165,22 +165,46 @@ async def mode_b(fw, env) -> bool:
         fail(f"Only {len(non_lead)} teammates")
         errors.append("spawn")
 
-    # Step 2: Lead 广播
-    step(2, "Lead 广播消息给所有 teammate")
-    answer = await llm(fw,
+    # Step 2: Teammate-to-teammate 直接通信 (via mailbox API, not LLM)
+    step(2, "Teammate A → Teammate B 直接发送消息 (验证网状)")
+    if len(non_lead) >= 2:
+        from agent_framework.models.team import MailEvent, MailEventType
+        a_id = non_lead[0].agent_id
+        b_id = non_lead[1].agent_id
+        team_id = coordinator.team_id
+        # A sends to B directly
+        mailbox.send(MailEvent(
+            team_id=team_id, from_agent=a_id, to_agent=b_id,
+            event_type=MailEventType.BROADCAST_NOTICE,
+            payload={"message": "hey B, review my work"},
+        ))
+        # B reads inbox
+        b_inbox = mailbox.read_inbox(b_id)
+        a_msgs = [e for e in b_inbox if e.from_agent == a_id]
+        if a_msgs:
+            ok(f"B 收到 A 的直接消息: {a_msgs[0].payload.get('message', '')[:50]}")
+        else:
+            fail("B 未收到 A 的消息")
+            errors.append("mesh")
+    else:
+        fail("不够 teammate 验证网状")
+        errors.append("mesh")
+
+    # Step 3: Lead 广播 + teammate 收到
+    step(3, "Lead 广播 + 验证 teammate 收到")
+    await llm(fw,
         "使用 mail 工具广播通知: "
         "mail(action='broadcast', event_type='BROADCAST_NOTICE', "
         "payload={\"message\": \"项目启动，各就位\"})"
     )
-    if "broadcast" in answer.lower() or "广播" in answer or "成功" in answer:
-        ok("Broadcast 发送成功")
-    else:
-        info(f"回复: {answer[:150]}")
-
-    # Step 3: Lead 读取 inbox
-    step(3, "Lead 读取 inbox (观察交互)")
-    answer = await llm(fw, "调用 mail(action='read') 查看收件箱")
-    ok("Lead inbox 已读取")
+    # Verify at least one teammate received
+    if non_lead:
+        inbox = mailbox.read_inbox(non_lead[0].agent_id)
+        broadcast_msgs = [e for e in inbox if "各就位" in str(e.payload)]
+        if broadcast_msgs:
+            ok(f"{non_lead[0].agent_id} 收到广播")
+        else:
+            info(f"{non_lead[0].agent_id} inbox: {len(inbox)} msgs (广播可能已被前面消费)")
 
     return len(errors) == 0
 
@@ -191,39 +215,52 @@ async def mode_c(fw, env) -> bool:
     section("模式 C: 发布/订阅 — Topic 驱动")
     mailbox = env["mailbox"]
     registry = env["registry"]
+    coordinator = env["coordinator"]
     errors = []
 
-    # Step 1: Lead 订阅 topic
-    step(1, "Lead 订阅 findings.* topic")
-    answer = await llm(fw,
-        "调用 mail(action='subscribe', topic_pattern='findings.*') 订阅所有发现"
-    )
-    if "subscribe" in answer.lower() or "订阅" in answer:
-        ok("订阅成功")
-    else:
-        info(f"回复: {answer[:150]}")
+    members = registry.list_members()
+    non_lead = [m for m in members if m.role != "lead"]
+    lead_id = coordinator._lead_id
 
-    # Step 2: Lead 发布一条 finding
-    step(2, "Lead 发布 findings.security")
-    answer = await llm(fw,
-        "调用 mail(action='publish', topic='findings.security', "
-        "payload={\"vuln\": \"XSS\", \"severity\": \"high\"})"
-    )
-    if "publish" in answer.lower() or "发布" in answer:
-        ok("发布成功")
+    # Step 1: 用 mailbox API 让 teammate 订阅 (不依赖 LLM)
+    step(1, "Teammate 订阅 findings.* topic")
+    if non_lead:
+        subscriber_id = non_lead[0].agent_id
+        mailbox.subscribe(subscriber_id, "findings.*")
+        ok(f"{subscriber_id} 订阅了 findings.*")
     else:
-        info(f"回复: {answer[:150]}")
+        fail("无 teammate 可订阅")
+        errors.append("subscribe")
+        return False
+
+    # Step 2: Lead 发布 (用 mailbox API 确保精确控制)
+    step(2, "Lead 发布 findings.security")
+    sent = mailbox.publish("findings.security", {"vuln": "XSS", "severity": "high"}, lead_id, coordinator.team_id)
+    ok(f"发布成功, 投递到 {len(sent)} 个订阅者")
 
     # Step 3: 验证订阅者收到
-    step(3, "验证消息投递")
-    members = registry.list_members()
-    for m in members:
-        if m.role != "lead":
-            events = mailbox.read_inbox(m.agent_id)
-            if events:
-                ok(f"{m.agent_id} 收到 {len(events)} 条消息")
-            else:
-                info(f"{m.agent_id} inbox 为空 (可能未订阅)")
+    step(3, f"验证 {subscriber_id} 收到发布消息")
+    inbox = mailbox.read_inbox(subscriber_id)
+    security_msgs = [e for e in inbox if e.payload.get("vuln") == "XSS"]
+    if security_msgs:
+        ok(f"{subscriber_id} 收到 findings.security: vuln={security_msgs[0].payload.get('vuln')}")
+    else:
+        fail(f"{subscriber_id} 未收到 (inbox 有 {len(inbox)} 条其他消息)")
+        errors.append("delivery")
+
+    # Step 4: 验证未订阅者未收到
+    step(4, "验证未订阅者未收到")
+    if len(non_lead) > 1:
+        non_subscriber_id = non_lead[1].agent_id
+        inbox2 = mailbox.read_inbox(non_subscriber_id)
+        xss_msgs = [e for e in inbox2 if e.payload.get("vuln") == "XSS"]
+        if not xss_msgs:
+            ok(f"{non_subscriber_id} 未收到 (正确)")
+        else:
+            fail(f"{non_subscriber_id} 也收到了 (不应该)")
+            errors.append("leak")
+    else:
+        info("只有 1 个 teammate, 跳过未订阅者检查")
 
     return len(errors) == 0
 
@@ -234,44 +271,79 @@ async def mode_d(fw, env) -> bool:
     section("模式 D: 请求/响应 — Correlation 闭环")
     mailbox = env["mailbox"]
     registry = env["registry"]
+    coordinator = env["coordinator"]
     errors = []
 
-    # Step 1: Spawn teammate
-    step(1, "Spawn 一个 helper teammate")
-    answer = await llm(fw,
-        "team(action='spawn', role='helper', task='等待问题并回答')"
-    )
-    await asyncio.sleep(3)
+    members = registry.list_members()
+    non_lead = [m for m in members if m.role != "lead"]
+    lead_id = coordinator._lead_id
 
-    # Step 2: Lead 发送问题
-    step(2, "Lead 发送 QUESTION 给 helper")
-    answer = await llm(fw,
-        "使用 mail 发送问题: "
-        "mail(action='send', to='helper', event_type='QUESTION', "
-        "payload={\"request_id\": \"q_test\", \"question\": \"Python 的 GIL 是什么?\"})"
-    )
-    if "send" in answer.lower() or "发送" in answer or "event_id" in answer:
-        ok("问题已发送")
+    # Step 1: 确保有 teammate (复用已有的，或 spawn 新的)
+    step(1, "确保有可用 teammate")
+    if non_lead:
+        target_id = non_lead[0].agent_id
+        ok(f"使用现有 teammate: {target_id}")
     else:
-        info(f"回复: {answer[:150]}")
+        answer = await llm(fw, "team(action='spawn', role='helper', task='等待指令')")
+        await asyncio.sleep(5)
+        members = registry.list_members()
+        non_lead = [m for m in members if m.role != "lead"]
+        if non_lead:
+            target_id = non_lead[0].agent_id
+            ok(f"Spawned: {target_id}")
+        else:
+            fail("无法获取 teammate")
+            return False
 
-    # Step 3: Lead 读取回复
-    step(3, "Lead 读取回复 (等待 5s)")
-    await asyncio.sleep(5)
-    answer = await llm(fw,
-        "调用 mail(action='read') 查看是否收到回复"
-    )
-    if "read" in answer.lower() or "message" in answer.lower() or "收件" in answer:
-        ok("Inbox 已读取")
+    # Step 2: Lead 用 mailbox API 直接发 QUESTION 给 teammate (用真实 agent_id)
+    step(2, f"Lead → {target_id}: 发送 QUESTION")
+    from agent_framework.models.team import MailEvent, MailEventType
+    sent_event = mailbox.send(MailEvent(
+        team_id=coordinator.team_id,
+        from_agent=lead_id,
+        to_agent=target_id,
+        event_type=MailEventType.QUESTION,
+        request_id="q_mode_d",
+        payload={"request_id": "q_mode_d", "question": "什么是 GIL?"},
+    ))
+    ok(f"发送成功, event_id={sent_event.event_id}")
+
+    # Step 3: 验证 teammate 能收到
+    step(3, f"验证 {target_id} 收到 QUESTION")
+    inbox = mailbox.read_inbox(target_id)
+    questions = [e for e in inbox if e.event_type == MailEventType.QUESTION]
+    if questions:
+        ok(f"收到 QUESTION: {questions[0].payload.get('question', '')[:50]}")
     else:
-        info(f"回复: {answer[:150]}")
+        fail(f"未收到 QUESTION (inbox 有 {len(inbox)} 条其他消息)")
+        errors.append("delivery")
 
-    # Step 4: 验证 correlation
-    step(4, "验证状态一致性")
-    status = env["coordinator"].get_team_status()
-    info(f"团队成员: {status['member_count']}")
-    for m in status["members"]:
-        info(f"  {m['agent_id']} ({m['role']}) — {m['status']}")
+    # Step 4: Teammate reply (用 mailbox API)
+    step(4, f"{target_id} → Lead: reply")
+    if questions:
+        reply_evt = mailbox.reply(
+            questions[0].event_id,
+            {"answer": "GIL 是全局解释器锁"},
+            source=target_id,
+        )
+        ok(f"回复成功, correlation_id={reply_evt.correlation_id}")
+
+        # Step 5: Lead 收到回复
+        step(5, "Lead 收到回复 (correlation 验证)")
+        lead_inbox = mailbox.read_inbox(lead_id)
+        replies = [e for e in lead_inbox if e.correlation_id]
+        if replies:
+            ok(f"Lead 收到回复: {replies[0].payload.get('answer', '')[:50]}")
+            if replies[0].correlation_id == questions[0].event_id:
+                ok(f"Correlation 匹配: {replies[0].correlation_id}")
+            else:
+                fail(f"Correlation 不匹配: {replies[0].correlation_id} != {questions[0].event_id}")
+                errors.append("correlation")
+        else:
+            fail("Lead 未收到回复")
+            errors.append("reply")
+    else:
+        info("跳过 reply (无 QUESTION)")
 
     return len(errors) == 0
 
