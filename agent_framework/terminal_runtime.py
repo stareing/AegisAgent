@@ -1021,8 +1021,9 @@ async def _cmd_resume(
 async def _cmd_team_start(
     fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str,
 ) -> None:
-    if hasattr(state, "_team_coordinator") and state._team_coordinator is not None:
-        print(f"  {_yellow('Team 已启动')}: {state._team_coordinator.team_id}")
+    coord = _get_team_coordinator(fw, state)
+    if coord is not None:
+        print(f"  {_yellow('Team 已启动')}: {coord.team_id}")
         return
     team_name = args.strip() or "default_team"
     try:
@@ -1038,25 +1039,42 @@ async def _cmd_team_start(
         print(f"  {_red(f'Team 启动失败: {e}')}")
 
 
+def _get_team_coordinator(fw: AgentFramework, state: ReplState):
+    """Get team coordinator from state or executor (auto-init compatible)."""
+    coord = getattr(state, "_team_coordinator", None)
+    if coord is None and hasattr(fw, "_deps"):
+        coord = getattr(fw._deps.tool_executor, "_team_coordinator", None)
+    return coord
+
+
 @_register_cmd("team-status", "查看团队状态", category="团队")
 async def _cmd_team_status(
     fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str,
 ) -> None:
-    coord = getattr(state, "_team_coordinator", None)
+    coord = _get_team_coordinator(fw, state)
     if coord is None:
         print(f"  {_yellow('Team 未启动，使用 /team-start 启动')}")
         return
-    status = coord.get_team_status()
+    caller = getattr(fw._deps.tool_executor, "_current_spawn_id", "") if hasattr(fw, "_deps") else ""
+    status = coord.get_team_status(caller_id=caller)
     tid = status["team_id"]
     print(f"\n  {_bold(_yellow(f'Team: {tid}'))}")
-    print(f"    Lead: {status['lead']}")
-    print(f"    成员: {status['member_count']}")
-    for m in status["members"]:
-        role_color = _green if m["role"] == "lead" else _cyan
-        print(f"      {role_color(m['agent_id'])} ({m['role']}) — {m['status']}")
-    if status["pending_plans"]:
+    print(f"    Lead: {status['lead']} (you)")
+    # Available roles
+    roles = status.get("available_roles", [])
+    if roles:
+        print(f"    可用角色: {', '.join(r['role'] for r in roles)}")
+    # Active teammates
+    teammates = status.get("teammates", [])
+    if teammates:
+        print(f"    活跃成员: {len(teammates)}")
+        for m in teammates:
+            print(f"      {_cyan(m['agent_id'])} ({m['role']}) — {m['status']}")
+    else:
+        print(f"    活跃成员: 0 (使用 team(action='assign') 分配任务)")
+    if status.get("pending_plans"):
         print(f"    待审计划: {status['pending_plans']}")
-    if status["pending_shutdowns"]:
+    if status.get("pending_shutdowns"):
         print(f"    待关闭: {status['pending_shutdowns']}")
     print()
 
@@ -1086,7 +1104,7 @@ async def _cmd_team_identity(
 async def _cmd_team_inbox(
     fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str,
 ) -> None:
-    coord = getattr(state, "_team_coordinator", None)
+    coord = _get_team_coordinator(fw, state)
     if coord is None:
         print(f"  {_yellow('Team 未启动')}")
         return
