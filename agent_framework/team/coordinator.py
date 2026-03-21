@@ -323,6 +323,19 @@ class TeamCoordinator:
 
     # ── Task management ───────────────────────────────────────
 
+    def _resolve_member(self, identifier: str):
+        """Resolve a member by agent_id, role name, or role_<name> format."""
+        # Direct lookup by agent_id
+        member = self._registry.get(identifier)
+        if member:
+            return member
+        # Strip "role_" prefix if present
+        clean = identifier.replace("role_", "") if identifier.startswith("role_") else identifier
+        for m in self._registry.list_members():
+            if m.role == clean or m.role == identifier or m.agent_id == identifier:
+                return m
+        return None
+
     def assign_task(self, task_description: str, agent_id: str) -> dict:
         """Assign a task to a teammate. Sync wrapper around _assign_task_async.
 
@@ -338,12 +351,7 @@ class TeamCoordinator:
             pass  # No running loop — sync test, skip spawn
 
         from agent_framework.models.team import MailEvent, MailEventType
-        member = self._registry.get(agent_id)
-        if member is None:
-            for m in self._registry.list_members():
-                if m.role == agent_id:
-                    member = m
-                    break
+        member = self._resolve_member(agent_id)
         role = member.role if member else "teammate"
 
         self._mailbox.send(MailEvent(
@@ -366,15 +374,7 @@ class TeamCoordinator:
         """Async implementation: spawn real sub-agent to execute the task."""
         from agent_framework.models.team import MailEvent, MailEventType, TeamMemberStatus
 
-        # Find the member's role to get TEAM.md context
-        member = self._registry.get(agent_id)
-        if member is None:
-            # Try by role name
-            for m in self._registry.list_members():
-                if m.role == agent_id or m.agent_id == agent_id:
-                    member = m
-                    break
-
+        member = self._resolve_member(agent_id)
         role = member.role if member else "teammate"
         role_def = self._role_definitions.get(role, {})
         body = ""
