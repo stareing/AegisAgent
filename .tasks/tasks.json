@@ -1,71 +1,31 @@
 {
-  "next_id": 5,
+  "next_id": 3,
   "tasks": {
     "1": {
       "id": 1,
-      "subject": "并发测试工具需求梳理与功能设计",
-      "description": "明确工具功能边界，确定技术选型，设计核心流程：1. 支持自定义并发数、请求总数、请求地址、方法、头体配置；2. 性能指标统计逻辑；3. 输出格式设计",
-      "status": "pending",
+      "subject": "在demo目录开发网页版五子棋项目",
+      "description": "功能需求：1. 支持双人轮流落子，黑白棋子区分 2. 自动判定横竖斜四个方向五子连线胜负 3. 提供重新开始、悔棋功能按钮 4. 代码结构：分为index.html、style.css、script.js三个文件，存放路径为./demo/gobang/ 5. 界面简洁美观，交互流畅",
+      "status": "completed",
       "blockedBy": [],
-      "blocks": [
-        2
-      ],
-      "owner": "",
-      "activeForm": "",
-      "metadata": {},
-      "created_at": 1773922347.629758,
-      "updated_at": 1773922347.6297581
-    },
-    "2": {
-      "id": 2,
-      "subject": "并发测试工具代码实现",
-      "description": "使用Python实现工具核心功能，基于aiohttp实现异步并发请求，集成指标统计逻辑，支持配置参数输入",
-      "status": "pending",
-      "blockedBy": [
-        1
-      ],
-      "blocks": [
-        3,
-        4
-      ],
-      "owner": "",
-      "activeForm": "",
-      "metadata": {},
-      "created_at": 1773922347.6301477,
-      "updated_at": 1773922347.630148
-    },
-    "3": {
-      "id": 3,
-      "subject": "编写工具使用说明文档",
-      "description": "包含安装依赖、参数说明、使用示例、输出指标解释",
-      "status": "pending",
-      "blockedBy": [
-        2
-      ],
-      "blocks": [
-        4
-      ],
-      "owner": "",
-      "activeForm": "",
-      "metadata": {},
-      "created_at": 1773922347.6304643,
-      "updated_at": 1773922347.6304643
-    },
-    "4": {
-      "id": 4,
-      "subject": "工具功能验证",
-      "description": "测试工具各项功能是否正常，验证指标输出准确性，修复潜在问题",
-      "status": "pending",
-      "blockedBy": [
-        2,
-        3
-      ],
       "blocks": [],
       "owner": "",
       "activeForm": "",
       "metadata": {},
-      "created_at": 1773922347.6311777,
-      "updated_at": 1773922347.631178
+      "created_at": 1774079378.628987,
+      "updated_at": 1774081643.8903825
+    },
+    "2": {
+      "id": 2,
+      "subject": "开发五子棋小游戏到demo文件夹",
+      "description": "实现完整的网页版五子棋游戏，包含15x15棋盘渲染、黑白棋轮流落子、横竖斜胜负判断、重置游戏、悔棋等功能，所有文件存放在demo目录下",
+      "status": "completed",
+      "blockedBy": [],
+      "blocks": [],
+      "owner": "",
+      "activeForm": "",
+      "metadata": {},
+      "created_at": 1774079886.008773,
+      "updated_at": 1774079968.5024047
     }
   }
 }

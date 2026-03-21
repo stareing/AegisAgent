@@ -51,10 +51,10 @@ from agent_framework.memory.sqlite_store import SQLiteMemoryStore
 from agent_framework.models.agent import AgentRunResult, Skill
 from agent_framework.models.message import ContentPart, Message
 from agent_framework.models.session import SessionState
+from agent_framework.subagent.delegation import DelegationExecutor
 from agent_framework.tools.catalog import GlobalToolCatalog
 from agent_framework.tools.confirmation import (AutoApproveConfirmationHandler,
                                                 CLIConfirmationHandler)
-from agent_framework.subagent.delegation import DelegationExecutor
 from agent_framework.tools.executor import ToolExecutor
 from agent_framework.tools.registry import ToolRegistry
 
@@ -89,6 +89,7 @@ class AgentFramework:
         # This is NOT the run-scoped active skill — it's a UI convenience
         # that the interactive terminal uses between runs.
         self._interactive_active_skill: Any = None
+        self._run_dispatcher: Any = None
 
     def setup(
         self,
@@ -164,13 +165,21 @@ class AgentFramework:
             confirmation = CLIConfirmationHandler()
 
         # Interaction channel for long-term parent-child delegation (v3.1)
-        from agent_framework.subagent.interaction_channel import \
-            InMemoryInteractionChannel
         from agent_framework.subagent.hitl import QueueHITLHandler
-
-        self._interaction_channel = InMemoryInteractionChannel(
-            max_events_per_spawn=self.config.long_interaction.max_delegation_events_per_subagent,
+        from agent_framework.subagent.interaction_channel import (
+            InMemoryInteractionChannel, SQLiteInteractionChannel,
         )
+
+        li_cfg = self.config.long_interaction
+        if li_cfg.channel_backend == "sqlite":
+            self._interaction_channel = SQLiteInteractionChannel(
+                db_path=li_cfg.channel_db_path,
+                max_events_per_spawn=li_cfg.max_delegation_events_per_subagent,
+            )
+        else:
+            self._interaction_channel = InMemoryInteractionChannel(
+                max_events_per_spawn=li_cfg.max_delegation_events_per_subagent,
+            )
         self._hitl_handler = QueueHITLHandler(
             max_pending_per_run=self.config.long_interaction.max_pending_hitl_requests_per_run,
         )
@@ -284,9 +293,30 @@ class AgentFramework:
                 max_spawn_depth=self.config.subagent.max_spawn_depth,
                 live_agent_ttl_seconds=self.config.subagent.live_agent_ttl_seconds,
                 max_live_agents_per_run=self.config.subagent.max_live_agents_per_run,
+                dynamic_pool=self.config.subagent.dynamic_pool,
+                min_concurrent=self.config.subagent.min_concurrent,
+                max_concurrent_ceiling=self.config.subagent.max_concurrent_ceiling,
             )
             self._deps.sub_agent_runtime = sub_runtime
             delegation_executor._sub_agent_runtime = sub_runtime
+
+            # Wire checkpoint store for persistent state snapshots
+            try:
+                from agent_framework.subagent.checkpoint import SQLiteCheckpointStore
+                sub_runtime._checkpoint_store = SQLiteCheckpointStore()
+            except Exception:
+                pass  # Checkpoint is optional; degrades gracefully
+
+            # Wire stream sink: child events → tool executor queue → parent stream
+            def _child_stream_sink(spawn_id: str, event: Any) -> None:
+                from agent_framework.models.stream import StreamEvent, StreamEventType
+                wrapped = StreamEvent(
+                    type=StreamEventType.SUBAGENT_STREAM,
+                    data={"spawn_id": spawn_id, "event_type": event.type.value, **event.data},
+                )
+                tool_executor.enqueue_child_stream_event(wrapped)
+
+            sub_runtime._stream_sink = _child_stream_sink
         except Exception as e:
             logger.warning("subagent_runtime.init_failed", error=str(e))
 
@@ -324,6 +354,34 @@ class AgentFramework:
             self._interaction_channel
         )
 
+        # Discover and auto-initialize team from .agent-team/
+        self._discovered_teams: list[dict] = []
+        try:
+            import pathlib
+            from agent_framework.team.loader import discover_teams
+
+            team_dirs: list[pathlib.Path] = []
+            project_teams = pathlib.Path.cwd() / ".agent-team"
+            if project_teams.is_dir():
+                team_dirs.append(project_teams)
+            user_teams = pathlib.Path.home() / ".agent" / "teams"
+            if user_teams.is_dir():
+                team_dirs.append(user_teams)
+            if team_dirs:
+                self._discovered_teams = discover_teams(team_dirs)
+                if self._discovered_teams:
+                    logger.info(
+                        "teams.discovered",
+                        count=len(self._discovered_teams),
+                        names=[t["team_id"] for t in self._discovered_teams],
+                    )
+                    try:
+                        self._auto_init_team()
+                    except Exception as te:
+                        logger.warning("teams.auto_init_failed", error=str(te))
+        except Exception:
+            pass
+
         self._setup_done = True
 
         logger.info(
@@ -331,6 +389,320 @@ class AgentFramework:
             model=self.config.model.default_model_name,
             tools_count=len(self._registry.list_tools()),
         )
+
+    def _auto_init_team(self) -> None:
+        """Auto-initialize team from discovered .agent-team/ definitions."""
+        import asyncio
+        import uuid
+        from agent_framework.notification.bus import AgentBus
+        from agent_framework.notification.persistence import InMemoryBusPersistence
+        from agent_framework.team.registry import TeamRegistry
+        from agent_framework.team.plan_registry import PlanRegistry
+        from agent_framework.team.shutdown_registry import ShutdownRegistry
+        from agent_framework.team.mailbox import TeamMailbox
+        from agent_framework.team.coordinator import TeamCoordinator
+
+        team_id = f"team_{uuid.uuid4().hex[:8]}"
+        bus = AgentBus(persistence=InMemoryBusPersistence())
+        registry = TeamRegistry(team_id)
+        mailbox = TeamMailbox(bus, registry)
+
+        lead_id = self._agent.agent_id if self._agent else "lead"
+        runtime = getattr(self._deps, "sub_agent_runtime", None)
+
+        coordinator = TeamCoordinator(
+            team_id=team_id,
+            lead_agent_id=lead_id,
+            mailbox=mailbox,
+            team_registry=registry,
+            plan_registry=PlanRegistry(),
+            shutdown_registry=ShutdownRegistry(),
+            sub_agent_runtime=runtime,
+        )
+        coordinator.create_team("auto")
+
+        # Register discovered role definitions for tool whitelist
+        for role_def in self._discovered_teams:
+            role_name = role_def.get("team_id", "")
+            fm = role_def.get("frontmatter", {})
+            if role_name:
+                coordinator.register_role_definition(role_name, fm)
+
+        # Wire into tool executor
+        executor = self._deps.tool_executor
+        executor._team_coordinator = coordinator
+        executor._team_mailbox = mailbox
+        executor._current_agent_role = "lead"
+        executor._current_team_id = team_id
+        executor._current_spawn_id = lead_id
+
+        # Register discovered roles in registry (IDLE, ready for assign_task).
+        # No real sub-agents spawned — assign_task() spawns them on demand.
+        from datetime import datetime, timezone
+        from agent_framework.models.team import TeamMember, TeamMemberStatus
+        for role_def in self._discovered_teams:
+            role_name = role_def.get("team_id", "")
+            if role_name:
+                try:
+                    member = TeamMember(
+                        agent_id=f"role_{role_name}",
+                        team_id=team_id,
+                        role=role_name,
+                        status=TeamMemberStatus.IDLE,
+                        joined_at=datetime.now(timezone.utc),
+                        updated_at=datetime.now(timezone.utc),
+                    )
+                    registry.register(member)
+                except Exception:
+                    pass  # Duplicate role, skip
+        coordinator._discovered_teams_raw = self._discovered_teams
+
+        # Callback: when teammate completes, store structured notification.
+        # Main agent consumes via drain_team_notifications() or auto-notification turn.
+        from agent_framework.models.team import TeamNotification, TeamNotificationType
+        self._pending_team_notifications: list[TeamNotification] = []
+        self._team_coordinator = coordinator
+
+        async def _on_team_result(
+            role: str, status: str, summary: str,
+            agent_id: str, task: str, spawn_id: str = "",
+        ) -> None:
+            ntype = (TeamNotificationType.TASK_COMPLETED
+                     if status == "completed"
+                     else TeamNotificationType.TASK_FAILED)
+            notification = TeamNotification(
+                team_id=team_id,
+                agent_id=agent_id,
+                role=role,
+                notification_type=ntype,
+                status=status,
+                summary=summary,
+                task=task,
+                spawn_id=spawn_id,
+            )
+            self._pending_team_notifications.append(notification)
+            # Trigger auto-notification turn if dispatcher is available
+            if hasattr(self, "_run_dispatcher") and self._run_dispatcher is not None:
+                self._run_dispatcher.submit_team_notification()
+
+        coordinator._on_result_callback = _on_team_result
+
+        # Wire notification policy from config for event escalation
+        from agent_framework.team.notification_policy import TeamNotificationPolicy
+        team_cfg = self.config.team
+        coordinator._notification_policy = TeamNotificationPolicy.from_config({
+            "team_auto_notify_enabled": team_cfg.team_auto_notify_enabled,
+            "team_auto_notify_batch_window_ms": team_cfg.team_auto_notify_batch_window_ms,
+            "team_auto_notify_max_batch_size": team_cfg.team_auto_notify_max_batch_size,
+        })
+
+        async def _on_event_escalation(
+            role: str, event_type: str, summary: str,
+            agent_id: str, request_id: str = "",
+        ) -> None:
+            """Escalate non-task events (QUESTION, PLAN, BROADCAST) to main model."""
+            from agent_framework.models.team import TeamNotificationType
+            type_map = {
+                "QUESTION": TeamNotificationType.QUESTION,
+                "PLAN_SUBMISSION": TeamNotificationType.PLAN_SUBMISSION,
+                "BROADCAST_NOTICE": TeamNotificationType.BROADCAST,
+                "ERROR_NOTICE": TeamNotificationType.ERROR,
+            }
+            ntype = type_map.get(event_type, TeamNotificationType.BROADCAST)
+            notification = TeamNotification(
+                team_id=team_id,
+                agent_id=agent_id,
+                role=role,
+                notification_type=ntype,
+                status=event_type,
+                summary=summary,
+                request_id=request_id,
+            )
+            self._pending_team_notifications.append(notification)
+            if hasattr(self, "_run_dispatcher") and self._run_dispatcher is not None:
+                self._run_dispatcher.submit_team_notification()
+
+        coordinator._on_event_escalation = _on_event_escalation
+
+        # Auto-enable the dispatcher so background notification turns work
+        # from any entry point (API, script, REPL), not only terminal.
+        # Callers can override with setup_run_dispatcher(history_getter=...)
+        # to provide conversation context for richer summaries.
+        # Only start if an event loop is running (skip in sync tests).
+        try:
+            import asyncio
+            asyncio.get_running_loop()
+            self.setup_run_dispatcher()
+        except RuntimeError:
+            pass  # No event loop — sync test or static init; skip dispatcher
+        except Exception as exc:
+            logger.warning("teams.auto_dispatcher_failed", error=str(exc))
+
+        logger.info(
+            "teams.auto_initialized",
+            team_id=team_id, lead=lead_id,
+            roles=[t["team_id"] for t in self._discovered_teams],
+        )
+
+    def drain_team_notifications(self) -> list[dict]:
+        """Drain pending team notifications as dicts (for UI layers and backward compat).
+
+        Returns list of structured notification dicts. Transitions members
+        from RESULT_READY → NOTIFYING when notifications are consumed.
+        """
+        if not hasattr(self, "_pending_team_notifications"):
+            return []
+        notifications = list(self._pending_team_notifications)
+        self._pending_team_notifications.clear()
+
+        # Transition member states: RESULT_READY → NOTIFYING
+        coordinator = getattr(self, "_team_coordinator", None)
+        results = []
+        for n in notifications:
+            if coordinator is not None:
+                coordinator.mark_result_notifying(n.agent_id)
+            results.append({
+                "role": n.role,
+                "status": n.status,
+                "summary": n.summary,
+                "task": n.task,
+                "agent_id": n.agent_id,
+                "spawn_id": n.spawn_id,
+                "notification_type": n.notification_type.value,
+                "team_id": n.team_id,
+            })
+        return results
+
+    def peek_team_notifications(self) -> list[dict]:
+        """Peek at pending team notifications without consuming them."""
+        if not hasattr(self, "_pending_team_notifications"):
+            return []
+        return [
+            {
+                "role": n.role, "status": n.status, "summary": n.summary,
+                "task": n.task, "agent_id": n.agent_id,
+            }
+            for n in self._pending_team_notifications
+        ]
+
+    def has_pending_team_notifications(self) -> bool:
+        """Check if there are pending team notifications."""
+        if not hasattr(self, "_pending_team_notifications"):
+            return False
+        return len(self._pending_team_notifications) > 0
+
+    def mark_team_notifications_delivered(self, agent_ids: list[str] | None = None) -> None:
+        """Mark team notifications as delivered (NOTIFYING → IDLE).
+
+        Called after main model has consumed and summarized the results.
+        """
+        coordinator = getattr(self, "_team_coordinator", None)
+        if coordinator is None:
+            return
+        if agent_ids:
+            for aid in agent_ids:
+                coordinator.mark_result_delivered(aid)
+        else:
+            # Mark all NOTIFYING members as delivered
+            from agent_framework.models.team import TeamMemberStatus
+            registry = coordinator._registry
+            for m in registry.list_members():
+                if m.status == TeamMemberStatus.NOTIFYING:
+                    coordinator.mark_result_delivered(m.agent_id)
+
+    def setup_run_dispatcher(
+        self,
+        history_getter: Any = None,
+        max_notification_retries: int = 2,
+    ) -> None:
+        """Initialize the RunDispatcher for auto-notification turns.
+
+        Called by terminal/API after setup when auto-notification is desired.
+        The dispatcher serializes user turns AND team notification turns so
+        they never run concurrently within the same conversation.
+
+        Args:
+            history_getter: Callable that returns the current conversation
+                history as list[Message]. For REPL this is ``lambda: state.history``.
+                If None, notifications run without conversation context.
+            max_notification_retries: How many times to retry a failed
+                notification turn before giving up and falling back to
+                raw display. On final failure, notifications are pushed
+                to ``_team_summaries`` as raw text so the UI can still
+                show them (no silent data loss).
+        """
+        from agent_framework.agent.run_dispatcher import RunDispatcher
+
+        _get_history = history_getter or (lambda: [])
+        _max_retries = max_notification_retries
+
+        async def _run_notification_turn() -> None:
+            notifications = self.drain_team_notifications()
+            if not notifications:
+                return
+            agent_ids = [n["agent_id"] for n in notifications]
+            history = _get_history() if callable(_get_history) else []
+
+            last_error: Exception | None = None
+            for attempt in range(_max_retries):
+                try:
+                    result = await self._coordinator.run_background_notification_turn(
+                        agent=self._agent,
+                        deps=self._deps,
+                        notifications=notifications,
+                        conversation_history=list(history) if history else None,
+                    )
+                    if result and result.final_answer:
+                        if not hasattr(self, "_team_summaries"):
+                            self._team_summaries: list[str] = []
+                        self._team_summaries.append(result.final_answer)
+                    # Success — mark delivered
+                    self.mark_team_notifications_delivered(agent_ids)
+                    return
+                except Exception as exc:
+                    last_error = exc
+                    logger.warning(
+                        "dispatcher.notification_turn_failed",
+                        error=str(exc), attempt=attempt + 1,
+                    )
+
+            # All retries exhausted — fall back to raw summary so UI can show something
+            logger.error(
+                "dispatcher.notification_turn_exhausted",
+                error=str(last_error), agent_ids=agent_ids,
+            )
+            if not hasattr(self, "_team_summaries"):
+                self._team_summaries: list[str] = []
+            for n in notifications:
+                role = n.get("role", "unknown")
+                status = n.get("status", "unknown")
+                summary = n.get("summary", "")[:300]
+                self._team_summaries.append(
+                    f"[{role}] ({status}) {summary}"
+                )
+            # Now mark delivered — we've preserved the raw text
+            self.mark_team_notifications_delivered(agent_ids)
+
+        async def _run_user_turn(user_input: str, **kwargs: Any) -> Any:
+            # Use _run_inner to bypass dispatcher lock (we're already under it)
+            return await self._run_inner(user_input, **kwargs)
+
+        batch_window = self.config.team.team_auto_notify_batch_window_ms
+
+        self._run_dispatcher = RunDispatcher(
+            run_user_turn=_run_user_turn,
+            run_notification_turn=_run_notification_turn,
+            batch_window_ms=batch_window,
+        )
+        self._run_dispatcher.start()
+
+    def drain_team_summaries(self) -> list[str]:
+        """Drain auto-generated team summaries (produced by background notification turns)."""
+        if not hasattr(self, "_team_summaries"):
+            return []
+        summaries = list(self._team_summaries)
+        self._team_summaries.clear()
+        return summaries
 
     def _bind_config_policies(self, agent: Any) -> None:
         """Override agent's default policy methods with config-sourced values.
@@ -537,8 +909,15 @@ class AgentFramework:
         """Discover configured A2A agents and register their tools."""
         from agent_framework.protocols.a2a.a2a_client_adapter import \
             A2AClientAdapter
+        from agent_framework.protocols.a2a.a2a_discovery_cache import \
+            SQLiteA2ADiscoveryCache
 
-        self._a2a_adapter = A2AClientAdapter()
+        ttl = self.config.a2a.discovery_cache_ttl_seconds
+        self._a2a_discovery_cache = SQLiteA2ADiscoveryCache()
+        self._a2a_adapter = A2AClientAdapter(
+            discovery_cache=self._a2a_discovery_cache,
+            discovery_cache_ttl_seconds=ttl,
+        )
         if self._deps and self._deps.delegation_executor:
             self._deps.delegation_executor.set_a2a_adapter(self._a2a_adapter)
 
@@ -707,6 +1086,25 @@ class AgentFramework:
                     self._registry.register(entry)
         return count
 
+    async def _run_inner(
+        self,
+        task: str,
+        initial_session_messages: list[Message] | None = None,
+        user_id: str | None = None,
+        cancel_event: asyncio.Event | None = None,
+        content_parts: list[ContentPart] | None = None,
+    ) -> AgentRunResult:
+        """Internal run — always called under dispatcher lock when available."""
+        return await self._coordinator.run(
+            self._agent,
+            self._deps,
+            task,
+            initial_session_messages=initial_session_messages,
+            user_id=user_id,
+            cancel_event=cancel_event,
+            content_parts=content_parts,
+        )
+
     async def run(
         self,
         task: str,
@@ -716,6 +1114,9 @@ class AgentFramework:
         content_parts: list[ContentPart] | None = None,
     ) -> AgentRunResult:
         """Run the agent on a task.
+
+        Automatically serialized with background team notification turns
+        when a RunDispatcher is active, ensuring no concurrent runs.
 
         Args:
             task: The user input / task description (text portion).
@@ -731,13 +1132,21 @@ class AgentFramework:
         """
         if not self._setup_done:
             self.setup()
-        return await self._coordinator.run(
-            self._agent,
-            self._deps,
-            task,
-            initial_session_messages=initial_session_messages,
-            user_id=user_id,
-            cancel_event=cancel_event,
+
+        # Serialize with dispatcher if active (prevents concurrent runs with
+        # background notification turns from any entry point — API, script, etc.)
+        dispatcher = self._run_dispatcher
+        if dispatcher is not None:
+            async with dispatcher._lock:
+                return await self._run_inner(
+                    task, initial_session_messages=initial_session_messages,
+                    user_id=user_id, cancel_event=cancel_event,
+                    content_parts=content_parts,
+                )
+
+        return await self._run_inner(
+            task, initial_session_messages=initial_session_messages,
+            user_id=user_id, cancel_event=cancel_event,
             content_parts=content_parts,
         )
 
@@ -751,6 +1160,9 @@ class AgentFramework:
     ):
         """Stream agent execution, yielding StreamEvents in real-time.
 
+        Automatically serialized with background team notification turns
+        when a RunDispatcher is active, ensuring no concurrent runs.
+
         Usage:
             async for event in framework.run_stream("Hello"):
                 if event.type == StreamEventType.TOKEN:
@@ -760,16 +1172,26 @@ class AgentFramework:
         """
         if not self._setup_done:
             self.setup()
-        async for event in self._coordinator.run_stream(
-            self._agent,
-            self._deps,
-            task,
-            initial_session_messages=initial_session_messages,
-            user_id=user_id,
-            cancel_event=cancel_event,
-            content_parts=content_parts,
-        ):
-            yield event
+
+        # Serialize with dispatcher if active
+        dispatcher = self._run_dispatcher
+        if dispatcher is not None:
+            async with dispatcher._lock:
+                async for event in self._coordinator.run_stream(
+                    self._agent, self._deps, task,
+                    initial_session_messages=initial_session_messages,
+                    user_id=user_id, cancel_event=cancel_event,
+                    content_parts=content_parts,
+                ):
+                    yield event
+        else:
+            async for event in self._coordinator.run_stream(
+                self._agent, self._deps, task,
+                initial_session_messages=initial_session_messages,
+                user_id=user_id, cancel_event=cancel_event,
+                content_parts=content_parts,
+            ):
+                yield event
 
     def begin_conversation(self, conversation_id: str = "") -> None:
         """Start a conversation-level stateful session.
@@ -884,6 +1306,8 @@ class AgentFramework:
             await self._mcp_manager.disconnect_all()
         if self._memory_store:
             self._memory_store.close()
+        if getattr(self, "_a2a_discovery_cache", None) is not None:
+            self._a2a_discovery_cache.close()
         from agent_framework.infra.telemetry import get_tracing_manager
         get_tracing_manager().shutdown()
         logger.info("framework.shutdown")

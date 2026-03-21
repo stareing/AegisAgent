@@ -16,7 +16,7 @@ import time
 import pytest
 
 from agent_framework.notification.background import (BackgroundNotification,
-                                              BackgroundNotifier)
+                                                     BackgroundNotifier)
 
 # ══════════════════════════════════════════════════════════════════
 # 1. Notification formatting

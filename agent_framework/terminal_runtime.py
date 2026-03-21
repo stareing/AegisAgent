@@ -224,6 +224,7 @@ def build_argument_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--mock", action="store_true", help="强制使用 Mock 模型")
     parser.add_argument("--auto-approve", dest="auto_approve", action="store_true", help="自动批准工具调用")
     parser.add_argument("--no-approve", dest="auto_approve", action="store_false", help="工具调用需要手动确认")
+    parser.add_argument("--team", action="store_true", help="启动 Agent Team 模式")
     parser.set_defaults(auto_approve=True)
     return parser
 
@@ -942,6 +943,191 @@ async def _cmd_memory_toggle(fw: AgentFramework, mock: InteractiveMockModel | No
         print(f"  {_red('用法:')} /memory-toggle on|off")
 
 
+@_register_cmd("checkpoints", "列出可恢复的快照", usage="/checkpoints [spawn_id]", category="会话")
+async def _cmd_checkpoints(
+    fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str,
+) -> None:
+    runtime = getattr(fw._deps, "sub_agent_runtime", None) if hasattr(fw, "_deps") else None
+    store = getattr(runtime, "_checkpoint_store", None) if runtime else None
+    if store is None:
+        print(f"  {_yellow('快照未启用 (无 checkpoint store)')}")
+        return
+
+    spawn_id = args.strip() or f"repl_{state.conversation_id[:12]}"
+    checkpoints = store.list_checkpoints(spawn_id)
+    if not checkpoints:
+        print(f"  {_dim(f'暂无快照 (spawn: {spawn_id})')}")
+        return
+
+    print(f"\n  {_bold(_yellow(f'快照列表 ({spawn_id}):'))}")
+    for ckpt in checkpoints[:10]:
+        cid = ckpt["checkpoint_id"]
+        idx = ckpt["iteration_index"]
+        summary = ckpt["summary"][:60]
+        ts = ckpt["created_at"][:19]
+        print(f"    {_cyan(cid)}  iter={idx}  {ts}  {_dim(summary)}")
+    print()
+
+
+@_register_cmd("resume", "从快照恢复对话", usage="/resume [checkpoint_id]", category="会话")
+async def _cmd_resume(
+    fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str,
+) -> None:
+    runtime = getattr(fw._deps, "sub_agent_runtime", None) if hasattr(fw, "_deps") else None
+    store = getattr(runtime, "_checkpoint_store", None) if runtime else None
+    if store is None:
+        print(f"  {_yellow('快照未启用 (无 checkpoint store)')}")
+        return
+
+    checkpoint_id = args.strip() or None
+    spawn_id = f"repl_{state.conversation_id[:12]}"
+
+    # Load checkpoint
+    if checkpoint_id:
+        ckpt = store.load_by_id(checkpoint_id)
+    else:
+        ckpt = store.load_latest(spawn_id)
+
+    if ckpt is None:
+        print(f"  {_red('未找到快照')} {_dim(f'(spawn: {spawn_id})')}")
+        print(f"  {_dim('使用 /checkpoints 查看可用快照')}")
+        return
+
+    # Restore session messages into REPL state
+    restored_session = ckpt.restore_session_state()
+    restored_msgs = restored_session.get_messages()
+
+    state.history.clear()
+    state.history.extend(restored_msgs)
+    state.turn_count = ckpt.iteration_index
+
+    print(f"  {_green('已恢复快照:')}")
+    print(f"    ID:    {_cyan(ckpt.checkpoint_id)}")
+    print(f"    轮次:  {ckpt.iteration_index}")
+    print(f"    消息:  {len(restored_msgs)} 条")
+    print(f"    摘要:  {ckpt.summary[:80]}")
+    print()
+
+    # Show last few messages as context
+    tail = restored_msgs[-4:] if len(restored_msgs) > 4 else restored_msgs
+    for msg in tail:
+        role_tag = _green("You") if msg.role == "user" else _cyan("Agent")
+        content_preview = (msg.content or "")[:100]
+        print(f"    {_dim(role_tag + ':')} {content_preview}")
+    print(f"\n  {_dim('对话已恢复，继续输入即可。')}")
+
+
+@_register_cmd("team-start", "启动 Agent Team 模式", usage="/team-start [team_name]", category="团队")
+async def _cmd_team_start(
+    fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str,
+) -> None:
+    coord = _get_team_coordinator(fw, state)
+    if coord is not None:
+        print(f"  {_yellow('Team 已启动')}: {coord.team_id}")
+        return
+    team_name = args.strip() or "default_team"
+    try:
+        team_env = _setup_team(fw, team_name)
+        state._team_coordinator = team_env["coordinator"]
+        state._team_mailbox = team_env["mailbox"]
+        state._team_registry = team_env["registry"]
+        print(f"  {_green('Team 已启动')}: {team_name}")
+        print(f"    team_id: {state._team_coordinator.team_id}")
+        print(f"    工具: team(action=...) + mail(action=...)")
+        print(f"    示例: team(action='spawn', role='coder', task='fix bug')")
+    except Exception as e:
+        print(f"  {_red(f'Team 启动失败: {e}')}")
+
+
+def _get_team_coordinator(fw: AgentFramework, state: ReplState):
+    """Get team coordinator from state or executor (auto-init compatible)."""
+    coord = getattr(state, "_team_coordinator", None)
+    if coord is None and hasattr(fw, "_deps"):
+        coord = getattr(fw._deps.tool_executor, "_team_coordinator", None)
+    return coord
+
+
+@_register_cmd("team-status", "查看团队状态", category="团队")
+async def _cmd_team_status(
+    fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str,
+) -> None:
+    coord = _get_team_coordinator(fw, state)
+    if coord is None:
+        print(f"  {_yellow('Team 未启动，使用 /team-start 启动')}")
+        return
+    caller = getattr(fw._deps.tool_executor, "_current_spawn_id", "") if hasattr(fw, "_deps") else ""
+    status = coord.get_team_status(caller_id=caller)
+    tid = status["team_id"]
+    print(f"\n  {_bold(_yellow(f'Team: {tid}'))}")
+    print(f"    Lead: {status['lead']} (you)")
+    # Available roles
+    roles = status.get("available_roles", [])
+    if roles:
+        print(f"    可用角色: {', '.join(r['role'] for r in roles)}")
+    # Active teammates
+    teammates = status.get("teammates", [])
+    if teammates:
+        print(f"    活跃成员: {len(teammates)}")
+        for m in teammates:
+            print(f"      {_cyan(m['agent_id'])} ({m['role']}) — {m['status']}")
+    else:
+        print(f"    活跃成员: 0 (使用 team(action='assign') 分配任务)")
+    if status.get("pending_plans"):
+        print(f"    待审计划: {status['pending_plans']}")
+    if status.get("pending_shutdowns"):
+        print(f"    待关闭: {status['pending_shutdowns']}")
+    print()
+
+
+@_register_cmd("team-identity", "开关 team 身份显示", usage="/team-identity on|off", category="团队")
+async def _cmd_team_identity(
+    fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str,
+) -> None:
+    executor = getattr(fw._deps, "tool_executor", None) if hasattr(fw, "_deps") else None
+    if executor is None:
+        print(f"  {_yellow('框架未初始化')}")
+        return
+    val = args.strip().lower()
+    if val in ("on", "true", "1"):
+        executor._team_show_identity = True
+        print(f"  {_green('team 身份显示: 已开启')} (工具返回会包含 _your_id/_your_role)")
+    elif val in ("off", "false", "0"):
+        executor._team_show_identity = False
+        print(f"  {_yellow('team 身份显示: 已关闭')} (默认模式)")
+    else:
+        current = getattr(executor, "_team_show_identity", False)
+        print(f"  当前: {'开启' if current else '关闭 (默认)'}")
+        print(f"  用法: /team-identity on|off")
+
+
+@_register_cmd("team-inbox", "查看 Lead 收件箱", category="团队")
+async def _cmd_team_inbox(
+    fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str,
+) -> None:
+    coord = _get_team_coordinator(fw, state)
+    if coord is None:
+        print(f"  {_yellow('Team 未启动')}")
+        return
+    mailbox = getattr(coord, "_mailbox", None)
+    lead_id = getattr(coord, "_lead_id", "")
+    if mailbox is None or not lead_id:
+        print(f"  {_yellow('Team 收件箱不可用')}")
+        return
+    events = mailbox.peek_inbox(lead_id)
+    if not events:
+        print(f"  {_dim('收件箱为空')}")
+        return
+    print(f"\n  {_bold(_yellow(f'收件箱中有 {len(events)} 条待处理事件:'))}")
+    for evt in events:
+        payload = dict(evt.payload)
+        if evt.request_id:
+            payload["request_id"] = evt.request_id
+        if evt.correlation_id:
+            payload["correlation_id"] = evt.correlation_id
+        print(f"    [{evt.event_type.value.lower()}] from={evt.from_agent} {_dim(str(payload))}")
+    print()
+
+
 @_register_cmd("demo", "运行内置演示场景", usage="/demo [weather|skill]", category="演示")
 async def _cmd_demo(fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str) -> None:
     demos = {
@@ -1397,6 +1583,38 @@ async def _execute_with_progressive(
             else:
                 print(f"  {_dim(f'[{tag} {idx}/{total}]')} {status}: {display}")
 
+        elif event.type == StreamEventType.SUBAGENT_STREAM:
+            inner = event.data.get("event_type", "")
+            sid = event.data.get("spawn_id", "")[:8]
+            if inner == "token":
+                text = event.data.get("text", "")
+                # Track newlines for prefix insertion
+                if not hasattr(state, "_subagent_at_newline"):
+                    state._subagent_at_newline = True
+                if state._subagent_at_newline:
+                    print(f"  {_dim('│')} ", end="", flush=True)
+                    state._subagent_at_newline = False
+                for ch in text:
+                    if ch == "\n":
+                        print(flush=True)
+                        print(f"  {_dim('│')} ", end="", flush=True)
+                    else:
+                        print(ch, end="", flush=True)
+            elif inner == "tool_call_start":
+                tool_name = event.data.get("tool_name", "?")
+                print(f"\n  {_dim('│')} {_dim('[tool]')} {_cyan(tool_name)}", end="", flush=True)
+                state._subagent_at_newline = False
+            elif inner == "tool_call_done":
+                success = event.data.get("success", False)
+                marker = _green(" [ok]") if success else _red(" [fail]")
+                print(marker, flush=True)
+                state._subagent_at_newline = True
+            elif inner == "iteration_start":
+                idx = event.data.get("iteration_index", 0)
+                if idx > 0:
+                    print(f"\n  {_dim('│')} {_dim(f'--- iter #{idx + 1}')}")
+                    state._subagent_at_newline = True
+
         elif event.type == StreamEventType.DONE:
             result = event.data.get("result")
             if result and result.success:
@@ -1422,6 +1640,104 @@ async def _execute_with_progressive(
     return format_result(result, include_trace=True)
 
 
+def _setup_team(fw: AgentFramework, team_name: str) -> dict:
+    """Initialize Agent Team components and wire into framework."""
+    import uuid
+    from agent_framework.notification.bus import AgentBus
+    from agent_framework.notification.persistence import InMemoryBusPersistence, SQLiteBusPersistence
+    from agent_framework.team.registry import TeamRegistry
+    from agent_framework.team.plan_registry import PlanRegistry
+    from agent_framework.team.shutdown_registry import ShutdownRegistry
+    from agent_framework.team.mailbox import TeamMailbox
+    from agent_framework.team.coordinator import TeamCoordinator
+
+    team_id = f"team_{uuid.uuid4().hex[:8]}"
+
+    # Choose bus backend
+    team_cfg = fw.config.team
+    if team_cfg.bus_backend == "sqlite":
+        persistence = SQLiteBusPersistence(db_path=team_cfg.bus_db_path)
+    else:
+        persistence = InMemoryBusPersistence()
+
+    bus = AgentBus(persistence=persistence)
+    registry = TeamRegistry(team_id)
+    plan_reg = PlanRegistry()
+    shutdown_reg = ShutdownRegistry()
+    mailbox = TeamMailbox(bus, registry)
+
+    lead_id = getattr(fw._agent, "agent_id", "lead") if hasattr(fw, "_agent") else "lead"
+    runtime = getattr(fw._deps, "sub_agent_runtime", None) if hasattr(fw, "_deps") else None
+
+    coordinator = TeamCoordinator(
+        team_id=team_id,
+        lead_agent_id=lead_id,
+        mailbox=mailbox,
+        team_registry=registry,
+        plan_registry=plan_reg,
+        shutdown_registry=shutdown_reg,
+        sub_agent_runtime=runtime,
+    )
+    coordinator.create_team(team_name)
+
+    # Wire team tools into tool executor
+    if hasattr(fw, "_deps") and hasattr(fw._deps, "tool_executor"):
+        executor = fw._deps.tool_executor
+        executor._team_coordinator = coordinator
+        executor._team_mailbox = mailbox
+        executor._current_agent_role = "lead"
+        executor._current_team_id = team_id
+        executor._current_spawn_id = lead_id
+
+    return {
+        "bus": bus,
+        "registry": registry,
+        "plan_registry": plan_reg,
+        "shutdown_registry": shutdown_reg,
+        "mailbox": mailbox,
+        "coordinator": coordinator,
+    }
+
+
+def _auto_checkpoint(fw: AgentFramework, state: ReplState, user_input: str) -> None:
+    """Save a checkpoint after each terminal user interaction.
+
+    Only triggers at real user input boundaries. Silent on failure —
+    checkpointing is optional and must not interrupt the REPL.
+    """
+    try:
+        runtime = getattr(fw._deps, "sub_agent_runtime", None) if hasattr(fw, "_deps") else None
+        if runtime is None or getattr(runtime, "_checkpoint_store", None) is None:
+            return
+
+        from agent_framework.models.agent import AgentState
+        from agent_framework.models.session import SessionState
+
+        # Build lightweight state snapshot from REPL history
+        session = SessionState(
+            session_id=state.conversation_id,
+            run_id=f"repl_turn_{state.turn_count}",
+        )
+        for msg in state.history:
+            session.append_message(msg)
+
+        agent_state = AgentState(
+            run_id=session.run_id,
+            task=user_input,
+            iteration_count=state.turn_count,
+        )
+
+        runtime._checkpoint_store.save(
+            spawn_id=f"repl_{state.conversation_id[:12]}",
+            agent_state=agent_state,
+            session_state=session,
+            summary=f"Turn {state.turn_count}: {user_input[:80]}",
+            trigger="user_input",
+        )
+    except Exception:
+        pass  # Checkpoint failure must not break REPL
+
+
 async def run_classic_repl(fw: AgentFramework, mock_model: InteractiveMockModel | None) -> None:
     import uuid
     from pathlib import Path
@@ -1445,9 +1761,55 @@ async def run_classic_repl(fw: AgentFramework, mock_model: InteractiveMockModel 
             print()
     else:
         state.conversation_id = str(uuid.uuid4())
+    # Background display loop — shows team summaries from framework dispatcher.
+    # Terminal only displays; all business logic (notification turns) is in framework core.
+    _team_display_task = None
+
+    async def _display_team_output():
+        """Display team results: auto-summaries from dispatcher + raw notifications as fallback."""
+        while True:
+            await asyncio.sleep(2)
+            try:
+                # Display auto-generated summaries from background notification turns
+                summaries = fw.drain_team_summaries()
+                for summary in summaries:
+                    print(f"\n  {_yellow('📨 Team 汇总:')}")
+                    print(f"    {summary[:300]}")
+                    print(f"{_bold(_green('> '))}", end="", flush=True)
+
+                # Fallback: if no dispatcher, show raw notifications
+                if not hasattr(fw, "_run_dispatcher") or fw._run_dispatcher is None:
+                    notifications = fw.drain_team_notifications()
+                    if not notifications:
+                        continue
+                    print(f"\n  {_yellow('📨 Team 任务完成:')}")
+                    for n in notifications:
+                        status_icon = _green("✓") if n["status"] == "completed" else _red("✗")
+                        print(f"    {status_icon} {_cyan(n['role'])}: {n['summary'][:150]}")
+                    print(f"{_bold(_green('> '))}", end="", flush=True)
+            except Exception:
+                pass
+
+    _team_display_task = asyncio.create_task(_display_team_output())
+
+    # Upgrade dispatcher with conversation history context.
+    # The framework auto-creates a basic dispatcher in _auto_init_team(),
+    # but the terminal can enhance it with ReplState history for richer summaries.
+    _has_dispatcher = False
+    try:
+        if fw._run_dispatcher is not None:
+            # Stop the auto-created dispatcher and replace with one that has history
+            fw._run_dispatcher.stop()
+        fw.setup_run_dispatcher(history_getter=lambda: state.history)
+        _has_dispatcher = True
+    except Exception:
+        # Check if auto-created dispatcher exists
+        _has_dispatcher = fw._run_dispatcher is not None
+
     while True:
         try:
-            user_input = input(f"{_bold(_green('> '))}").strip()
+            user_input = await asyncio.to_thread(input, f"{_bold(_green('> '))}")
+            user_input = user_input.strip()
         except (EOFError, KeyboardInterrupt):
             print(f"\n{_dim('再见!')}")
             break
@@ -1462,13 +1824,23 @@ async def run_classic_repl(fw: AgentFramework, mock_model: InteractiveMockModel 
                 break
             continue
         try:
+            # fw.run_stream() acquires dispatcher lock internally,
+            # so user turns are automatically serialized with background
+            # notification turns — no manual lock needed here.
             output = await _execute_with_progressive(fw, mock_model, state, user_input)
             print(output)
+            _auto_checkpoint(fw, state, user_input)
         except Exception as exc:
             print(f"\n  {_red('运行错误:')}")
             print(f"  {exc}")
             if os.environ.get("DEBUG"):
                 traceback.print_exc()
+
+    if _team_display_task:
+        _team_display_task.cancel()
+    # Stop dispatcher if running
+    if hasattr(fw, "_run_dispatcher") and fw._run_dispatcher is not None:
+        fw._run_dispatcher.stop()
     # 退出时持久化会话历史
     if fw._memory_store:
         state.save_to_db(fw._memory_store, project_id)

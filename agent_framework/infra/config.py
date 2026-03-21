@@ -97,6 +97,9 @@ class LongInteractionConfig(BaseModel):
     max_delegation_events_per_subagent: int = 200
     max_interactive_rounds_per_subagent: int = 20
     delegation_event_summary_limit: int = 10
+    # Persistent channel: "memory" (default, in-memory) or "sqlite" (crash-recoverable)
+    channel_backend: str = "memory"
+    channel_db_path: str = "data/interaction_events.db"
 
 
 class SubAgentConfig(BaseModel):
@@ -143,6 +146,10 @@ class SubAgentConfig(BaseModel):
     collection_poll_interval_ms: int = 500
     live_agent_ttl_seconds: int = 300  # LONG_LIVED agent IDLE timeout before auto-cleanup
     max_live_agents_per_run: int = 3   # Max LONG_LIVED agents alive simultaneously
+    # Dynamic pool auto-scaling (replaces fixed semaphore when enabled)
+    dynamic_pool: bool = False
+    min_concurrent: int = 1
+    max_concurrent_ceiling: int = 10
 
 
 class SkillConfig(BaseModel):
@@ -169,6 +176,32 @@ class MCPConfig(BaseModel):
 
 class A2AConfig(BaseModel):
     known_agents: list[dict] = Field(default_factory=list)
+    discovery_cache_ttl_seconds: int = 3600
+
+
+class TeammateConfig(BaseModel):
+    """Configuration for a single teammate in a team."""
+    role: str = "teammate"
+    skill_id: str | None = None
+    system_prompt_addon: str = ""
+    max_iterations: int = 10
+
+
+class TeamConfig(BaseModel):
+    """Configuration for Agent Team collaboration."""
+    enabled: bool = False
+    name: str = ""
+    claim_policy: str = "SELF_CLAIM_WITH_APPROVAL"
+    max_teammates: int = 5
+    shutdown_timeout_ms: int = 30000
+    plan_approval_required_risk_levels: list[str] = Field(default_factory=lambda: ["medium", "high"])
+    bus_backend: str = "memory"
+    bus_db_path: str = "data/agent_bus.db"
+    teammates: list[TeammateConfig] = Field(default_factory=list)
+    # Notification policy for auto-escalation to main model
+    team_auto_notify_enabled: bool = True
+    team_auto_notify_batch_window_ms: int = 500
+    team_auto_notify_max_batch_size: int = 10
 
 
 class LoggingConfig(BaseModel):
@@ -224,6 +257,7 @@ class FrameworkConfig(BaseSettings):
     skills: SkillsConfig = Field(default_factory=SkillsConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     a2a: A2AConfig = Field(default_factory=A2AConfig)
+    team: TeamConfig = Field(default_factory=lambda: TeamConfig())
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     tracing: TracingConfig = Field(default_factory=TracingConfig)
 

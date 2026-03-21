@@ -33,6 +33,9 @@ class StreamEventType(str, Enum):
     PROGRESSIVE_START = "progressive_start"
     PROGRESSIVE_DONE = "progressive_done"
     PROGRESSIVE_RESPONSE = "progressive_response"
+    # Real-time sub-agent stream event — forwarded child TOKEN/TOOL/ITERATION
+    # data: {"spawn_id": str, "label": str, "event_type": str, ...inner data}
+    SUBAGENT_STREAM = "subagent_stream"
     # Backward-compatible aliases — existing consumers that check SUBAGENT_* still work
     SUBAGENT_START = "progressive_start"
     SUBAGENT_DONE = "progressive_done"
@@ -54,6 +57,7 @@ class StreamEvent(BaseModel):
             PROGRESSIVE_START:    {"tool_call_id": str, "tool_name": str, "description": str, "index": int, "total": int}
             PROGRESSIVE_DONE:     {"tool_call_id": str, "tool_name": str, "description": str, "success": bool, "output": str, "index": int, "total": int}
             PROGRESSIVE_RESPONSE: {"text": str, "index": int, "total": int}
+            SUBAGENT_STREAM:     {"spawn_id": str, "label": str, "event_type": str, ...inner_data}
     """
 
     type: StreamEventType

@@ -333,6 +333,57 @@ class DelegationExecutor:
     # Resume (v3.1 long-term interaction)
     # ------------------------------------------------------------------
 
+    def save_checkpoint(
+        self,
+        spawn_id: str,
+        agent_state: Any,
+        session_state: Any,
+        summary: str = "",
+    ) -> str | None:
+        """Save a checkpoint at a user interaction boundary.
+
+        Only call this when a real user has provided input (HITL response,
+        send_message, etc.). Automated saves are rejected by the store.
+        """
+        if self._sub_agent_runtime is None:
+            return None
+        return self._sub_agent_runtime.save_checkpoint(
+            spawn_id, agent_state, session_state,
+            summary=summary, trigger="user_input",
+        )
+
+    async def resume_from_checkpoint(
+        self,
+        spawn_id: str,
+        parent_agent: Any,
+        checkpoint_id: str | None = None,
+    ) -> SubAgentResult:
+        """Resume a sub-agent from a stored checkpoint.
+
+        Restores the exact AgentState + SessionState from the checkpoint
+        and continues execution from that point.
+        """
+        if self._sub_agent_runtime is None:
+            return SubAgentResult(
+                spawn_id=spawn_id, success=False,
+                error="SubAgentRuntime not configured",
+            )
+
+        logger.info(
+            "delegation.resume_from_checkpoint",
+            spawn_id=spawn_id,
+            checkpoint_id=checkpoint_id or "latest",
+        )
+
+        self._emit_event(spawn_id, "", DelegationEventType.RESUMED, {
+            "source": "checkpoint",
+            "checkpoint_id": checkpoint_id or "latest",
+        })
+
+        return await self._sub_agent_runtime.resume_from_checkpoint(
+            spawn_id, parent_agent, checkpoint_id=checkpoint_id,
+        )
+
     async def resume_subagent(
         self,
         spawn_id: str,

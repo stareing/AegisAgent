@@ -476,9 +476,16 @@ class AgentLoop:
         if model_response.tool_calls:
             progressive = getattr(effective_config, "progressive_tool_results", False)
             total_tools = len(model_response.tool_calls)
+            # Enable progressive mode when configured AND either:
+            # - Multiple tools (original batch streaming)
+            # - Single spawn_agent/send_message (sub-agent output streaming)
+            has_delegation_tool = any(
+                tc.function_name in ("spawn_agent", "send_message")
+                for tc in model_response.tool_calls
+            )
             is_progressive = (
                 progressive
-                and total_tools > 1
+                and (total_tools > 1 or has_delegation_tool)
                 and hasattr(type(loop_deps.tool_executor), "batch_execute_progressive")
             )
 
@@ -503,10 +510,17 @@ class AgentLoop:
 
             if is_progressive:
                 # Progressive: yield events AS EACH TOOL COMPLETES — true real-time
+                # Also forwards SUBAGENT_STREAM events from child sub-agents.
                 completed = 0
-                async for result, meta in self._dispatch_progressive_stream(
+                async for item in self._dispatch_progressive_stream(
                     agent, loop_deps.tool_executor, model_response.tool_calls, agent_state,
                 ):
+                    # StreamEvent from child sub-agent — forward directly
+                    if isinstance(item, StreamEvent):
+                        yield item
+                        continue
+
+                    result, meta = item
                     completed += 1
                     tool_results.append(result)
                     tool_metas.append(meta)
@@ -1052,7 +1066,14 @@ class AgentLoop:
                 )
 
         if approved:
-            async for result, meta in tool_executor.batch_execute_progressive(approved):
+            from agent_framework.models.stream import StreamEvent as _SE
+
+            async for item in tool_executor.batch_execute_progressive(approved):
+                # StreamEvent from child sub-agent — forward to caller
+                if isinstance(item, _SE):
+                    yield item
+                    continue
+                result, meta = item
                 await agent.on_tool_call_completed(result)
                 logger.info(
                     "tool.progressive_done",

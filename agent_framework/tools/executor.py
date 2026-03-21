@@ -33,6 +33,20 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+# Maximum number of events buffered in the child stream queue before
+# backpressure kicks in.  TOKEN events (high volume, low priority) are
+# dropped silently; all other event types force-drain the oldest items
+# to make room.
+_STREAM_QUEUE_MAX_SIZE: int = 1000
+
+# Event types that are considered low-priority and can be dropped when the
+# queue is full, rather than evicting existing items.
+_LOW_PRIORITY_EVENT_TYPES: frozenset[str] = frozenset({"token", "subagent_stream"})
+
+# Number of oldest items to drain when a high-priority event must be enqueued
+# into a full queue.
+_BACKPRESSURE_DRAIN_COUNT: int = 50
+
 
 class ToolExecutor:
     """Executes tool calls with validation, routing, and error handling.
@@ -93,6 +107,13 @@ class ToolExecutor:
         self._collection_poll_interval_ms: int = collection_poll_interval_ms
         # Lead collector for multi-agent result collection strategies
         self._lead_collector: Any = None  # LeadCollector, created on first async spawn
+        # Queue for real-time sub-agent stream events (TOKEN, TOOL_CALL, etc.)
+        # Filled by SubAgentRuntime._stream_sink, drained by batch_execute_progressive.
+        # Bounded to _STREAM_QUEUE_MAX_SIZE to prevent unbounded memory growth;
+        # backpressure logic lives in enqueue_child_stream_event().
+        self._child_stream_queue: asyncio.Queue = asyncio.Queue(
+            maxsize=_STREAM_QUEUE_MAX_SIZE
+        )
 
     @property
     def todo_service(self) -> TaskService:
@@ -114,6 +135,66 @@ class ToolExecutor:
     def set_current_session_messages(self, messages: list[Message]) -> None:
         """Called by RunCoordinator before each iteration for spawn seed building."""
         self._current_session_messages = list(messages or [])
+
+    # ------------------------------------------------------------------
+    # Backpressure-aware child stream enqueue
+    # ------------------------------------------------------------------
+
+    def enqueue_child_stream_event(self, event: Any) -> None:
+        """Put a StreamEvent into the child stream queue with backpressure.
+
+        Policy:
+        - If the queue has room, enqueue unconditionally.
+        - If full and the event carries a low-priority event_type (e.g. TOKEN),
+          drop it silently and log at debug level.
+        - If full and the event is high-priority (TOOL_CALL_START, TOOL_CALL_DONE,
+          ITERATION_START, etc.), drain the oldest items to make room.
+        """
+        if not self._child_stream_queue.full():
+            self._child_stream_queue.put_nowait(event)
+            return
+
+        # Determine the inner event_type carried in the wrapper
+        inner_type = self._extract_event_type(event)
+
+        if inner_type in _LOW_PRIORITY_EVENT_TYPES:
+            logger.debug(
+                "stream_queue.backpressure.drop",
+                event_type=inner_type,
+                queue_size=self._child_stream_queue.qsize(),
+            )
+            return
+
+        # High-priority event — force-drain oldest items to make room
+        drained = 0
+        while drained < _BACKPRESSURE_DRAIN_COUNT and not self._child_stream_queue.empty():
+            try:
+                self._child_stream_queue.get_nowait()
+                drained += 1
+            except asyncio.QueueEmpty:
+                break
+
+        logger.debug(
+            "stream_queue.backpressure.drain",
+            event_type=inner_type,
+            drained=drained,
+        )
+        self._child_stream_queue.put_nowait(event)
+
+    @staticmethod
+    def _extract_event_type(event: Any) -> str:
+        """Extract the logical event type string from a StreamEvent.
+
+        For SUBAGENT_STREAM wrappers the inner event_type lives in data;
+        otherwise we use the top-level type value.
+        """
+        if hasattr(event, "data") and isinstance(event.data, dict):
+            inner = event.data.get("event_type")
+            if inner is not None:
+                return str(inner)
+        if hasattr(event, "type"):
+            return str(event.type.value) if hasattr(event.type, "value") else str(event.type)
+        return ""
 
     async def execute(
         self, tool_call_request: ToolCallRequest, policy: CapabilityPolicy | None = None
@@ -262,21 +343,76 @@ class ToolExecutor:
 
     async def batch_execute_progressive(
         self, tool_call_requests: list[ToolCallRequest], policy: CapabilityPolicy | None = None
-    ) -> AsyncIterator[tuple[ToolResult, ToolExecutionMeta]]:
-        """Execute concurrently, yield results as each tool completes (fastest first).
+    ) -> AsyncIterator[tuple[ToolResult, ToolExecutionMeta] | Any]:
+        """Execute concurrently, yield results as each tool completes.
 
-        Unlike batch_execute which waits for all, this yields each result
-        immediately upon completion. Order is by completion time, not input order.
+        Also drains _child_stream_queue in real-time, yielding StreamEvent
+        objects interleaved with (ToolResult, ToolExecutionMeta) tuples.
+        Consumers must check the type of each yielded item.
+
+        Uses asyncio.wait on both queues simultaneously to avoid
+        idle polling when no child stream events are present.
         """
+        from agent_framework.models.stream import StreamEvent
+
         sem = asyncio.Semaphore(self._max_concurrent)
+        done_queue: asyncio.Queue[tuple[ToolResult, ToolExecutionMeta]] = asyncio.Queue()
 
-        async def _run(req: ToolCallRequest) -> tuple[ToolResult, ToolExecutionMeta]:
+        async def _run(req: ToolCallRequest) -> None:
             async with sem:
-                return await self.execute(req, policy=policy)
+                result = await self.execute(req, policy=policy)
+            await done_queue.put(result)
 
-        tasks = {asyncio.create_task(_run(r)): r for r in tool_call_requests}
-        for coro in asyncio.as_completed(tasks.keys()):
-            yield await coro
+        tasks = [asyncio.create_task(_run(r)) for r in tool_call_requests]
+        remaining = len(tasks)
+        has_child_stream = self._child_stream_queue.maxsize > 0
+
+        while remaining > 0:
+            # Create competing wait tasks for both queues
+            done_waiter = asyncio.create_task(done_queue.get())
+            child_waiter = asyncio.create_task(
+                self._child_stream_queue.get()
+            ) if has_child_stream else None
+
+            pending_futures = {done_waiter}
+            if child_waiter:
+                pending_futures.add(child_waiter)
+
+            # Wait for EITHER a tool completion OR a child stream event
+            finished, _ = await asyncio.wait(
+                pending_futures, return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            for fut in finished:
+                if fut is done_waiter:
+                    remaining -= 1
+                    yield fut.result()
+                elif fut is child_waiter:
+                    event = fut.result()
+                    if isinstance(event, StreamEvent):
+                        yield event
+                    # Re-arm child waiter in next iteration
+                    child_waiter = None
+
+            # Cancel unfinished waiters
+            for fut in pending_futures - finished:
+                fut.cancel()
+                try:
+                    await fut
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+            # Drain any additional child events accumulated during tool execution
+            while not self._child_stream_queue.empty():
+                child_event = self._child_stream_queue.get_nowait()
+                if isinstance(child_event, StreamEvent):
+                    yield child_event
+
+        # Final drain after all tools complete
+        while not self._child_stream_queue.empty():
+            child_event = self._child_stream_queue.get_nowait()
+            if isinstance(child_event, StreamEvent):
+                yield child_event
 
     def is_tool_allowed(self, tool_name: str, policy: CapabilityPolicy) -> bool:
         """Hard runtime gate for tool permission ceiling.
@@ -406,6 +542,14 @@ class ToolExecutor:
         return DelegationExecutor.summarize_result(result).model_dump()
 
     async def _route_subagent(self, entry: ToolEntry, args: dict) -> Any:
+        # Team tools — routed before delegation check (team may work without delegation)
+        if entry.meta.name == "team":
+            from agent_framework.tools.builtin.team_tools import execute_team
+            return await execute_team(self, args)
+        if entry.meta.name == "mail":
+            from agent_framework.tools.builtin.team_tools import execute_mail
+            return await execute_mail(self, args)
+
         if self._delegation is None:
             raise RuntimeError("DelegationExecutor not configured")
 
@@ -415,6 +559,8 @@ class ToolExecutor:
             return await self._subagent_send_message(args)
         if entry.meta.name == "close_agent":
             return await self._subagent_close(args)
+        if entry.meta.name == "resume_checkpoint":
+            return await self._subagent_resume_checkpoint(args)
         return await self._subagent_spawn(args)
 
     # ── Sub-agent operations ─────────────────────────────────
@@ -440,6 +586,11 @@ class ToolExecutor:
         """Close a LONG_LIVED sub-agent."""
         from agent_framework.tools.builtin.spawn_agent import execute_close_agent
         return await execute_close_agent(self, args)
+
+    async def _subagent_resume_checkpoint(self, args: dict) -> dict:
+        """Resume a sub-agent from a saved checkpoint."""
+        from agent_framework.tools.builtin.spawn_agent import execute_resume_checkpoint
+        return await execute_resume_checkpoint(self, args)
 
     def _ensure_lead_collector(self, strategy_str: str) -> None:
         """Create LeadCollector on first async spawn if not exists.

@@ -424,6 +424,17 @@ class AegisAgentApp(App[None]):
         from agent_framework.terminal_runtime import _setup_protocols
         await _setup_protocols(self._fw)
 
+        # 3. Upgrade dispatcher with conversation history context
+        if hasattr(self._fw, "_run_dispatcher") and self._fw._run_dispatcher is not None:
+            self._fw._run_dispatcher.stop()
+        try:
+            self._fw.setup_run_dispatcher(history_getter=lambda: self._state.history)
+        except Exception:
+            pass
+
+        # 4. Start background team summary display loop
+        self._team_display_task = asyncio.create_task(self._display_team_output())
+
     # ── Input ──────────────────────────────────────────
 
     async def on_input_changed(self, event: Input.Changed) -> None:
@@ -480,15 +491,35 @@ class AegisAgentApp(App[None]):
                     self.exit()
                 return
 
-            # Streaming output — tokens appear incrementally
-            self._append_chat(_AGENT_PREFIX)
-            in_tool_block = False
-            progressive_tool_call_ids: set[str] = set()
+            # fw.run_stream() acquires dispatcher lock internally,
+            # so user turns are automatically serialized with background
+            # notification turns — no manual lock needed here.
+            await self._dispatch_streaming(text, t0, cancel_event)
 
-            async for event in execute_user_input_stream(
-                self._fw, self._mock, self._state, text,
-                cancel_event=cancel_event,
-            ):
+        except Exception as exc:
+            self._append_chat(f"\n{_ERR_PREFIX}{exc}")
+        finally:
+            # Force-flush any remaining buffered content before turn ends
+            self._flush_updates()
+            self._flush_line_buffer()
+            self._cancel_event = None
+            self._set_busy(False)
+
+    async def _dispatch_streaming(
+        self, text: str, t0: float, cancel_event: asyncio.Event,
+    ) -> None:
+        """Inner streaming loop — separated so _dispatch can wrap with lock."""
+        from agent_framework.models.stream import StreamEventType
+
+        # Streaming output — tokens appear incrementally
+        self._append_chat(_AGENT_PREFIX)
+        in_tool_block = False
+        progressive_tool_call_ids: set[str] = set()
+
+        async for event in execute_user_input_stream(
+            self._fw, self._mock, self._state, text,
+            cancel_event=cancel_event,
+        ):
                 if event.type == StreamEventType.TOKEN:
                     token_text = event.data.get("text", "")
                     if token_text:
@@ -516,6 +547,24 @@ class AegisAgentApp(App[None]):
                     iteration_index = event.data.get("iteration_index", 0)
                     if iteration_index > 0:
                         self._append_chat(f"\n{_ITER_PREFIX}#{iteration_index + 1}")
+
+                elif event.type == StreamEventType.SUBAGENT_STREAM:
+                    inner = event.data.get("event_type", "")
+                    if inner == "token":
+                        text = event.data.get("text", "")
+                        if text:
+                            self._append_chat_raw(f"│ {text}" if "\n" not in text else text.replace("\n", "\n│ "))
+                    elif inner == "tool_call_start":
+                        tool_name = event.data.get("tool_name", "?")
+                        self._append_chat(f"\n  │ {_TOOL_PREFIX}{tool_name}")
+                    elif inner == "tool_call_done":
+                        success = event.data.get("success", False)
+                        marker = _TOOL_OK if success else _TOOL_FAIL
+                        self._append_chat_raw(f" {marker}")
+                    elif inner == "iteration_start":
+                        idx = event.data.get("iteration_index", 0)
+                        if idx > 0:
+                            self._append_chat(f"\n  │ --- iter #{idx + 1}")
 
                 elif event.type == StreamEventType.DONE:
                     elapsed = time.monotonic() - t0
@@ -565,14 +614,33 @@ class AegisAgentApp(App[None]):
                     error_msg = event.data.get("error", "unknown error")
                     self._append_chat(f"\n{_ERR_PREFIX}{error_msg}")
 
-        except Exception as exc:
-            self._append_chat(f"\n{_ERR_PREFIX}{exc}")
-        finally:
-            # Force-flush any remaining buffered content before turn ends
-            self._flush_updates()
-            self._flush_line_buffer()
-            self._cancel_event = None
-            self._set_busy(False)
+    async def _display_team_output(self) -> None:
+        """Background loop: display team summaries and raw notifications in the TUI.
+
+        Consumes summaries produced by the framework's auto-notification turns
+        (via RunDispatcher). Falls back to raw notifications when no dispatcher.
+        """
+        while True:
+            await asyncio.sleep(2)
+            try:
+                # Auto-generated summaries from dispatcher notification turns
+                summaries = self._fw.drain_team_summaries()
+                for summary in summaries:
+                    self._append_chat(f"\n📨 Team 汇总:\n  {summary[:400]}")
+                    self._flush_updates()
+
+                # Fallback: raw notifications when dispatcher is absent or not running
+                if not hasattr(self._fw, "_run_dispatcher") or self._fw._run_dispatcher is None:
+                    notifications = self._fw.drain_team_notifications()
+                    for n in notifications:
+                        status_icon = "✓" if n["status"] == "completed" else "✗"
+                        self._append_chat(
+                            f"\n📨 {status_icon} [{n['role']}]: {n['summary'][:200]}"
+                        )
+                    if notifications:
+                        self._flush_updates()
+            except Exception:
+                pass
 
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
@@ -694,6 +762,12 @@ class AegisAgentApp(App[None]):
     async def on_unmount(self) -> None:
         self._flush_updates()
         self._flush_line_buffer()
+        # Stop team display loop
+        if hasattr(self, "_team_display_task") and self._team_display_task:
+            self._team_display_task.cancel()
+        # Stop dispatcher
+        if hasattr(self._fw, "_run_dispatcher") and self._fw._run_dispatcher is not None:
+            self._fw._run_dispatcher.stop()
         if self._fw._memory_store:
             await asyncio.to_thread(self._state.save_to_db, self._fw._memory_store, self._project_id)
         await self._fw.shutdown()

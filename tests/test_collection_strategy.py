@@ -13,12 +13,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from agent_framework.subagent.lead_collector import (
-    BatchResult,
-    CollectionStrategy,
-    LeadCollector,
-)
-
+from agent_framework.subagent.lead_collector import (BatchResult,
+                                                     CollectionStrategy,
+                                                     LeadCollector)
 
 # ---------------------------------------------------------------------------
 # LeadCollector Unit Tests
@@ -223,12 +220,14 @@ class TestSchemaArgs:
         assert args.label == ""
 
     def test_check_spawn_result_args_has_batch_pull(self):
-        from agent_framework.tools.schemas.builtin_args import CheckSpawnResultArgs
+        from agent_framework.tools.schemas.builtin_args import \
+            CheckSpawnResultArgs
         args = CheckSpawnResultArgs(batch_pull=True)
         assert args.batch_pull is True
 
     def test_check_spawn_result_args_defaults(self):
-        from agent_framework.tools.schemas.builtin_args import CheckSpawnResultArgs
+        from agent_framework.tools.schemas.builtin_args import \
+            CheckSpawnResultArgs
         args = CheckSpawnResultArgs()
         assert args.spawn_id == ""
         assert args.batch_pull is False
@@ -242,14 +241,15 @@ class TestToolExecutorCollectionIntegration:
     """ToolExecutor creates LeadCollector on async spawn."""
 
     def test_executor_has_lead_collector_slot(self):
-        from agent_framework.tools.executor import ToolExecutor
         from unittest.mock import MagicMock
+
+        from agent_framework.tools.executor import ToolExecutor
         executor = ToolExecutor(registry=MagicMock())
         assert executor._lead_collector is None
 
     def test_ensure_lead_collector_creates_on_first_call(self):
-        from agent_framework.tools.executor import ToolExecutor
         from agent_framework.subagent.lead_collector import LeadCollector
+        from agent_framework.tools.executor import ToolExecutor
         executor = ToolExecutor(registry=MagicMock())
         executor._ensure_lead_collector("HYBRID")
         assert isinstance(executor._lead_collector, LeadCollector)
@@ -301,16 +301,19 @@ class TestPromptTemplateCollectionStrategy:
     """Orchestrator system prompt teaches collection strategies."""
 
     def test_prompt_mentions_collection_strategy(self):
-        from agent_framework.agent.prompt_templates import ORCHESTRATOR_SYSTEM_PROMPT
+        from agent_framework.agent.prompt_templates import \
+            ORCHESTRATOR_SYSTEM_PROMPT
         assert "collection_strategy" in ORCHESTRATOR_SYSTEM_PROMPT
         assert "SEQUENTIAL" in ORCHESTRATOR_SYSTEM_PROMPT
         assert "BATCH_ALL" in ORCHESTRATOR_SYSTEM_PROMPT
         assert "HYBRID" in ORCHESTRATOR_SYSTEM_PROMPT
 
     def test_prompt_mentions_batch_pull(self):
-        from agent_framework.agent.prompt_templates import ORCHESTRATOR_SYSTEM_PROMPT
+        from agent_framework.agent.prompt_templates import \
+            ORCHESTRATOR_SYSTEM_PROMPT
         assert "batch_pull" in ORCHESTRATOR_SYSTEM_PROMPT
 
     def test_prompt_mentions_label(self):
-        from agent_framework.agent.prompt_templates import ORCHESTRATOR_SYSTEM_PROMPT
+        from agent_framework.agent.prompt_templates import \
+            ORCHESTRATOR_SYSTEM_PROMPT
         assert "label" in ORCHESTRATOR_SYSTEM_PROMPT

@@ -4,6 +4,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from agent_framework.infra.logger import get_logger
@@ -72,6 +73,9 @@ class SubAgentRuntime:
         max_spawn_depth: int = 1,
         live_agent_ttl_seconds: int = 300,
         max_live_agents_per_run: int = 3,
+        dynamic_pool: bool = False,
+        min_concurrent: int = 1,
+        max_concurrent_ceiling: int = 10,
     ) -> None:
         self._factory = SubAgentFactory(parent_deps)
         self._live_agent_ttl = live_agent_ttl_seconds
@@ -79,6 +83,9 @@ class SubAgentRuntime:
         self._scheduler = SubAgentScheduler(
             max_concurrent=max_concurrent,
             max_per_run=max_per_run,
+            dynamic_pool=dynamic_pool,
+            min_concurrent=min_concurrent,
+            max_concurrent_ceiling=max_concurrent_ceiling,
         )
         self._coordinator = coordinator
         self._parent_deps = parent_deps
@@ -87,11 +94,74 @@ class SubAgentRuntime:
         self._live_agents: dict[str, _LiveAgent] = {}
         # active_children truth source — only SubAgentRuntime maintains this
         self._active: dict[str, SubAgentHandle] = {}  # spawn_id -> handle
+        # Stream sink: receives child StreamEvents in real-time during spawn/send_message.
+        # Signature: (spawn_id, event) -> None. Set by ToolExecutor before execution.
+        self._stream_sink: Callable[[str, Any], None] | None = None
+        # Checkpoint store for suspend/resume persistence.
+        # Set externally (entry.py) when persistent checkpointing is enabled.
+        self._checkpoint_store: Any = None  # SQLiteCheckpointStore | None
+
+    async def _run_child_stream_or_block(
+        self,
+        coordinator: RunCoordinator,
+        agent: Any,
+        deps: Any,
+        task: str,
+        initial_session_messages: list[Message] | None,
+        spawn_id: str,
+    ) -> Any:
+        """Run child via run_stream() if sink is set, else blocking run().
+
+        When _stream_sink is configured, iterates run_stream() and forwards
+        all non-terminal events (TOKEN, TOOL_CALL_START, etc.) to the sink
+        so they can be displayed in real-time. Returns the AgentRunResult.
+        """
+        if self._stream_sink is None:
+            return await coordinator.run(
+                agent, deps, task,
+                initial_session_messages=initial_session_messages,
+            )
+
+        from agent_framework.models.stream import StreamEventType
+
+        run_result = None
+        async for event in coordinator.run_stream(
+            agent, deps, task,
+            initial_session_messages=initial_session_messages,
+        ):
+            if event.type == StreamEventType.DONE:
+                run_result = event.data.get("result")
+            elif event.type == StreamEventType.ERROR:
+                # Build a minimal failed result
+                from agent_framework.models.agent import AgentRunResult
+                from agent_framework.models.message import TokenUsage
+                run_result = AgentRunResult(
+                    success=False,
+                    error=event.data.get("error", "unknown error"),
+                    final_answer=None,
+                    iterations_used=0,
+                    usage=TokenUsage(),
+                )
+            else:
+                self._stream_sink(spawn_id, event)
+
+        if run_result is None:
+            from agent_framework.models.agent import AgentRunResult
+            from agent_framework.models.message import TokenUsage
+            run_result = AgentRunResult(
+                success=False,
+                error="run_stream yielded no DONE event",
+                final_answer=None,
+                iterations_used=0,
+                usage=TokenUsage(),
+            )
+        return run_result
 
     async def spawn(
         self, spec: SubAgentSpec, parent_agent: Any
     ) -> SubAgentResult:
         """Spawn a sub-agent and wait for its result."""
+        self._lazy_evict()
         # Assign spawn_id if not set
         if not spec.spawn_id:
             spec.spawn_id = uuid.uuid4().hex[:12]
@@ -208,11 +278,10 @@ class SubAgentRuntime:
                 child_run_id=child_run_id,
                 task_id=task_record.subagent_task_id,
             )
-            run_result = await coordinator.run(
-                sub_agent,
-                sub_deps,
-                spec.task_input,
-                initial_session_messages=initial_session_messages,
+            run_result = await self._run_child_stream_or_block(
+                coordinator, sub_agent, sub_deps,
+                spec.task_input, initial_session_messages,
+                spawn_id=spec.spawn_id,
             )
 
             task_record.status = (
@@ -557,6 +626,113 @@ class SubAgentRuntime:
         )
         return result
 
+    def save_checkpoint(
+        self, spawn_id: str, agent_state: Any, session_state: Any,
+        summary: str = "",
+        trigger: str = "user_input",
+    ) -> str | None:
+        """Save a checkpoint for a running sub-agent.
+
+        Only allowed at real user interaction boundaries (trigger="user_input").
+        Returns checkpoint_id on success, None if no checkpoint store configured.
+        """
+        if self._checkpoint_store is None:
+            logger.debug("checkpoint.no_store", spawn_id=spawn_id)
+            return None
+
+        from agent_framework.models.subagent import CheckpointLevel
+        checkpoint_id = self._checkpoint_store.save(
+            spawn_id=spawn_id,
+            agent_state=agent_state,
+            session_state=session_state,
+            checkpoint_level=CheckpointLevel.STEP_RESUMABLE,
+            summary=summary,
+            trigger=trigger,
+        )
+        return checkpoint_id
+
+    async def resume_from_checkpoint(
+        self, spawn_id: str, parent_agent: Any,
+        checkpoint_id: str | None = None,
+    ) -> SubAgentResult:
+        """Resume a sub-agent from a stored checkpoint.
+
+        If checkpoint_id is None, uses the latest checkpoint for spawn_id.
+        Restores AgentState + SessionState and continues execution.
+        """
+        if self._checkpoint_store is None:
+            return SubAgentResult(
+                spawn_id=spawn_id, success=False,
+                error="No checkpoint store configured",
+            )
+
+        # Load checkpoint
+        if checkpoint_id:
+            ckpt = self._checkpoint_store.load_by_id(checkpoint_id)
+        else:
+            ckpt = self._checkpoint_store.load_latest(spawn_id)
+
+        if ckpt is None:
+            return SubAgentResult(
+                spawn_id=spawn_id, success=False,
+                error=f"No checkpoint found for spawn_id={spawn_id}",
+            )
+
+        logger.info(
+            "subagent.resume_from_checkpoint",
+            spawn_id=spawn_id,
+            checkpoint_id=ckpt.checkpoint_id,
+            iteration_index=ckpt.iteration_index,
+            level=ckpt.checkpoint_level.value,
+        )
+
+        # Restore state
+        restored_agent_state = ckpt.restore_agent_state()
+        restored_session = ckpt.restore_session_state()
+
+        # Create agent + deps from factory
+        spec = SubAgentSpec(
+            parent_run_id=restored_agent_state.run_id,
+            spawn_id=spawn_id,
+            task_input=restored_agent_state.task,
+        )
+        try:
+            sub_agent, sub_deps = self._factory.create_agent_and_deps(
+                spec, parent_agent,
+            )
+        except Exception as e:
+            return SubAgentResult(
+                spawn_id=spawn_id, success=False,
+                error=f"Failed to create agent for checkpoint resume: {e}",
+            )
+
+        coordinator = self._coordinator
+        if coordinator is None:
+            from agent_framework.agent.coordinator import RunCoordinator
+            coordinator = RunCoordinator()
+
+        # Run with restored session as initial context
+        try:
+            run_result = await self._run_child_stream_or_block(
+                coordinator, sub_agent, sub_deps,
+                restored_agent_state.task,
+                restored_session.get_messages(),
+                spawn_id=spawn_id,
+            )
+            return SubAgentResult(
+                spawn_id=spawn_id,
+                success=run_result.success,
+                final_answer=run_result.final_answer,
+                error=run_result.error,
+                usage=run_result.usage,
+                iterations_used=run_result.iterations_used,
+            )
+        except Exception as e:
+            return SubAgentResult(
+                spawn_id=spawn_id, success=False,
+                error=f"Checkpoint resume execution failed: {e}",
+            )
+
     async def cancel(self, spawn_id: str) -> None:
         """Cancel a single sub-agent by spawn_id.
 
@@ -613,6 +789,7 @@ class SubAgentRuntime:
         The agent wakes up with the full prior conversation + new message,
         runs to completion, then returns to IDLE.
         """
+        self._lazy_evict()
         live = self._live_agents.get(spawn_id)
         if live is None:
             return SubAgentResult(
@@ -650,11 +827,10 @@ class SubAgentRuntime:
             coordinator = RunCoordinator()
 
         try:
-            run_result = await coordinator.run(
-                live.agent,
-                live.deps,
-                message,
-                initial_session_messages=list(live.session_messages),
+            run_result = await self._run_child_stream_or_block(
+                coordinator, live.agent, live.deps,
+                message, list(live.session_messages),
+                spawn_id=spawn_id,
             )
 
             # Update session: append this exchange
@@ -730,6 +906,16 @@ class SubAgentRuntime:
                 cleaned=len(to_remove),
             )
         return len(to_remove)
+
+    def _lazy_evict(self) -> None:
+        """Lazily evict expired LONG_LIVED agents on access.
+
+        Called automatically before spawn() and send_message() so that
+        stale agents are cleaned up without needing a background timer.
+        Only runs when there are live agents to check.
+        """
+        if self._live_agents:
+            self.evict_expired_live_agents()
 
     def evict_expired_live_agents(self) -> int:
         """Evict LONG_LIVED agents that exceeded TTL. Called during drain."""

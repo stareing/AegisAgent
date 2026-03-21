@@ -1,0 +1,282 @@
+"""Built-in tools for Agent Team interaction.
+
+Two polymorphic tools covering all team scenarios:
+- team(action=...) — Team management (Lead + Teammate)
+- mail(action=...) — Mailbox interaction (all agents)
+
+Design: 2 tools × ~200 tokens each = ~400 tokens total.
+vs. 17 individual tools × ~200 tokens = ~3400 tokens (87% saving).
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+from agent_framework.infra.logger import get_logger
+from agent_framework.tools.decorator import tool
+from agent_framework.tools.schemas.builtin_args import SYSTEM_NAMESPACE
+
+if TYPE_CHECKING:
+    from agent_framework.tools.executor import ToolExecutor
+
+logger = get_logger(__name__)
+
+# Permission routing — enforced at execution time, not in schema
+_LEAD_ACTIONS = frozenset({
+    "create", "spawn", "assign", "approve", "reject", "answer", "shutdown", "collect",
+})
+
+
+@tool(
+    name="team",
+    description=(
+        "Team management: create/spawn/assign/approve/reject/answer/shutdown/status/collect. "
+        "Lead-only actions: create, spawn, assign, approve, reject, answer, shutdown, collect. "
+        "All agents: status."
+    ),
+    category="team",
+    require_confirm=False,
+    tags=["system", "delegation", "team"],
+    namespace=SYSTEM_NAMESPACE,
+    source="subagent",
+)
+async def team(
+    action: str,
+    name: str = "",
+    role: str = "",
+    task: str = "",
+    task_id: int = 0,
+    agent_id: str = "",
+    request_id: str = "",
+    answer: str = "",
+    feedback: str = "",
+    reason: str = "",
+    skill_id: str = "",
+) -> dict:
+    """Team management tool."""
+    raise RuntimeError("team tool must be routed through ToolExecutor.")
+
+
+async def execute_team(executor: ToolExecutor, args: dict) -> dict[str, Any]:
+    """Execute team tool via ToolExecutor."""
+    coordinator = getattr(executor, "_team_coordinator", None)
+    if coordinator is None:
+        return {"error": "Team system not configured. Use team(action='create') first."}
+
+    action = args.get("action", "")
+
+    # Identity: included only when _team_show_identity is True
+    agent_id = getattr(executor, "_current_spawn_id", "")
+    agent_role = getattr(executor, "_current_agent_role", "teammate")
+    show_identity = getattr(executor, "_team_show_identity", False)
+    identity = {"_your_id": agent_id, "_your_role": agent_role} if show_identity else {}
+
+    # Permission check
+    if action in _LEAD_ACTIONS and agent_role != "lead":
+        return {**identity, "error": f"Permission denied: '{action}' is a lead-only action"}
+
+    if action == "create":
+        team_id = coordinator.create_team(args.get("name", ""))
+        return {**identity, "team_id": team_id, "created": True}
+
+    if action == "spawn":
+        spawned_id = await coordinator.spawn_teammate(
+            role=args.get("role", "teammate"),
+            task_input=args.get("task", ""),
+            skill_id=args.get("skill_id") or None,
+        )
+        return {**identity, "agent_id": spawned_id, "spawned": True}
+
+    if action == "assign":
+        result = coordinator.assign_task(args.get("task", ""), args.get("agent_id", ""))
+        return {**identity, **result}
+
+    if action == "approve":
+        coordinator.approve_plan(args.get("request_id", ""), args.get("feedback", ""))
+        return {**identity, "approved": True}
+
+    if action == "reject":
+        coordinator.reject_plan(args.get("request_id", ""), args.get("feedback", ""))
+        return {**identity, "rejected": True}
+
+    if action == "answer":
+        request_id = args.get("request_id", "")
+        answer_text = args.get("answer", "")
+        to_agent = args.get("agent_id", "")
+        if not request_id and not to_agent:
+            return {**identity, "error": "request_id or agent_id required for answer"}
+        coordinator.answer_question(request_id, answer_text, to_agent=to_agent)
+        return {**identity, "answered": True}
+
+    if action == "shutdown":
+        target = args.get("agent_id", "")
+        if target:
+            rid = coordinator.shutdown_teammate(target, args.get("reason", ""))
+            return {**identity, "request_id": rid, "shutdown_requested": True}
+        rids = coordinator.shutdown_team()
+        return {**identity, "request_ids": rids, "team_shutdown_requested": True}
+
+    if action == "status":
+        caller = getattr(executor, "_current_spawn_id", "")
+        show_self = bool(args.get("show_self", False))
+        return coordinator.get_team_status(caller_id=caller, show_self=show_self)
+
+    if action == "collect":
+        processed = coordinator.process_inbox()
+        return {**identity, "events_processed": len(processed), "events": processed}
+
+    return {**identity, "error": f"Unknown team action: {action}"}
+
+
+@tool(
+    name="mail",
+    description=(
+        "Mailbox: send/broadcast/read/ack/reply/publish/subscribe events between agents. "
+        "All team members can use all mail actions."
+    ),
+    category="team",
+    require_confirm=False,
+    tags=["system", "delegation", "team"],
+    namespace=SYSTEM_NAMESPACE,
+    source="subagent",
+)
+async def mail(
+    action: str,
+    to: str = "",
+    event_type: str = "",
+    event_id: str = "",
+    topic: str = "",
+    topic_pattern: str = "",
+    payload: dict | None = None,
+    limit: int = 0,
+    message: str = "",
+) -> dict:
+    """Mailbox interaction tool."""
+    raise RuntimeError("mail tool must be routed through ToolExecutor.")
+
+
+async def execute_mail(executor: ToolExecutor, args: dict) -> dict[str, Any]:
+    """Execute mail tool via ToolExecutor."""
+    mailbox = getattr(executor, "_team_mailbox", None)
+    if mailbox is None:
+        return {"error": "Team mailbox not configured"}
+
+    action = args.get("action", "")
+    agent_id = getattr(executor, "_current_spawn_id", "")
+    agent_role = getattr(executor, "_current_agent_role", "teammate")
+    team_id = getattr(executor, "_current_team_id", "")
+    show_identity = getattr(executor, "_team_show_identity", False)
+
+    # Identity: included only when _team_show_identity is True
+    identity = {"_your_id": agent_id, "_your_role": agent_role} if show_identity else {}
+
+    # Build result base — optionally inject identity
+    def _with_identity(result: dict) -> dict:
+        if getattr(executor, "_team_show_identity", False):
+            result["_your_id"] = agent_id
+            result["_your_role"] = agent_role
+        return result
+
+    if action == "send":
+        to_agent = args.get("to", "")
+        # Guard: cannot send to yourself
+        if to_agent == agent_id:
+            return {
+                **identity,
+                "error": f"Cannot send to yourself. You are '{agent_id}' (role={agent_role}). "
+                         f"Use mail(action='send', to='<other_agent_id>') to message a teammate.",
+            }
+        from agent_framework.models.team import MailEvent, MailEventType
+
+        to = args.get("to", "")
+        # Block self-messaging
+        if to == agent_id:
+            return _with_identity({"error": "Cannot send to yourself. You and the recipient are the same agent."})
+
+        event_type_str = args.get("event_type", "BROADCAST_NOTICE")
+        try:
+            evt_type = MailEventType(event_type_str)
+        except ValueError:
+            return _with_identity({"error": f"Unknown event type: {event_type_str}"})
+
+        event = MailEvent(
+            team_id=team_id,
+            from_agent=agent_id,
+            to_agent=to,
+            event_type=evt_type,
+            payload=args.get("payload") or {"message": args.get("message", "")},
+        )
+        sent = mailbox.send(event)
+        return _with_identity({"sent": True, "event_id": sent.event_id})
+
+    if action == "broadcast":
+        from agent_framework.models.team import MailEvent, MailEventType
+        event = MailEvent(
+            team_id=team_id,
+            from_agent=agent_id,
+            to_agent="*",
+            event_type=MailEventType.BROADCAST_NOTICE,
+            payload=args.get("payload") or {"message": args.get("message", "")},
+        )
+        sent_list = mailbox.broadcast(event)
+        return {**identity, "broadcast": True, "recipients": len(sent_list)}
+
+    if action == "read":
+        limit_val = args.get("limit") or None
+        events = mailbox.read_inbox(agent_id, limit=limit_val)
+        return _with_identity({
+            "messages": [
+                {
+                    "event_id": e.event_id,
+                    "from": e.from_agent,
+                    "type": e.event_type.value,
+                    "payload": e.payload,
+                }
+                for e in events
+            ],
+            "count": len(events),
+        })
+
+    if action == "ack":
+        event_id = args.get("event_id", "")
+        if not event_id:
+            return {**identity, "error": "event_id required"}
+        mailbox.ack(agent_id, event_id)
+        return {**identity, "acked": True}
+
+    if action == "reply":
+        event_id = args.get("event_id", "")
+        if not event_id:
+            return {**identity, "error": "event_id required for reply"}
+        reply_event = mailbox.reply(
+            event_id, args.get("payload") or {"message": args.get("message", "")},
+            source=agent_id,
+            event_type=args.get("event_type"),
+        )
+        return {**identity, "replied": True, "event_id": reply_event.event_id}
+
+    if action == "publish":
+        topic = args.get("topic", "")
+        if not topic:
+            return {**identity, "error": "topic required for publish"}
+        sent_list = mailbox.publish(
+            topic, args.get("payload") or {"message": args.get("message", "")},
+            source=agent_id, team_id=team_id,
+        )
+        return {**identity, "published": True, "recipients": len(sent_list)}
+
+    if action == "subscribe":
+        pattern = args.get("topic_pattern", "")
+        if not pattern:
+            return {**identity, "error": "topic_pattern required for subscribe"}
+        mailbox.subscribe(agent_id, pattern)
+        return {**identity, "subscribed": True, "pattern": pattern}
+
+    if action == "unsubscribe":
+        pattern = args.get("topic_pattern", "")
+        if not pattern:
+            return {**identity, "error": "topic_pattern required for unsubscribe"}
+        mailbox.unsubscribe(agent_id, pattern)
+        return {**identity, "unsubscribed": True, "pattern": pattern}
+
+    return {**identity, "error": f"Unknown mail action: {action}"}
