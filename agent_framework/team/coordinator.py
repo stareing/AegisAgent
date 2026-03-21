@@ -79,7 +79,12 @@ class TeamCoordinator:
         task_input: str,
         skill_id: str | None = None,
     ) -> str:
-        """Spawn a teammate as LONG_LIVED sub-agent. Returns agent_id."""
+        """Spawn a teammate as async sub-agent. Returns agent_id.
+
+        Actually starts a real sub-agent via SubAgentRuntime.spawn_async().
+        When the sub-agent completes, _on_teammate_done() sends the result
+        back to Lead's mailbox as PROGRESS_NOTICE.
+        """
         from agent_framework.models.team import (MailEvent, MailEventType,
                                                   TeamMember, TeamMemberStatus)
 
@@ -98,18 +103,94 @@ class TeamCoordinator:
         )
         self._registry.register(member)
 
-        # Then send event
-        self._mailbox.send(MailEvent(
-            team_id=self._team_id,
-            from_agent=self._lead_id,
-            to_agent=agent_id,
-            event_type=MailEventType.TASK_ASSIGNMENT,
-            payload={"task": task_input, "role": role, "skill_id": skill_id or ""},
-        ))
+        # Actually spawn sub-agent via runtime
+        if self._runtime is not None:
+            from agent_framework.models.subagent import SpawnMode, SubAgentSpec
+            spec = SubAgentSpec(
+                parent_run_id=self._team_id,
+                spawn_id=spawn_id,
+                task_input=task_input,
+                mode=SpawnMode.EPHEMERAL,
+                max_iterations=10,
+            )
+            # Spawn async — returns immediately, runs in background
+            actual_spawn_id = await self._runtime.spawn_async(spec, None)
+
+            # Launch background task to collect result and report to Lead
+            import asyncio
+            asyncio.create_task(
+                self._watch_teammate(agent_id, actual_spawn_id, role, task_input)
+            )
+        else:
+            logger.warning("team.spawn.no_runtime", agent_id=agent_id,
+                           hint="SubAgentRuntime not configured, teammate is a stub")
 
         self._registry.update_status(agent_id, TeamMemberStatus.WORKING)
         logger.info("team.teammate_spawned", agent_id=agent_id, role=role, team_id=self._team_id)
         return agent_id
+
+    async def _watch_teammate(
+        self, agent_id: str, spawn_id: str, role: str, task: str,
+    ) -> None:
+        """Background task: poll for teammate completion, then report to Lead."""
+        import asyncio
+        from agent_framework.models.team import MailEvent, MailEventType, TeamMemberStatus
+
+        if self._runtime is None:
+            return
+
+        # Poll until result is available
+        max_polls = 600  # 5 minutes at 0.5s interval
+        for _ in range(max_polls):
+            result = await self._runtime.collect_result(spawn_id, wait=False)
+            if result is not None:
+                # Report result to Lead via mailbox
+                status = "completed" if result.success else "failed"
+                summary = result.final_answer or result.error or ""
+                self._mailbox.send(MailEvent(
+                    team_id=self._team_id,
+                    from_agent=agent_id,
+                    to_agent=self._lead_id,
+                    event_type=MailEventType.PROGRESS_NOTICE,
+                    payload={
+                        "status": status,
+                        "summary": summary[:2000],
+                        "role": role,
+                        "task": task[:200],
+                        "spawn_id": spawn_id,
+                        "iterations_used": result.iterations_used,
+                    },
+                ))
+
+                # Update member status
+                new_status = TeamMemberStatus.IDLE if result.success else TeamMemberStatus.FAILED
+                try:
+                    self._registry.update_status(agent_id, new_status)
+                except Exception:
+                    pass
+
+                logger.info(
+                    "team.teammate_completed",
+                    agent_id=agent_id, spawn_id=spawn_id,
+                    success=result.success,
+                )
+                return
+
+            await asyncio.sleep(0.5)
+
+        # Timeout
+        logger.warning("team.teammate_timeout", agent_id=agent_id, spawn_id=spawn_id)
+        self._mailbox.send(MailEvent(
+            team_id=self._team_id,
+            from_agent=agent_id,
+            to_agent=self._lead_id,
+            event_type=MailEventType.ERROR_NOTICE,
+            payload={"error": "teammate timed out", "spawn_id": spawn_id},
+        ))
+        try:
+            self._registry.update_status(agent_id, TeamMemberStatus.FAILED)
+        except Exception:
+            pass
 
     # ── Inbox processing ───────────────────────────────────────
 
