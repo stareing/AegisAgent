@@ -32,7 +32,7 @@ from agent_framework.team.teammate_runtime import TeammateRuntime
 # ═══════════════════════════════════════════════════════════════════
 
 TEAM_ID = "e2e_team"
-LEAD_ID = "lead"
+LEAD_ID = "orchestrator_e2e"  # Non-default: verifies no hardcoded "lead"
 
 
 @pytest.fixture()

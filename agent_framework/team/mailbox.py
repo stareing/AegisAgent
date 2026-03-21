@@ -78,10 +78,20 @@ class TeamMailbox:
             sent.append(self.send(individual))
         return sent
 
-    def reply(self, original_event_id: str, payload: dict, source: str) -> Any:
+    def reply(
+        self, original_event_id: str, payload: dict, source: str,
+        event_type: str | None = None,
+    ) -> Any:
         """Reply to a MailEvent. Sets correlation_id and routes to original sender.
 
-        Automatically injects request_id into payload if missing (from original).
+        event_type defaults based on the original event:
+        - QUESTION → ANSWER
+        - PLAN_SUBMISSION → APPROVAL_RESPONSE
+        - SHUTDOWN_REQUEST → SHUTDOWN_ACK
+        - TASK_HANDOFF_REQUEST → TASK_HANDOFF_RESPONSE
+        - anything else → uses explicit event_type or ANSWER fallback
+
+        Auto-injects request_id from original if not in reply payload.
         """
         original_env = self._bus.get_envelope(original_event_id)
         if original_env is None:
@@ -93,11 +103,27 @@ class TeamMailbox:
             payload = {"request_id": orig_req_id, **payload}
 
         from agent_framework.models.team import MailEvent, MailEventType
+
+        # Determine reply event type from original if not explicitly set
+        orig_type_str = original_env.payload.get("_mail_event_type", "")
+        _REPLY_MAP = {
+            "QUESTION": MailEventType.ANSWER,
+            "PLAN_SUBMISSION": MailEventType.APPROVAL_RESPONSE,
+            "SHUTDOWN_REQUEST": MailEventType.SHUTDOWN_ACK,
+            "TASK_HANDOFF_REQUEST": MailEventType.TASK_HANDOFF_RESPONSE,
+            "TASK_CLAIM_REQUEST": MailEventType.TASK_CLAIMED_NOTICE,
+            "STATUS_PING": MailEventType.STATUS_REPLY,
+        }
+        if event_type:
+            reply_type = MailEventType(event_type)
+        else:
+            reply_type = _REPLY_MAP.get(orig_type_str, MailEventType.ANSWER)
+
         reply_event = MailEvent(
             team_id=original_env.source.group,
             from_agent=source,
             to_agent=original_env.source.agent_id,
-            event_type=MailEventType.ANSWER,
+            event_type=reply_type,
             correlation_id=original_event_id,
             payload=payload,
         )
@@ -149,15 +175,23 @@ class TeamMailbox:
     def read_inbox(
         self, agent_id: str, limit: int | None = None,
     ) -> list[Any]:
-        """Read all pending messages for an agent. Marks as delivered."""
+        """Read pending messages for an agent. Only marks returned messages as delivered.
+
+        When limit is set, only drains up to limit messages — the rest
+        stay pending for the next read. No messages are silently lost.
+        """
         address = BusAddress(
             agent_id=agent_id,
             group=self._registry.get_team_id(),
         )
-        envelopes = self._bus.drain(address)
-        events = [self._envelope_to_mail(env) for env in envelopes]
         if limit:
-            events = events[:limit]
+            # Peek first, then selectively drain only the ones we return
+            envelopes = self._bus.peek(address)[:limit]
+            for env in envelopes:
+                self._bus._persistence.mark_delivered(env.envelope_id)
+        else:
+            envelopes = self._bus.drain(address)
+        events = [self._envelope_to_mail(env) for env in envelopes]
         return events
 
     def read_unacked(self, agent_id: str) -> list[Any]:

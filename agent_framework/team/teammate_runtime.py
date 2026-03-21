@@ -55,6 +55,15 @@ class TeammateRuntime:
     def agent_id(self) -> str:
         return self._agent_id
 
+    @property
+    def _lead_id(self) -> str:
+        """Resolve Lead's actual agent_id from registry (not hardcoded)."""
+        members = self._registry.list_members()
+        for m in members:
+            if m.role == "lead":
+                return m.agent_id
+        return "lead"  # Fallback only if registry has no lead
+
     # ── Work phase ─────────────────────────────────────────────
 
     def report_progress(self, percent: int, summary: str, task_id: int | None = None) -> None:
@@ -63,7 +72,7 @@ class TeammateRuntime:
         self._mailbox.send(MailEvent(
             team_id=self._team_id,
             from_agent=self._agent_id,
-            to_agent="lead",
+            to_agent=self._lead_id,
             event_type=MailEventType.PROGRESS_NOTICE,
             payload={"percent": percent, "summary": summary, "task_id": task_id},
         ))
@@ -79,7 +88,7 @@ class TeammateRuntime:
         self._mailbox.send(MailEvent(
             team_id=self._team_id,
             from_agent=self._agent_id,
-            to_agent="lead",
+            to_agent=self._lead_id,
             event_type=MailEventType.QUESTION,
             requires_ack=True,
             request_id=request_id,
@@ -102,7 +111,7 @@ class TeammateRuntime:
 
         plan = self._plans.create(
             requester=self._agent_id,
-            approver="lead",
+            approver=self._lead_id,
             plan_text=plan_text,
             title=title,
             risk_level=risk_level,
@@ -112,7 +121,7 @@ class TeammateRuntime:
         self._mailbox.send(MailEvent(
             team_id=self._team_id,
             from_agent=self._agent_id,
-            to_agent="lead",
+            to_agent=self._lead_id,
             event_type=MailEventType.PLAN_SUBMISSION,
             requires_ack=True,
             request_id=plan.request_id,

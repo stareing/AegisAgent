@@ -286,7 +286,20 @@ class TeamCoordinator:
         member = self._registry.get(event.from_agent)
         if member and member.status != TeamMemberStatus.SHUTDOWN:
             self._registry.update_status(event.from_agent, TeamMemberStatus.SHUTDOWN)
-        return {"type": "shutdown_ack", "from": event.from_agent}
+
+        # Actually cancel the sub-agent runtime to release resources
+        if self._runtime is not None and member:
+            try:
+                import asyncio
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.ensure_future(self._runtime.cancel(member.spawn_id))
+                else:
+                    loop.run_until_complete(self._runtime.cancel(member.spawn_id))
+            except Exception:
+                pass  # Best-effort cleanup
+
+        return {"type": "shutdown_ack", "from": event.from_agent, "runtime_cancelled": True}
 
     def _handle_error(self, event: Any) -> dict:
         from agent_framework.models.team import TeamMemberStatus
