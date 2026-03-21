@@ -566,7 +566,7 @@ def _setup_team():
     mailbox = TeamMailbox(bus, registry)
 
     now = _dt.now(_tz.utc)
-    for aid, role in [("lead", "lead"), ("coder", "teammate"), ("reviewer", "teammate")]:
+    for aid, role in [("lead", "lead"), ("coder", "coder"), ("reviewer", "reviewer")]:
         registry.register(TeamMember(
             agent_id=aid, team_id="team_e2e", role=role,
             status=TeamMemberStatus.WORKING, joined_at=now, updated_at=now,

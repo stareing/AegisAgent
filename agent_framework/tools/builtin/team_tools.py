@@ -110,7 +110,9 @@ async def execute_team(executor: ToolExecutor, args: dict) -> dict[str, Any]:
         return {"request_ids": rids, "team_shutdown_requested": True}
 
     if action == "status":
-        return coordinator.get_team_status()
+        caller = getattr(executor, "_current_spawn_id", "")
+        show_self = bool(args.get("show_self", False))
+        return coordinator.get_team_status(caller_id=caller, show_self=show_self)
 
     if action == "collect":
         processed = coordinator.process_inbox()
@@ -154,25 +156,39 @@ async def execute_mail(executor: ToolExecutor, args: dict) -> dict[str, Any]:
 
     action = args.get("action", "")
     agent_id = getattr(executor, "_current_spawn_id", "")
+    agent_role = getattr(executor, "_current_agent_role", "teammate")
     team_id = getattr(executor, "_current_team_id", "")
+
+    # Build result base — optionally inject identity
+    def _with_identity(result: dict) -> dict:
+        if getattr(executor, "_team_show_identity", False):
+            result["_your_id"] = agent_id
+            result["_your_role"] = agent_role
+        return result
 
     if action == "send":
         from agent_framework.models.team import MailEvent, MailEventType
+
+        to = args.get("to", "")
+        # Block self-messaging
+        if to == agent_id:
+            return _with_identity({"error": "Cannot send to yourself. You and the recipient are the same agent."})
+
         event_type_str = args.get("event_type", "BROADCAST_NOTICE")
         try:
             evt_type = MailEventType(event_type_str)
         except ValueError:
-            return {"error": f"Unknown event type: {event_type_str}"}
+            return _with_identity({"error": f"Unknown event type: {event_type_str}"})
 
         event = MailEvent(
             team_id=team_id,
             from_agent=agent_id,
-            to_agent=args.get("to", ""),
+            to_agent=to,
             event_type=evt_type,
             payload=args.get("payload") or {"message": args.get("message", "")},
         )
         sent = mailbox.send(event)
-        return {"sent": True, "event_id": sent.event_id}
+        return _with_identity({"sent": True, "event_id": sent.event_id})
 
     if action == "broadcast":
         from agent_framework.models.team import MailEvent, MailEventType
@@ -189,7 +205,7 @@ async def execute_mail(executor: ToolExecutor, args: dict) -> dict[str, Any]:
     if action == "read":
         limit_val = args.get("limit") or None
         events = mailbox.read_inbox(agent_id, limit=limit_val)
-        return {
+        return _with_identity({
             "messages": [
                 {
                     "event_id": e.event_id,
@@ -200,7 +216,7 @@ async def execute_mail(executor: ToolExecutor, args: dict) -> dict[str, Any]:
                 for e in events
             ],
             "count": len(events),
-        }
+        })
 
     if action == "ack":
         event_id = args.get("event_id", "")

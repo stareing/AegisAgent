@@ -67,7 +67,10 @@ class TeamCoordinator:
     # ── Team lifecycle ─────────────────────────────────────────
 
     def create_team(self, name: str = "") -> str:
-        """Initialize a team. Returns team_id."""
+        """Initialize a team. Returns team_id.
+
+        Lead IS registered so teammates can find lead_id for reporting.
+        """
         from agent_framework.models.team import TeamMember, TeamMemberStatus
         lead = TeamMember(
             agent_id=self._lead_id,
@@ -451,21 +454,52 @@ class TeamCoordinator:
 
     # ── Status ─────────────────────────────────────────────────
 
-    def get_team_status(self) -> dict:
-        """Return current team status summary."""
+    def get_team_status(self, caller_id: str = "", show_self: bool = False) -> dict:
+        """Return current team status with identity awareness.
+
+        Default: hides the caller from the list (you don't need to
+        see yourself). Set show_self=True to include all members.
+        The caller's entry is tagged is_you=True when shown.
+        """
         members = self._registry.list_members()
+        member_list = []
+        for m in members:
+            is_self = m.agent_id == caller_id
+            if is_self and not show_self:
+                continue
+            entry = {
+                "agent_id": m.agent_id,
+                "role": m.role,
+                "status": m.status.value,
+            }
+            if is_self:
+                entry["is_you"] = True
+            member_list.append(entry)
+        # Full list with is_you marker (always includes self)
+        all_members = []
+        for m in members:
+            entry = {
+                "agent_id": m.agent_id,
+                "role": m.role,
+                "status": m.status.value,
+            }
+            if m.agent_id == caller_id:
+                entry["is_you"] = True
+            all_members.append(entry)
+
         return {
             "team_id": self._team_id,
             "lead": self._lead_id,
-            "member_count": len(members),
-            "members": [
-                {
-                    "agent_id": m.agent_id,
-                    "role": m.role,
-                    "status": m.status.value,
-                }
-                for m in members
-            ],
+            "your_id": caller_id,
+            "your_role": "lead" if caller_id == self._lead_id else "teammate",
+            "teammate_count": len(member_list),
+            "teammates": member_list,
+            "members": all_members,
+            "note": (
+                "You are the lead. Teammates listed below are your sub-agents. Do NOT send mail to yourself."
+                if caller_id == self._lead_id
+                else f"You are teammate '{caller_id}'. Others listed are your peers. The lead is '{self._lead_id}'."
+            ),
             "pending_plans": len(self._plans.list_pending()),
             "pending_shutdowns": len(self._shutdowns.list_pending()),
         }
