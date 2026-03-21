@@ -36,14 +36,14 @@ class TestTeamRegistry:
 
     def test_list_members_all(self) -> None:
         reg = TeamRegistry()
-        reg.register(TeamMember(agent_id="a1", role="coder"))
-        reg.register(TeamMember(agent_id="a2", role="reviewer", status=TeamMemberStatus.WORKING))
+        reg.register(TeamMember(agent_id="a1"))
+        reg.register(TeamMember(agent_id="a2", status=TeamMemberStatus.WORKING))
         assert len(reg.list_members()) == 2
 
     def test_list_members_filtered(self) -> None:
         reg = TeamRegistry()
-        reg.register(TeamMember(agent_id="a1", role="analyst", status=TeamMemberStatus.IDLE))
-        reg.register(TeamMember(agent_id="a2", role="writer", status=TeamMemberStatus.WORKING))
+        reg.register(TeamMember(agent_id="a1", status=TeamMemberStatus.IDLE))
+        reg.register(TeamMember(agent_id="a2", status=TeamMemberStatus.WORKING))
         idle = reg.list_members(status=TeamMemberStatus.IDLE)
         assert len(idle) == 1
         assert idle[0].agent_id == "a1"

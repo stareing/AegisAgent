@@ -389,10 +389,6 @@ class SubAgentSpec(BaseModel):
     config_override: SubAgentConfigOverride | None = None
     skill_id: str | None = None
     tool_category_whitelist: list[str] | None = None
-    # Per-tool name whitelist — finer than category whitelist.
-    # When set, only these tool NAMES are visible (after category filtering).
-    # team/mail tools are always added regardless of this list.
-    tool_name_whitelist: list[str] | None = None
     context_seed: list[Message] | None = None
     context_mode: SpawnContextMode = SpawnContextMode.MINIMAL
     memory_scope: MemoryScope = MemoryScope.ISOLATED

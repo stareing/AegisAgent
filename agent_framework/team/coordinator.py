@@ -51,18 +51,10 @@ class TeamCoordinator:
         self._plans = plan_registry
         self._shutdowns = shutdown_registry
         self._runtime = sub_agent_runtime
-        # Map request_id → from_agent for safe answer routing
-        self._pending_requests: dict[str, str] = {}
-        # Role definitions from TEAM.md discovery (role_name → frontmatter)
-        self._role_definitions: dict[str, dict] = {}
 
     @property
     def team_id(self) -> str:
         return self._team_id
-
-    def register_role_definition(self, role_name: str, frontmatter: dict) -> None:
-        """Register a TEAM.md role definition for tool whitelist enforcement."""
-        self._role_definitions[role_name] = frontmatter
 
     # ── Team lifecycle ─────────────────────────────────────────
 
@@ -115,34 +107,12 @@ class TeamCoordinator:
         # Actually spawn sub-agent via runtime
         if self._runtime is not None:
             from agent_framework.models.subagent import SpawnMode, SubAgentSpec
-
-            # Inject team protocol instructions into the task so the
-            # spawned agent knows it's a teammate and can use team/mail tools
-            team_task = (
-                f"[TEAM PROTOCOL] You are a teammate in team '{self._team_id}'. "
-                f"Your role is '{role}'. Your agent_id is '{agent_id}'. "
-                f"The lead agent_id is '{self._lead_id}'. "
-                f"You have access to team() and mail() tools. "
-                f"When you finish your task, use mail(action='send', to='{self._lead_id}', "
-                f"event_type='PROGRESS_NOTICE', payload={{\"status\": \"completed\", "
-                f"\"summary\": \"<your result>\"}}) to report back. "
-                f"If you need help, use mail(action='send', to='{self._lead_id}', "
-                f"event_type='QUESTION', payload={{\"request_id\": \"q1\", "
-                f"\"question\": \"<your question>\"}}).\n\n"
-                f"[TASK] {task_input}"
-            )
-
-            # Look up allowed-tools from TEAM.md definition
-            role_def = self._role_definitions.get(role, {})
-            tool_name_whitelist = role_def.get("allowed-tools") or None
-
             spec = SubAgentSpec(
                 parent_run_id=self._team_id,
                 spawn_id=spawn_id,
-                task_input=team_task,
+                task_input=task_input,
                 mode=SpawnMode.EPHEMERAL,
                 skill_id=skill_id,
-                tool_name_whitelist=tool_name_whitelist,
                 max_iterations=10,
             )
             # Spawn async — returns immediately, runs in background
@@ -283,22 +253,17 @@ class TeamCoordinator:
         return handler(event)
 
     def _handle_question(self, event: Any) -> dict:
-        """Record question and save request_id → from_agent mapping."""
-        req_id = event.request_id or event.payload.get("request_id", "")
-        if req_id:
-            self._pending_requests[req_id] = event.from_agent
+        """Record question for Lead to answer."""
         return {
             "type": "question",
             "from": event.from_agent,
-            "request_id": req_id,
+            "request_id": event.request_id,
             "question": event.payload.get("question", ""),
         }
 
     def _handle_plan(self, event: Any) -> dict:
-        """Record plan and save request_id → from_agent mapping."""
+        """Record plan submission for Lead to review."""
         request_id = event.payload.get("request_id", "")
-        if request_id:
-            self._pending_requests[request_id] = event.from_agent
         return {
             "type": "plan_submission",
             "from": event.from_agent,
@@ -311,35 +276,29 @@ class TeamCoordinator:
         return {"type": "progress", "from": event.from_agent, "payload": event.payload}
 
     def _handle_shutdown_ack(self, event: Any) -> dict:
-        """Advance shutdown: cancel runtime FIRST, then mark SHUTDOWN, then complete request.
-
-        Order: runtime.cancel → registry.SHUTDOWN → shutdowns.complete
-        This ensures "SHUTDOWN = runtime actually stopped".
-        """
-        from agent_framework.models.team import TeamMemberStatus
-        member = self._registry.get(event.from_agent)
-        runtime_cancelled = False
-
-        # Step 1: Cancel runtime (before marking complete)
-        if self._runtime is not None and member:
-            try:
-                import asyncio
-                asyncio.ensure_future(self._runtime.cancel(member.spawn_id))
-                runtime_cancelled = True
-            except Exception:
-                pass
-
-        # Step 2: Update registry to SHUTDOWN
-        if member and member.status != TeamMemberStatus.SHUTDOWN:
-            self._registry.update_status(event.from_agent, TeamMemberStatus.SHUTDOWN)
-
-        # Step 3: Complete shutdown request (last — confirms full shutdown)
+        """Advance shutdown to COMPLETED."""
         request_id = event.payload.get("request_id", "")
         if request_id:
             try:
                 self._shutdowns.complete(request_id)
             except Exception:
-                pass
+                pass  # Already completed
+        from agent_framework.models.team import TeamMemberStatus
+        member = self._registry.get(event.from_agent)
+        if member and member.status != TeamMemberStatus.SHUTDOWN:
+            self._registry.update_status(event.from_agent, TeamMemberStatus.SHUTDOWN)
+
+        # Actually cancel the sub-agent runtime to release resources
+        if self._runtime is not None and member:
+            try:
+                import asyncio
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.ensure_future(self._runtime.cancel(member.spawn_id))
+                else:
+                    loop.run_until_complete(self._runtime.cancel(member.spawn_id))
+            except Exception:
+                pass  # Best-effort cleanup
 
         return {"type": "shutdown_ack", "from": event.from_agent, "runtime_cancelled": True}
 
@@ -390,33 +349,16 @@ class TeamCoordinator:
             payload={"request_id": request_id, "approved": False, "feedback": feedback},
         ))
 
-    def answer_question(self, request_id: str, answer: str, to_agent: str = "") -> None:
-        """Answer a teammate's question.
-
-        Resolves the recipient from _pending_requests if to_agent is not
-        provided. This prevents broadcasting the answer to all teammates.
-        """
+    def answer_question(self, request_id: str, answer: str, to_agent: str) -> None:
+        """Answer a teammate's question."""
         from agent_framework.models.team import MailEvent, MailEventType
-
-        # Resolve recipient: explicit to_agent > saved mapping > error
-        recipient = to_agent or self._pending_requests.get(request_id, "")
-        if not recipient:
-            logger.warning(
-                "team.answer.no_recipient",
-                request_id=request_id,
-                hint="Cannot determine who asked this question",
-            )
-            return
-
         self._mailbox.send(MailEvent(
             team_id=self._team_id,
             from_agent=self._lead_id,
-            to_agent=recipient,
+            to_agent=to_agent,
             event_type=MailEventType.ANSWER,
             payload={"request_id": request_id, "answer": answer},
         ))
-        # Clean up mapping
-        self._pending_requests.pop(request_id, None)
 
     # ── Shutdown ───────────────────────────────────────────────
 
@@ -452,19 +394,26 @@ class TeamCoordinator:
     # ── Status ─────────────────────────────────────────────────
 
     def get_team_status(self) -> dict:
-        """Return current team status summary."""
-        members = self._registry.list_members()
+        """Return current team status summary.
+
+        Lead is excluded from the members list — it's the main agent itself,
+        not a teammate. Only spawned teammates are shown.
+        """
+        all_members = self._registry.list_members()
+        teammates = [m for m in all_members if m.role != "lead"]
+        available_roles = list(self._role_definitions.keys())
         return {
             "team_id": self._team_id,
             "lead": self._lead_id,
-            "member_count": len(members),
-            "members": [
+            "available_roles": available_roles,
+            "teammate_count": len(teammates),
+            "teammates": [
                 {
                     "agent_id": m.agent_id,
                     "role": m.role,
                     "status": m.status.value,
                 }
-                for m in members
+                for m in teammates
             ],
             "pending_plans": len(self._plans.list_pending()),
             "pending_shutdowns": len(self._shutdowns.list_pending()),
