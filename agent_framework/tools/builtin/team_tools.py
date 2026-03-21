@@ -100,10 +100,12 @@ async def execute_team(executor: ToolExecutor, args: dict) -> dict[str, Any]:
         return {**identity, "rejected": True}
 
     if action == "answer":
-        coordinator.answer_question(
-            args.get("request_id", ""), args.get("answer", ""),
-            to_agent=args.get("agent_id", ""),
-        )
+        request_id = args.get("request_id", "")
+        answer_text = args.get("answer", "")
+        to_agent = args.get("agent_id", "")
+        if not request_id and not to_agent:
+            return {**identity, "error": "request_id or agent_id required for answer"}
+        coordinator.answer_question(request_id, answer_text, to_agent=to_agent)
         return {**identity, "answered": True}
 
     if action == "shutdown":

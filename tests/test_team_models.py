@@ -123,7 +123,7 @@ class TestMailEvent:
 
 class TestTeamMemberStatus:
     def test_member_count(self) -> None:
-        assert len(TeamMemberStatus) == 8
+        assert len(TeamMemberStatus) == 10
 
     def test_terminal_statuses(self) -> None:
         assert TeamMemberStatus.SHUTDOWN in TERMINAL_MEMBER_STATUSES

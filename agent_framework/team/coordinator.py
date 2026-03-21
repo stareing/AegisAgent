@@ -53,9 +53,23 @@ class TeamCoordinator:
         self._runtime = sub_agent_runtime
         self._pending_requests: dict[str, str] = {}
         self._role_definitions: dict[str, dict] = {}
-        # Auto-run callback: called with (prompt, events) when team results arrive.
-        # Set by AgentFramework to trigger LLM auto-summary.
+        # Auto-run callback: called with (role, status, summary, agent_id, task, spawn_id)
+        # when team results arrive. Set by AgentFramework to trigger auto-notification.
         self._on_result_callback: Any = None
+        # Notification policy: determines which inbox events escalate to main model.
+        self._notification_policy: Any = None
+        # Escalation callback: called with (role, event_type, summary, agent_id)
+        # for non-task events (QUESTION, PLAN, BROADCAST) that match the policy.
+        self._on_event_escalation: Any = None
+        # Active teammate conversation contexts: agent_id → context dict.
+        # Tracks multi-run conversations so teammates can be resumed after Q&A.
+        self._active_teammate_ctx: dict[str, dict] = {}
+        # Pending answer delivery: agent_id → answer text.
+        # Set by answer_question(), consumed by _watch_teammate continuation.
+        self._pending_answers: dict[str, str] = {}
+        # Pending approval delivery: agent_id → {"approved": bool, "feedback": str}.
+        # Set by approve_plan()/reject_plan(), consumed by _watch_teammate continuation.
+        self._pending_approvals: dict[str, dict] = {}
 
     @property
     def team_id(self) -> str:
@@ -175,84 +189,391 @@ class TeamCoordinator:
     async def _watch_teammate(
         self, agent_id: str, spawn_id: str, role: str, task: str,
     ) -> None:
-        """Background task: poll for teammate completion, then report to Lead."""
+        """Background task: poll for teammate completion with Q&A cycle support.
+
+        Supports multi-run conversations:
+        1. Poll until sub-agent run completes
+        2. Check if the sub-agent asked a question (QUESTION in lead inbox)
+        3. If yes: set WAITING_ANSWER, wait for answer, then spawn continuation run
+        4. If no: this is the final result → RESULT_READY → notify main model
+        5. Repeat from (1) for continuation runs
+
+        State flow:
+            WORKING → WAITING_ANSWER → WORKING → ... → RESULT_READY
+        """
         import asyncio
         from agent_framework.models.team import MailEvent, MailEventType, TeamMemberStatus
 
         if self._runtime is None:
             return
 
-        # Poll until result is available
-        max_polls = 600  # 5 minutes at 0.5s interval
-        for _ in range(max_polls):
-            result = await self._runtime.collect_result(spawn_id, wait=False)
-            if result is not None:
-                # Report result to Lead via mailbox
-                status = "completed" if result.success else "failed"
-                summary = result.final_answer or result.error or ""
-                self._mailbox.send(MailEvent(
-                    team_id=self._team_id,
-                    from_agent=agent_id,
-                    to_agent=self._lead_id,
-                    event_type=MailEventType.PROGRESS_NOTICE,
-                    payload={
-                        "status": status,
-                        "summary": summary[:2000],
-                        "role": role,
-                        "task": task[:200],
-                        "spawn_id": spawn_id,
-                        "iterations_used": result.iterations_used,
-                    },
-                ))
+        current_spawn_id = spawn_id
+        conversation_history: list[str] = [f"[Original Task] {task}"]
+        max_rounds = 10  # Max Q&A rounds before forcing completion
 
-                # Update status
-                new_status = TeamMemberStatus.IDLE if result.success else TeamMemberStatus.FAILED
+        for round_num in range(max_rounds):
+            # Poll until current run completes
+            result = await self._poll_for_result(current_spawn_id, timeout_polls=600)
+
+            if result is None:
+                # Timeout
+                logger.warning("team.teammate_timeout", agent_id=agent_id,
+                               spawn_id=current_spawn_id, round=round_num)
+                self._mailbox.send(MailEvent(
+                    team_id=self._team_id, from_agent=agent_id,
+                    to_agent=self._lead_id,
+                    event_type=MailEventType.ERROR_NOTICE,
+                    payload={"error": "teammate timed out", "spawn_id": current_spawn_id},
+                ))
                 try:
-                    self._registry.update_status(agent_id, new_status)
+                    self._registry.update_status(agent_id, TeamMemberStatus.FAILED)
+                except Exception:
+                    pass
+                return
+
+            summary = result.final_answer or result.error or ""
+            conversation_history.append(f"[Round {round_num + 1} output] {summary[:2000]}")
+
+            # Check if this run asked a question or submitted a plan
+            pending_question = self._check_pending_question(agent_id)
+            pending_plan = self._check_pending_plan(agent_id) if not pending_question else None
+
+            if pending_question and result.success:
+                # Sub-agent asked a question — enter WAITING_ANSWER
+                request_id = pending_question.get("request_id", "")
+                question_text = pending_question.get("question", "")
+
+                logger.info("team.teammate_waiting_answer",
+                            agent_id=agent_id, role=role, request_id=request_id,
+                            question=question_text[:100])
+
+                try:
+                    self._registry.update_status(agent_id, TeamMemberStatus.WAITING_ANSWER)
                 except Exception:
                     pass
 
-                logger.info(
-                    "team.teammate_completed",
-                    agent_id=agent_id, spawn_id=spawn_id,
-                    success=result.success,
-                )
-
-                # Trigger auto-summary callback (framework-level)
-                if self._on_result_callback is not None:
+                # Escalate QUESTION to main model
+                if self._on_event_escalation is not None:
                     try:
-                        await self._on_result_callback(
-                            role=role,
-                            status=status,
-                            summary=summary[:2000],
-                            agent_id=agent_id,
-                            task=task[:200],
+                        await self._on_event_escalation(
+                            role=role, event_type="QUESTION",
+                            summary=f"Question from {role}: {question_text}",
+                            agent_id=agent_id, request_id=request_id,
                         )
-                    except Exception as cb_err:
-                        logger.warning("team.result_callback_failed", error=str(cb_err))
+                    except Exception:
+                        pass
 
-                return
+                # Wait for answer (delivered via answer_question → _pending_answers)
+                answer = await self._wait_for_answer(agent_id, timeout_seconds=300)
 
-            await asyncio.sleep(0.5)
+                if answer is not None:
+                    conversation_history.append(f"[Answer to your question] {answer}")
+                    try:
+                        self._registry.update_status(agent_id, TeamMemberStatus.WORKING)
+                    except Exception:
+                        pass
+                    continuation_spawn_id = await self._spawn_continuation(
+                        agent_id=agent_id, role=role, task=task,
+                        conversation_history=conversation_history, answer=answer,
+                    )
+                    if continuation_spawn_id:
+                        current_spawn_id = continuation_spawn_id
+                        continue
+                    logger.warning("team.continuation_spawn_failed",
+                                   agent_id=agent_id, role=role)
+                else:
+                    logger.warning("team.teammate_answer_timeout",
+                                   agent_id=agent_id, role=role)
 
-        # Timeout
-        logger.warning("team.teammate_timeout", agent_id=agent_id, spawn_id=spawn_id)
-        self._mailbox.send(MailEvent(
-            team_id=self._team_id,
-            from_agent=agent_id,
-            to_agent=self._lead_id,
-            event_type=MailEventType.ERROR_NOTICE,
-            payload={"error": "teammate timed out", "spawn_id": spawn_id},
-        ))
+            elif pending_plan and result.success:
+                # Sub-agent submitted a plan — enter WAITING_APPROVAL
+                request_id = pending_plan.get("request_id", "")
+                title = pending_plan.get("title", "")
+
+                logger.info("team.teammate_waiting_approval",
+                            agent_id=agent_id, role=role, request_id=request_id,
+                            title=title[:100])
+
+                try:
+                    self._registry.update_status(agent_id, TeamMemberStatus.WAITING_APPROVAL)
+                except Exception:
+                    pass
+
+                # Escalate PLAN to main model
+                if self._on_event_escalation is not None:
+                    try:
+                        await self._on_event_escalation(
+                            role=role, event_type="PLAN_SUBMISSION",
+                            summary=f"Plan from {role}: {title}",
+                            agent_id=agent_id, request_id=request_id,
+                        )
+                    except Exception:
+                        pass
+
+                # Wait for approval (delivered via approve/reject_plan → _pending_approvals)
+                approval = await self._wait_for_approval(agent_id, timeout_seconds=300)
+
+                if approval is not None:
+                    approved = approval.get("approved", False)
+                    feedback = approval.get("feedback", "")
+                    status_word = "approved" if approved else "rejected"
+                    continuation_text = f"Your plan was {status_word}."
+                    if feedback:
+                        continuation_text += f" Feedback: {feedback}"
+                    conversation_history.append(f"[Plan {status_word}] {continuation_text}")
+                    try:
+                        self._registry.update_status(agent_id, TeamMemberStatus.WORKING)
+                    except Exception:
+                        pass
+                    continuation_spawn_id = await self._spawn_continuation(
+                        agent_id=agent_id, role=role, task=task,
+                        conversation_history=conversation_history,
+                        answer=continuation_text,
+                    )
+                    if continuation_spawn_id:
+                        current_spawn_id = continuation_spawn_id
+                        continue
+                    logger.warning("team.continuation_spawn_failed",
+                                   agent_id=agent_id, role=role)
+                else:
+                    logger.warning("team.teammate_approval_timeout",
+                                   agent_id=agent_id, role=role)
+
+            # This is the final result — no pending question or answer timeout
+            self._finalize_teammate_result(
+                agent_id=agent_id, spawn_id=current_spawn_id,
+                role=role, task=task, result=result,
+            )
+            return
+
+        # Exhausted max Q&A rounds
+        logger.warning("team.teammate_max_rounds", agent_id=agent_id, role=role,
+                        rounds=max_rounds)
         try:
             self._registry.update_status(agent_id, TeamMemberStatus.FAILED)
         except Exception:
             pass
 
+    async def _poll_for_result(self, spawn_id: str, timeout_polls: int = 600):
+        """Poll SubAgentRuntime until result is available or timeout."""
+        import asyncio
+
+        for _ in range(timeout_polls):
+            result = await self._runtime.collect_result(spawn_id, wait=False)
+            if result is not None:
+                return result
+            await asyncio.sleep(0.5)
+        return None
+
+    def _check_pending_question(self, agent_id: str) -> dict | None:
+        """Check if this agent has a pending QUESTION in the lead's inbox.
+
+        Uses non-destructive peek so other teammates' messages are not lost.
+        Only consumes the specific QUESTION event that matches this agent.
+        """
+        # First check already-processed pending_requests mapping
+        for request_id, from_agent in list(self._pending_requests.items()):
+            if from_agent == agent_id:
+                return {"request_id": request_id, "question": f"(request_id={request_id})"}
+
+        # Peek (non-destructive) at lead inbox for unprocessed QUESTION from this agent
+        from agent_framework.models.team import MailEventType
+        from agent_framework.notification.bus import BusAddress
+
+        address = BusAddress(
+            agent_id=self._lead_id,
+            group=self._registry.get_team_id(),
+        )
+        envelopes = self._mailbox._bus.peek(address)
+
+        for env in envelopes:
+            event = self._mailbox._envelope_to_mail(env)
+            if (event.event_type == MailEventType.QUESTION
+                    and event.from_agent == agent_id):
+                request_id = event.request_id or event.payload.get("request_id", "")
+                question = event.payload.get("question", "")
+                # Process only this specific event (saves mapping)
+                self._handle_question(event)
+                # Mark only this envelope as delivered (consume it)
+                self._mailbox._bus._persistence.mark_delivered(env.envelope_id)
+                return {"request_id": request_id, "question": question}
+
+        return None
+
+    def _check_pending_plan(self, agent_id: str) -> dict | None:
+        """Check if this agent has a pending PLAN_SUBMISSION in the lead's inbox.
+
+        Uses non-destructive peek so other teammates' messages are not lost.
+        """
+        # Check already-processed pending_requests for plan-related entries
+        for request_id, from_agent in list(self._pending_requests.items()):
+            if from_agent == agent_id and request_id.startswith("plan_"):
+                return {"request_id": request_id, "title": f"(request_id={request_id})"}
+
+        # Peek at lead inbox for PLAN_SUBMISSION from this agent
+        from agent_framework.models.team import MailEventType
+        from agent_framework.notification.bus import BusAddress
+
+        address = BusAddress(
+            agent_id=self._lead_id,
+            group=self._registry.get_team_id(),
+        )
+        envelopes = self._mailbox._bus.peek(address)
+
+        for env in envelopes:
+            event = self._mailbox._envelope_to_mail(env)
+            if (event.event_type == MailEventType.PLAN_SUBMISSION
+                    and event.from_agent == agent_id):
+                request_id = event.payload.get("request_id", "")
+                title = event.payload.get("title", "")
+                self._handle_plan(event)
+                self._mailbox._bus._persistence.mark_delivered(env.envelope_id)
+                return {"request_id": request_id, "title": title}
+
+        return None
+
+    async def _wait_for_approval(self, agent_id: str, timeout_seconds: int = 300) -> dict | None:
+        """Wait for approval to be delivered via approve_plan/reject_plan.
+
+        approve_plan()/reject_plan() put the result into _pending_approvals[agent_id].
+        """
+        import asyncio
+        polls = int(timeout_seconds / 0.5)
+        for _ in range(polls):
+            approval = self._pending_approvals.pop(agent_id, None)
+            if approval is not None:
+                return approval
+            await asyncio.sleep(0.5)
+        return None
+
+    async def _wait_for_answer(self, agent_id: str, timeout_seconds: int = 300) -> str | None:
+        """Wait for an answer to be delivered to this teammate via answer_question().
+
+        answer_question() puts the answer text into _pending_answers[agent_id].
+        """
+        import asyncio
+        polls = int(timeout_seconds / 0.5)
+        for _ in range(polls):
+            answer = self._pending_answers.pop(agent_id, None)
+            if answer is not None:
+                return answer
+            await asyncio.sleep(0.5)
+        return None
+
+    async def _spawn_continuation(
+        self, agent_id: str, role: str, task: str,
+        conversation_history: list[str], answer: str,
+    ) -> str | None:
+        """Spawn a continuation run for a teammate after receiving an answer.
+
+        Returns the new spawn_id, or None if spawn failed.
+        """
+        if self._runtime is None:
+            return None
+
+        import uuid as _uuid
+        from agent_framework.models.subagent import SpawnMode, SubAgentSpec
+
+        new_spawn_id = _uuid.uuid4().hex[:12]
+        role_def = self._role_definitions.get(role, {})
+        body = ""
+        for td in getattr(self, "_discovered_teams_raw", []):
+            if td.get("team_id") == role:
+                body = td.get("body", "")
+                break
+
+        continuation_task = (
+            f"[TEAM PROTOCOL] You are '{role}' in team '{self._team_id}'. "
+            f"Your agent_id is '{agent_id}'. "
+            f"The lead agent_id is '{self._lead_id}'. "
+            f"You asked a question earlier, and the lead has answered.\n\n"
+        )
+        if body:
+            continuation_task += f"[ROLE INSTRUCTIONS]\n{body}\n\n"
+        continuation_task += "[CONVERSATION HISTORY]\n"
+        continuation_task += "\n".join(conversation_history[-6:])  # Last 6 entries
+        continuation_task += (
+            f"\n\n[CONTINUE] The lead answered your question: \"{answer}\"\n"
+            f"Please continue working on the original task using this information. "
+            f"When you are done, provide your final result."
+        )
+
+        spec = SubAgentSpec(
+            parent_run_id=self._team_id,
+            spawn_id=new_spawn_id,
+            task_input=continuation_task,
+            mode=SpawnMode.EPHEMERAL,
+            tool_name_whitelist=role_def.get("allowed-tools"),
+            max_iterations=20,
+            deadline_ms=0,
+        )
+
+        try:
+            await self._runtime.spawn_async(spec, None)
+            logger.info("team.continuation_spawned", agent_id=agent_id,
+                         role=role, new_spawn_id=new_spawn_id)
+            return new_spawn_id
+        except Exception as exc:
+            logger.error("team.continuation_spawn_error", error=str(exc))
+            return None
+
+    async def _finalize_teammate_result(
+        self, agent_id: str, spawn_id: str, role: str, task: str, result: Any,
+    ) -> None:
+        """Finalize a teammate's result: send notification, update status, trigger callback."""
+        from agent_framework.models.team import MailEvent, MailEventType, TeamMemberStatus
+
+        status = "completed" if result.success else "failed"
+        summary = result.final_answer or result.error or ""
+
+        # Send mailbox event for protocol tracking
+        self._mailbox.send(MailEvent(
+            team_id=self._team_id,
+            from_agent=agent_id,
+            to_agent=self._lead_id,
+            event_type=MailEventType.PROGRESS_NOTICE,
+            payload={
+                "status": status,
+                "summary": summary[:2000],
+                "role": role,
+                "task": task[:200],
+                "spawn_id": spawn_id,
+                "iterations_used": result.iterations_used,
+            },
+        ))
+
+        # Move to RESULT_READY (not IDLE — wait for main model to consume)
+        new_status = TeamMemberStatus.RESULT_READY if result.success else TeamMemberStatus.FAILED
+        try:
+            self._registry.update_status(agent_id, new_status)
+        except Exception:
+            pass
+
+        logger.info("team.teammate_completed", agent_id=agent_id,
+                     spawn_id=spawn_id, success=result.success,
+                     status=new_status.value)
+
+        # Trigger framework-level notification callback
+        if self._on_result_callback is not None:
+            try:
+                await self._on_result_callback(
+                    role=role, status=status, summary=summary[:2000],
+                    agent_id=agent_id, task=task[:200], spawn_id=spawn_id,
+                )
+            except Exception as cb_err:
+                logger.warning("team.result_callback_failed", error=str(cb_err))
+
+        # Clean up conversation context
+        self._active_teammate_ctx.pop(agent_id, None)
+
     # ── Inbox processing ───────────────────────────────────────
 
     def process_inbox(self) -> list[dict]:
-        """Read and process Lead's inbox by event priority."""
+        """Read and process Lead's inbox by event priority.
+
+        Events matching the notification policy are escalated to the main model
+        via _on_event_escalation callback (QUESTION, PLAN, BROADCAST, etc.).
+        """
         from agent_framework.models.team import EVENT_PRIORITY
 
         events = self._mailbox.read_inbox(self._lead_id)
@@ -263,7 +584,71 @@ class TeamCoordinator:
             result = self._handle_event(event)
             processed.append(result)
             self._mailbox.ack(self._lead_id, event.event_id)
+
+            # Escalate matching events to main model via policy
+            self._maybe_escalate_event(event, result)
+
         return processed
+
+    def _maybe_escalate_event(self, event: Any, result: dict) -> None:
+        """Escalate inbox event to main model if it matches notification policy."""
+        if self._on_event_escalation is None:
+            return
+
+        from agent_framework.models.team import MailEventType
+
+        policy = self._notification_policy
+        event_type = event.event_type
+
+        # Check policy if available; otherwise escalate QUESTION and PLAN always
+        should_escalate = False
+        if policy is not None:
+            topic = event.payload.get("topic", "")
+            should_escalate = policy.should_escalate_mail_event(event_type, topic=topic)
+        else:
+            # Default: escalate QUESTION and PLAN_SUBMISSION
+            should_escalate = event_type in (
+                MailEventType.QUESTION,
+                MailEventType.PLAN_SUBMISSION,
+            )
+
+        if not should_escalate:
+            return
+
+        # Build escalation summary from the processed result
+        role = "unknown"
+        member = self._resolve_member(event.from_agent)
+        if member:
+            role = member.role
+
+        summary_parts = []
+        if event_type == MailEventType.QUESTION:
+            summary_parts.append(f"Question: {result.get('question', '')}")
+        elif event_type == MailEventType.PLAN_SUBMISSION:
+            summary_parts.append(f"Plan: {result.get('title', '')}")
+        elif event_type == MailEventType.BROADCAST_NOTICE:
+            summary_parts.append(f"Broadcast: {event.payload.get('message', '')}")
+        else:
+            summary_parts.append(f"Event: {event_type.value}")
+
+        import asyncio
+        try:
+            coro = self._on_event_escalation(
+                role=role,
+                event_type=event_type.value,
+                summary="; ".join(summary_parts),
+                agent_id=event.from_agent,
+                request_id=result.get("request_id", ""),
+            )
+            loop = asyncio.get_running_loop()
+            if loop.is_running():
+                asyncio.ensure_future(coro)
+            else:
+                loop.run_until_complete(coro)
+        except RuntimeError:
+            pass  # No event loop
+        except Exception as exc:
+            logger.warning("team.escalation_failed", error=str(exc))
 
     def _handle_event(self, event: Any) -> dict:
         """Route event to handler. Returns processing result."""
@@ -280,17 +665,22 @@ class TeamCoordinator:
         return handler(event)
 
     def _handle_question(self, event: Any) -> dict:
-        """Record question for Lead to answer."""
+        """Record question for Lead to answer. Saves request_id → from_agent mapping."""
+        request_id = event.request_id or event.payload.get("request_id", "")
+        if request_id:
+            self._pending_requests[request_id] = event.from_agent
         return {
             "type": "question",
             "from": event.from_agent,
-            "request_id": event.request_id,
+            "request_id": request_id,
             "question": event.payload.get("question", ""),
         }
 
     def _handle_plan(self, event: Any) -> dict:
-        """Record plan submission for Lead to review."""
+        """Record plan submission for Lead to review. Saves request_id → from_agent mapping."""
         request_id = event.payload.get("request_id", "")
+        if request_id:
+            self._pending_requests[request_id] = event.from_agent
         return {
             "type": "plan_submission",
             "from": event.from_agent,
@@ -416,13 +806,16 @@ class TeamCoordinator:
             from agent_framework.models.subagent import SpawnMode, SubAgentSpec
 
             spawn_id = _uuid.uuid4().hex[:12]
+            my_id = member.agent_id if member else agent_id
             team_task = (
                 f"[TEAM PROTOCOL] You are '{role}' in team '{self._team_id}'. "
-                f"Your agent_id is '{member.agent_id if member else agent_id}'. "
-                f"The lead agent_id is '{self._lead_id}'. "
-                f"Report results via mail(action='send', to='{self._lead_id}', "
-                f"event_type='PROGRESS_NOTICE', payload={{\"status\": \"completed\", "
-                f"\"summary\": \"<result>\"}}).\n\n"
+                f"Your agent_id is '{my_id}'. "
+                f"The lead agent_id is '{self._lead_id}'.\n"
+                f"- If you need clarification, use: mail(action='send', to='{self._lead_id}', "
+                f"event_type='QUESTION', payload={{\"question\": \"<your question>\", "
+                f"\"request_id\": \"q_<unique_id>\"}}). Then STOP and wait — "
+                f"the lead will answer, and you will be resumed with the answer.\n"
+                f"- When your task is fully complete, just provide your final answer directly.\n\n"
             )
             if body:
                 team_task += f"[ROLE INSTRUCTIONS]\n{body}\n\n"
@@ -475,7 +868,7 @@ class TeamCoordinator:
         }
 
     def approve_plan(self, request_id: str, feedback: str = "") -> None:
-        """Approve a teammate's plan."""
+        """Approve a teammate's plan and trigger continuation."""
         from agent_framework.models.team import MailEvent, MailEventType
         plan = self._plans.approve(request_id, feedback)
         self._mailbox.send(MailEvent(
@@ -485,9 +878,12 @@ class TeamCoordinator:
             event_type=MailEventType.APPROVAL_RESPONSE,
             payload={"request_id": request_id, "approved": True, "feedback": feedback},
         ))
+        # Deliver approval to the watcher for continuation
+        self._pending_approvals[plan.requester] = {"approved": True, "feedback": feedback}
+        logger.info("team.plan_approved", target=plan.requester, request_id=request_id)
 
     def reject_plan(self, request_id: str, feedback: str = "") -> None:
-        """Reject a teammate's plan."""
+        """Reject a teammate's plan and trigger continuation."""
         from agent_framework.models.team import MailEvent, MailEventType
         plan = self._plans.reject(request_id, feedback)
         self._mailbox.send(MailEvent(
@@ -497,17 +893,66 @@ class TeamCoordinator:
             event_type=MailEventType.APPROVAL_RESPONSE,
             payload={"request_id": request_id, "approved": False, "feedback": feedback},
         ))
+        # Deliver rejection to the watcher for continuation
+        self._pending_approvals[plan.requester] = {"approved": False, "feedback": feedback}
+        logger.info("team.plan_rejected", target=plan.requester, request_id=request_id)
 
-    def answer_question(self, request_id: str, answer: str, to_agent: str) -> None:
-        """Answer a teammate's question."""
+    def answer_question(self, request_id: str, answer: str, to_agent: str = "") -> None:
+        """Answer a teammate's question and trigger continuation.
+
+        Resolves target by request_id first (from _pending_requests),
+        falls back to explicit to_agent for backward compatibility.
+
+        Also delivers the answer to _pending_answers so the background
+        watcher (_watch_teammate) can resume the teammate's execution.
+        """
         from agent_framework.models.team import MailEvent, MailEventType
+
+        # Resolve target: request_id mapping takes priority
+        target = self._pending_requests.pop(request_id, "") or to_agent
+        if not target:
+            logger.warning("team.answer.no_target", request_id=request_id)
+            return
+
         self._mailbox.send(MailEvent(
             team_id=self._team_id,
             from_agent=self._lead_id,
-            to_agent=to_agent,
+            to_agent=target,
             event_type=MailEventType.ANSWER,
             payload={"request_id": request_id, "answer": answer},
         ))
+
+        # Deliver answer to the watcher so it can spawn a continuation run
+        self._pending_answers[target] = answer
+        logger.info("team.answer_delivered", target=target, request_id=request_id)
+
+    # ── Result lifecycle management ──────────────────────────────
+
+    def mark_result_notifying(self, agent_id: str) -> None:
+        """Transition RESULT_READY → NOTIFYING (main model is being notified)."""
+        from agent_framework.models.team import TeamMemberStatus
+        member = self._resolve_member(agent_id)
+        if member and member.status == TeamMemberStatus.RESULT_READY:
+            self._registry.update_status(member.agent_id, TeamMemberStatus.NOTIFYING)
+
+    def mark_result_delivered(self, agent_id: str) -> None:
+        """Transition NOTIFYING → IDLE (main model consumed the result)."""
+        from agent_framework.models.team import TeamMemberStatus
+        member = self._resolve_member(agent_id)
+        if member and member.status in (
+            TeamMemberStatus.NOTIFYING, TeamMemberStatus.RESULT_READY,
+        ):
+            self._registry.update_status(member.agent_id, TeamMemberStatus.IDLE)
+
+    def mark_result_delivery_failed(self, agent_id: str, reason: str = "") -> None:
+        """Transition NOTIFYING/RESULT_READY → FAILED."""
+        from agent_framework.models.team import TeamMemberStatus
+        member = self._resolve_member(agent_id)
+        if member and member.status in (
+            TeamMemberStatus.NOTIFYING, TeamMemberStatus.RESULT_READY,
+        ):
+            self._registry.update_status(member.agent_id, TeamMemberStatus.FAILED)
+            logger.warning("team.result_delivery_failed", agent_id=agent_id, reason=reason)
 
     # ── Shutdown ───────────────────────────────────────────────
 

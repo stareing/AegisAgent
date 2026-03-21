@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Team 全功能细节测试 — 完整链路真实 LLM 验证。
+"""[LEGACY] Team 全功能细节测试 — 完整链路真实 LLM 验证。
+
+⚠️  LEGACY: 此脚本使用旧语义（完成即 IDLE、手动 drain 通知）。
+    当前产品语义已改为 RESULT_READY/NOTIFYING 状态机 + 自动通知。
+    请使用 scripts/test_team_v2.py 作为主验收脚本。
 
 覆盖:
   1. 自动初始化 + 角色注册

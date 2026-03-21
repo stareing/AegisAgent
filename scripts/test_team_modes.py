@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""四种 Team 协作模式全量验证。
+"""[LEGACY] 四种 Team 协作模式全量验证。
+
+⚠️  LEGACY: 此脚本使用旧语义（手动 collect inbox）验证模式 A。
+    当前产品语义已改为"后台自动通知主模型并汇总"。
+    请使用 scripts/test_team_v2.py 作为主验收脚本。
+
+    此脚本保留仅用于:
+    - 模式 B/C/D 的 mailbox 协议语义验证（绕过 LLM）
+    - 历史回归对比
 
 模式 A: LLM 驱动 — Lead 通过 team()/mail() 工具 spawn + collect
 模式 B/C/D: mailbox API 精确验证 — 绕过 LLM 的不确定性，

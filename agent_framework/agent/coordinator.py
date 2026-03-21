@@ -1043,6 +1043,53 @@ class RunCoordinator:
                 error=str(e),
             )
 
+    async def run_background_notification_turn(
+        self,
+        agent: BaseAgent,
+        deps: AgentRuntimeDeps,
+        notifications: list[dict],
+        conversation_history: list[Message] | None = None,
+    ) -> AgentRunResult | None:
+        """Run a background turn to let the main model summarize team results.
+
+        This is NOT a user turn — the input is a <team-notifications> block.
+        The model generates a concise summary of completed team tasks.
+        After successful processing, the caller should mark notifications as delivered.
+
+        Args:
+            notifications: Drained notification dicts from drain_team_notifications().
+            conversation_history: Prior conversation messages (e.g. ReplState.history).
+                Accepts plain list[Message] — not SessionState — to avoid coupling
+                with any specific state container.
+
+        Returns AgentRunResult if the model produced output, None if no-op.
+        """
+        if not notifications:
+            return None
+
+        # Format notifications as structured input
+        lines = ["<team-notifications>"]
+        for n in notifications:
+            role = n.get("role", "unknown")
+            status = n.get("status", "unknown")
+            summary = n.get("summary", "")
+            task = n.get("task", "")
+            lines.append(
+                f'  <result role="{role}" status="{status}" task="{task}">'
+                f"{summary}</result>"
+            )
+        lines.append("</team-notifications>")
+        notification_text = "\n".join(lines)
+
+        # Run a normal turn with the notification as input
+        return await self.run(
+            agent=agent,
+            deps=deps,
+            task=notification_text,
+            initial_session_messages=conversation_history,
+            run_timeout_ms=60_000,  # 1 minute for summary
+        )
+
     @staticmethod
     def _collect_runtime_info(
         agent: BaseAgent | None = None,

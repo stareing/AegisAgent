@@ -1751,26 +1751,50 @@ async def run_classic_repl(fw: AgentFramework, mock_model: InteractiveMockModel 
             print()
     else:
         state.conversation_id = str(uuid.uuid4())
-    # Background display loop — shows team auto-summary notifications from framework
+    # Background display loop — shows team summaries from framework dispatcher.
+    # Terminal only displays; all business logic (notification turns) is in framework core.
     _team_display_task = None
 
-    async def _display_team_notifications():
-        """Display raw team result notifications. Main agent processes on next turn."""
+    async def _display_team_output():
+        """Display team results: auto-summaries from dispatcher + raw notifications as fallback."""
         while True:
             await asyncio.sleep(2)
             try:
-                notifications = fw.drain_team_notifications()
-                if not notifications:
-                    continue
-                print(f"\n  {_yellow('📨 Team 任务完成:')}")
-                for n in notifications:
-                    status_icon = _green("✓") if n["status"] == "completed" else _red("✗")
-                    print(f"    {status_icon} {_cyan(n['role'])}: {n['summary'][:150]}")
-                print(f"{_bold(_green('> '))}", end="", flush=True)
+                # Display auto-generated summaries from background notification turns
+                summaries = fw.drain_team_summaries()
+                for summary in summaries:
+                    print(f"\n  {_yellow('📨 Team 汇总:')}")
+                    print(f"    {summary[:300]}")
+                    print(f"{_bold(_green('> '))}", end="", flush=True)
+
+                # Fallback: if no dispatcher, show raw notifications
+                if not hasattr(fw, "_run_dispatcher") or fw._run_dispatcher is None:
+                    notifications = fw.drain_team_notifications()
+                    if not notifications:
+                        continue
+                    print(f"\n  {_yellow('📨 Team 任务完成:')}")
+                    for n in notifications:
+                        status_icon = _green("✓") if n["status"] == "completed" else _red("✗")
+                        print(f"    {status_icon} {_cyan(n['role'])}: {n['summary'][:150]}")
+                    print(f"{_bold(_green('> '))}", end="", flush=True)
             except Exception:
                 pass
 
-    _team_display_task = asyncio.create_task(_display_team_notifications())
+    _team_display_task = asyncio.create_task(_display_team_output())
+
+    # Upgrade dispatcher with conversation history context.
+    # The framework auto-creates a basic dispatcher in _auto_init_team(),
+    # but the terminal can enhance it with ReplState history for richer summaries.
+    _has_dispatcher = False
+    try:
+        if fw._run_dispatcher is not None:
+            # Stop the auto-created dispatcher and replace with one that has history
+            fw._run_dispatcher.stop()
+        fw.setup_run_dispatcher(history_getter=lambda: state.history)
+        _has_dispatcher = True
+    except Exception:
+        # Check if auto-created dispatcher exists
+        _has_dispatcher = fw._run_dispatcher is not None
 
     while True:
         try:
@@ -1790,6 +1814,9 @@ async def run_classic_repl(fw: AgentFramework, mock_model: InteractiveMockModel 
                 break
             continue
         try:
+            # fw.run_stream() acquires dispatcher lock internally,
+            # so user turns are automatically serialized with background
+            # notification turns — no manual lock needed here.
             output = await _execute_with_progressive(fw, mock_model, state, user_input)
             print(output)
             _auto_checkpoint(fw, state, user_input)
@@ -1799,8 +1826,11 @@ async def run_classic_repl(fw: AgentFramework, mock_model: InteractiveMockModel 
             if os.environ.get("DEBUG"):
                 traceback.print_exc()
 
-    if _team_poll_task:
-        _team_poll_task.cancel()
+    if _team_display_task:
+        _team_display_task.cancel()
+    # Stop dispatcher if running
+    if hasattr(fw, "_run_dispatcher") and fw._run_dispatcher is not None:
+        fw._run_dispatcher.stop()
     # 退出时持久化会话历史
     if fw._memory_store:
         state.save_to_db(fw._memory_store, project_id)

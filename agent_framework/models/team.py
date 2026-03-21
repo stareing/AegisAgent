@@ -71,11 +71,23 @@ class MailEvent(BaseModel, frozen=True):
 # ---------------------------------------------------------------------------
 
 class TeamMemberStatus(str, Enum):
-    """Lifecycle states for a team member."""
+    """Lifecycle states for a team member.
+
+    State machine:
+        IDLE → WORKING (assign_task)
+        WORKING → RESULT_READY (task completed, result stored)
+        RESULT_READY → NOTIFYING (main model being notified)
+        NOTIFYING → IDLE (notification delivered to main model)
+        WORKING → FAILED (task error or timeout)
+        RESULT_READY → FAILED (delivery failure)
+        NOTIFYING → FAILED (notification delivery failure)
+    """
 
     SPAWNING = "SPAWNING"
     WORKING = "WORKING"
     IDLE = "IDLE"
+    RESULT_READY = "RESULT_READY"
+    NOTIFYING = "NOTIFYING"
     WAITING_APPROVAL = "WAITING_APPROVAL"
     WAITING_ANSWER = "WAITING_ANSWER"
     SHUTDOWN_REQUESTED = "SHUTDOWN_REQUESTED"
@@ -271,3 +283,38 @@ EVENT_PRIORITY: dict[MailEventType, int] = {
     MailEventType.SHUTDOWN_ACK: 8,
     MailEventType.ERROR_NOTICE: 8,
 }
+
+
+# ---------------------------------------------------------------------------
+# TeamNotification — structured notification for main model consumption
+# ---------------------------------------------------------------------------
+
+class TeamNotificationType(str, Enum):
+    """Type of team notification event."""
+
+    TASK_COMPLETED = "TASK_COMPLETED"
+    TASK_FAILED = "TASK_FAILED"
+    QUESTION = "QUESTION"
+    PLAN_SUBMISSION = "PLAN_SUBMISSION"
+    BROADCAST = "BROADCAST"
+    ERROR = "ERROR"
+
+
+class TeamNotification(BaseModel, frozen=True):
+    """Structured notification from team member to main model.
+
+    Replaces the loose dict that was previously appended to
+    _pending_team_notifications. Immutable once created.
+    """
+
+    team_id: str
+    agent_id: str
+    role: str
+    notification_type: TeamNotificationType
+    status: str
+    summary: str
+    task: str = ""
+    request_id: str = ""
+    correlation_id: str = ""
+    spawn_id: str = ""
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

@@ -198,6 +198,10 @@ class TeamConfig(BaseModel):
     bus_backend: str = "memory"
     bus_db_path: str = "data/agent_bus.db"
     teammates: list[TeammateConfig] = Field(default_factory=list)
+    # Notification policy for auto-escalation to main model
+    team_auto_notify_enabled: bool = True
+    team_auto_notify_batch_window_ms: int = 500
+    team_auto_notify_max_batch_size: int = 10
 
 
 class LoggingConfig(BaseModel):
