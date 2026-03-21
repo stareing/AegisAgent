@@ -34,7 +34,7 @@ _LEAD_ACTIONS = frozenset({
         "Lead-only actions: create, spawn, assign, approve, reject, answer, shutdown, collect. "
         "All agents: status."
     ),
-    category="delegation",
+    category="team",
     require_confirm=False,
     tags=["system", "delegation", "team"],
     namespace=SYSTEM_NAMESPACE,
@@ -88,8 +88,8 @@ async def execute_team(executor: ToolExecutor, args: dict) -> dict[str, Any]:
         return {**identity, "agent_id": spawned_id, "spawned": True}
 
     if action == "assign":
-        coordinator.assign_task(args.get("task", ""), args.get("agent_id", ""))
-        return {**identity, "assigned": True}
+        result = coordinator.assign_task(args.get("task", ""), args.get("agent_id", ""))
+        return {**identity, **result}
 
     if action == "approve":
         coordinator.approve_plan(args.get("request_id", ""), args.get("feedback", ""))
@@ -132,7 +132,7 @@ async def execute_team(executor: ToolExecutor, args: dict) -> dict[str, Any]:
         "Mailbox: send/broadcast/read/ack/reply/publish/subscribe events between agents. "
         "All team members can use all mail actions."
     ),
-    category="delegation",
+    category="team",
     require_confirm=False,
     tags=["system", "delegation", "team"],
     namespace=SYSTEM_NAMESPACE,

@@ -323,12 +323,47 @@ class TeamCoordinator:
 
     # ── Task management ───────────────────────────────────────
 
-    def assign_task(self, task_description: str, agent_id: str) -> None:
-        """Assign a task to a teammate by spawning a real sub-agent execution.
+    def assign_task(self, task_description: str, agent_id: str) -> dict:
+        """Assign a task to a teammate. Sync wrapper around _assign_task_async.
 
-        Finds the teammate's role, then runs the task via SubAgentRuntime.
-        The result is reported back to Lead's mailbox automatically.
+        When called from async context (tool executor), spawns real sub-agent.
+        When called from sync context (tests), just sends MailEvent.
         """
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+            # We're in async context — schedule the spawn
+            asyncio.ensure_future(self._assign_task_async(task_description, agent_id))
+        except RuntimeError:
+            pass  # No running loop — sync test, skip spawn
+
+        from agent_framework.models.team import MailEvent, MailEventType
+        member = self._registry.get(agent_id)
+        if member is None:
+            for m in self._registry.list_members():
+                if m.role == agent_id:
+                    member = m
+                    break
+        role = member.role if member else "teammate"
+
+        self._mailbox.send(MailEvent(
+            team_id=self._team_id,
+            from_agent=self._lead_id,
+            to_agent=member.agent_id if member else agent_id,
+            event_type=MailEventType.TASK_ASSIGNMENT,
+            payload={"task": task_description},
+        ))
+
+        return {
+            "assigned": True,
+            "agent_id": member.agent_id if member else agent_id,
+            "role": role,
+            "task": task_description[:100],
+            "executing": self._runtime is not None,
+        }
+
+    async def _assign_task_async(self, task_description: str, agent_id: str) -> None:
+        """Async implementation: spawn real sub-agent to execute the task."""
         from agent_framework.models.team import MailEvent, MailEventType, TeamMemberStatus
 
         # Find the member's role to get TEAM.md context
@@ -382,19 +417,25 @@ class TeamCoordinator:
                 tool_name_whitelist=role_def.get("allowed-tools"),
                 max_iterations=10,
             )
+            # Spawn the sub-agent (awaited — runs reliably)
+            actual_sid = await self._runtime.spawn_async(spec, None)
+
+            # Background watcher reports result to Lead inbox
             import asyncio
 
-            async def _spawn_and_watch() -> None:
+            async def _safe_watch(aid: str, sid: str, r: str, t: str) -> None:
                 try:
-                    await self._runtime.spawn_async(spec, None)
-                    await self._watch_teammate(
-                        member.agent_id if member else agent_id,
-                        spawn_id, role, task_description,
-                    )
-                except Exception:
-                    pass
+                    await self._watch_teammate(aid, sid, r, t)
+                except Exception as exc:
+                    logger.warning("team.assign.watch_failed", error=str(exc))
 
-            asyncio.ensure_future(_spawn_and_watch())
+            asyncio.create_task(_safe_watch(
+                member.agent_id if member else agent_id,
+                spawn_id, role, task_description,
+            ))
+
+            logger.info("team.assign.spawned", role=role, spawn_id=spawn_id,
+                         task=task_description[:80])
 
         # Also send MailEvent for protocol tracking
         self._mailbox.send(MailEvent(
@@ -404,6 +445,14 @@ class TeamCoordinator:
             event_type=MailEventType.TASK_ASSIGNMENT,
             payload={"task": task_description},
         ))
+
+        return {
+            "assigned": True,
+            "agent_id": member.agent_id if member else agent_id,
+            "role": role,
+            "task": task_description[:100],
+            "executing": self._runtime is not None,
+        }
 
     def approve_plan(self, request_id: str, feedback: str = "") -> None:
         """Approve a teammate's plan."""
