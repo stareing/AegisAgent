@@ -369,6 +369,7 @@ class TeamCoordinator:
             "role": role,
             "task": task_description[:100],
             "executing": self._runtime is not None,
+            "next_step": "Use team(action='collect') to get results when the task completes.",
         }
 
     async def _assign_task_async(self, task_description: str, agent_id: str) -> None:
