@@ -458,6 +458,11 @@ class AgentFramework:
         except RuntimeError:
             asyncio.run(_spawn_all())
 
+        # Reset quota — auto-spawned team members don't count toward
+        # the per-run sub-agent limit. Only user-initiated spawns count.
+        if runtime is not None:
+            runtime._scheduler._run_counts.pop(team_id, None)
+
         logger.info(
             "teams.auto_initialized",
             team_id=team_id, lead=lead_id,
