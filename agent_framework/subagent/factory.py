@@ -148,6 +148,17 @@ class SubAgentFactory:
             max_concurrent=getattr(parent_executor, "_max_concurrent", 5),
         )
 
+        # Propagate team context from parent executor to child
+        # so spawned teammates can use team()/mail() tools.
+        scoped_tool_executor._current_spawn_id = spec.spawn_id or sub_agent_id
+        for attr in ("_team_coordinator", "_team_mailbox", "_current_team_id"):
+            parent_val = getattr(parent_executor, attr, None)
+            if parent_val is not None:
+                setattr(scoped_tool_executor, attr, parent_val)
+        # Spawned agents are teammates, not leads
+        if hasattr(parent_executor, "_team_coordinator"):
+            scoped_tool_executor._current_agent_role = "teammate"
+
         # Assemble deps
         deps = AgentRuntimeDeps(
             tool_registry=tool_registry,

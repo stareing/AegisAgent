@@ -111,6 +111,7 @@ class TeamCoordinator:
                 spawn_id=spawn_id,
                 task_input=task_input,
                 mode=SpawnMode.EPHEMERAL,
+                skill_id=skill_id,
                 max_iterations=10,
             )
             # Spawn async — returns immediately, runs in background
@@ -118,12 +119,40 @@ class TeamCoordinator:
 
             # Launch background task to collect result and report to Lead
             import asyncio
-            asyncio.create_task(
-                self._watch_teammate(agent_id, actual_spawn_id, role, task_input)
-            )
+
+            async def _safe_watch(aid: str, sid: str, r: str, t: str) -> None:
+                try:
+                    await self._watch_teammate(aid, sid, r, t)
+                except Exception as exc:
+                    logger.error("team.watch_teammate.crashed",
+                                 agent_id=aid, spawn_id=sid, error=str(exc))
+                    from agent_framework.models.team import MailEvent, MailEventType
+                    self._mailbox.send(MailEvent(
+                        team_id=self._team_id,
+                        from_agent=aid,
+                        to_agent=self._lead_id,
+                        event_type=MailEventType.ERROR_NOTICE,
+                        payload={"error": f"Watch task crashed: {exc}", "spawn_id": sid},
+                    ))
+                    try:
+                        from agent_framework.models.team import TeamMemberStatus
+                        self._registry.update_status(aid, TeamMemberStatus.FAILED)
+                    except Exception:
+                        pass
+
+            asyncio.create_task(_safe_watch(agent_id, actual_spawn_id, role, task_input))
         else:
-            logger.warning("team.spawn.no_runtime", agent_id=agent_id,
-                           hint="SubAgentRuntime not configured, teammate is a stub")
+            # No runtime — teammate cannot execute, mark as failed
+            logger.error("team.spawn.no_runtime", agent_id=agent_id)
+            self._registry.update_status(agent_id, TeamMemberStatus.FAILED)
+            self._mailbox.send(MailEvent(
+                team_id=self._team_id,
+                from_agent=agent_id,
+                to_agent=self._lead_id,
+                event_type=MailEventType.ERROR_NOTICE,
+                payload={"error": "SubAgentRuntime not configured, cannot execute"},
+            ))
+            return agent_id
 
         self._registry.update_status(agent_id, TeamMemberStatus.WORKING)
         logger.info("team.teammate_spawned", agent_id=agent_id, role=role, team_id=self._team_id)

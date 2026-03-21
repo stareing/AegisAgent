@@ -1638,6 +1638,7 @@ def _setup_team(fw: AgentFramework, team_name: str) -> dict:
         executor._team_mailbox = mailbox
         executor._current_agent_role = "lead"
         executor._current_team_id = team_id
+        executor._current_spawn_id = lead_id
 
     return {
         "bus": bus,
