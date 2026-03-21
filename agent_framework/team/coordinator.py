@@ -435,18 +435,34 @@ class TeamCoordinator:
                 entry["is_you"] = True
             all_members.append(entry)
 
+        # Available roles from TEAM.md definitions (can be spawned)
+        available_roles = []
+        active_roles = {m.role for m in members if m.role != "lead"}
+        for role_name, role_def in self._role_definitions.items():
+            available_roles.append({
+                "role": role_name,
+                "description": role_def.get("description", ""),
+                "spawned": role_name in active_roles,
+            })
+
         return {
             "team_id": self._team_id,
             "lead": self._lead_id,
             "your_id": caller_id,
             "your_role": "lead" if caller_id == self._lead_id else "teammate",
+            "available_roles": available_roles,
             "teammate_count": len(member_list),
             "teammates": member_list,
             "members": all_members,
             "note": (
-                "You are the lead. Teammates listed below are your sub-agents. Do NOT send mail to yourself."
-                if caller_id == self._lead_id
-                else f"You are teammate '{caller_id}'. Others listed are your peers. The lead is '{self._lead_id}'."
+                "You are the lead. Use team(action='spawn', role='<role>', task='<task>') to create teammates. "
+                "Do NOT send mail to yourself."
+                if caller_id == self._lead_id and not member_list
+                else (
+                    "You are the lead. Teammates listed below are your sub-agents. Do NOT send mail to yourself."
+                    if caller_id == self._lead_id
+                    else f"You are teammate '{caller_id}'. Others listed are your peers. The lead is '{self._lead_id}'."
+                )
             ),
             "pending_plans": len(self._plans.list_pending()),
             "pending_shutdowns": len(self._shutdowns.list_pending()),
