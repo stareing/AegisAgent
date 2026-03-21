@@ -769,7 +769,6 @@ class DelegationEventSummary(BaseModel):
 class RuntimeNotificationType(str, Enum):
     BACKGROUND_TASK = "background_task"
     DELEGATION_EVENT = "delegation_event"
-    TEAM_EVENT = "team_event"
 
 
 class RuntimeNotification(BaseModel):

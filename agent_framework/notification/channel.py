@@ -49,9 +49,6 @@ class RuntimeNotificationChannel:
         self._last_seen_seq: dict[str, int] = {}
         # Track spawn_ids we're monitoring for delegation events
         self._monitored_spawns: set[str] = set()
-        # AgentBus integration — optional, set via set_agent_bus()
-        self._agent_bus: Any = None
-        self._bus_drain_address: Any = None
 
     @property
     def bg_notifier(self) -> BackgroundNotifier:
@@ -61,16 +58,6 @@ class RuntimeNotificationChannel:
     def set_interaction_channel(self, channel: InMemoryInteractionChannel) -> None:
         """Wire the interaction channel (may be set after construction)."""
         self._interaction_channel = channel
-
-    def set_agent_bus(self, bus: Any, drain_address: Any) -> None:
-        """Wire AgentBus as additional event source for drain_all().
-
-        Args:
-            bus: AgentBus instance.
-            drain_address: BusAddress for the parent agent (used for drain).
-        """
-        self._agent_bus = bus
-        self._bus_drain_address = drain_address
 
     def monitor_spawn(self, spawn_id: str) -> None:
         """Register a spawn_id for delegation event monitoring."""
@@ -130,21 +117,6 @@ class RuntimeNotificationChannel:
                         spawn_id, event.event_id, AckLevel.RECEIVED
                     )
 
-        # 3. Drain AgentBus team events
-        if self._agent_bus is not None and self._bus_drain_address is not None:
-            bus_events = self._agent_bus.drain(self._bus_drain_address, "team.**")
-            for env in bus_events:
-                notifications.append(RuntimeNotification(
-                    notification_id=f"bus_{env.envelope_id}",
-                    notification_type=RuntimeNotificationType.TEAM_EVENT,
-                    payload={
-                        "envelope_id": env.envelope_id,
-                        "topic": env.topic,
-                        "source_agent": env.source.agent_id,
-                        "data": env.payload,
-                    },
-                ))
-
         return notifications
 
     @property
@@ -157,9 +129,6 @@ class RuntimeNotificationChannel:
                 last_seq = self._last_seen_seq.get(spawn_id, 0)
                 if self._interaction_channel.get_latest_sequence_no(spawn_id) > last_seq:
                     return True
-        if self._agent_bus is not None and self._bus_drain_address is not None:
-            if self._agent_bus.pending_count(self._bus_drain_address) > 0:
-                return True
         return False
 
     def mark_projected(self, spawn_id: str, event_id: str) -> None:
