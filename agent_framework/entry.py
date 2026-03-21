@@ -353,7 +353,8 @@ class AgentFramework:
             self._interaction_channel
         )
 
-        # Discover and register team definitions from .agent-team/
+        # Discover team definitions from .agent-team/ and auto-initialize
+        # (same pattern as skills: discover → load → ready to use)
         self._discovered_teams: list[dict] = []
         try:
             import pathlib
@@ -374,6 +375,11 @@ class AgentFramework:
                         count=len(self._discovered_teams),
                         names=[t["team_id"] for t in self._discovered_teams],
                     )
+                    # Auto-initialize team (like skills auto-load)
+                    try:
+                        self._auto_init_team()
+                    except Exception as te:
+                        logger.warning("teams.auto_init_failed", error=str(te))
         except Exception:
             pass
 
@@ -383,6 +389,64 @@ class AgentFramework:
             "framework.setup_complete",
             model=self.config.model.default_model_name,
             tools_count=len(self._registry.list_tools()),
+        )
+
+    def _auto_init_team(self) -> None:
+        """Auto-initialize team from discovered .agent-team/ definitions.
+
+        Same as _setup_team() but lives in entry.py to avoid circular import.
+        Called during setup() when .agent-team/ has TEAM.md files.
+        """
+        import uuid
+        from agent_framework.notification.bus import AgentBus
+        from agent_framework.notification.persistence import InMemoryBusPersistence
+        from agent_framework.team.registry import TeamRegistry
+        from agent_framework.team.plan_registry import PlanRegistry
+        from agent_framework.team.shutdown_registry import ShutdownRegistry
+        from agent_framework.team.mailbox import TeamMailbox
+        from agent_framework.team.coordinator import TeamCoordinator
+
+        team_id = f"team_{uuid.uuid4().hex[:8]}"
+        bus = AgentBus(persistence=InMemoryBusPersistence())
+        registry = TeamRegistry(team_id)
+        plan_reg = PlanRegistry()
+        shutdown_reg = ShutdownRegistry()
+        mailbox = TeamMailbox(bus, registry)
+
+        lead_id = self._agent.agent_id if self._agent else "lead"
+        runtime = getattr(self._deps, "sub_agent_runtime", None)
+
+        coordinator = TeamCoordinator(
+            team_id=team_id,
+            lead_agent_id=lead_id,
+            mailbox=mailbox,
+            team_registry=registry,
+            plan_registry=plan_reg,
+            shutdown_registry=shutdown_reg,
+            sub_agent_runtime=runtime,
+        )
+        coordinator.create_team("auto")
+
+        # Register discovered role definitions
+        for role_def in self._discovered_teams:
+            role_name = role_def.get("team_id", "")
+            fm = role_def.get("frontmatter", {})
+            if role_name:
+                coordinator.register_role_definition(role_name, fm)
+
+        # Wire into tool executor
+        executor = self._deps.tool_executor
+        executor._team_coordinator = coordinator
+        executor._team_mailbox = mailbox
+        executor._current_agent_role = "lead"
+        executor._current_team_id = team_id
+        executor._current_spawn_id = lead_id
+
+        logger.info(
+            "teams.auto_initialized",
+            team_id=team_id,
+            lead=lead_id,
+            roles=[t["team_id"] for t in self._discovered_teams],
         )
 
     def _bind_config_policies(self, agent: Any) -> None:

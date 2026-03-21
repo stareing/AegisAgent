@@ -24,6 +24,8 @@
 * **一处定义**：同一规则、常量、协议只保留一个权威定义。
 * **代码审核**：由 codex 排查代码是否和需求一致
 
+禁止自动推送
+
 ## Project Overview
 Offline-first, extensible AI Agent Framework in Python 3.11+ / pydantic v2.
 Protocol → Base → Default three-layer pattern. Tech: structlog, blinker, litellm, SQLite, MCP SDK, A2A SDK.

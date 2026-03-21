@@ -53,10 +53,16 @@ class TeamCoordinator:
         self._runtime = sub_agent_runtime
         # Map request_id → from_agent for safe answer routing
         self._pending_requests: dict[str, str] = {}
+        # Role definitions from TEAM.md discovery (role_name → frontmatter)
+        self._role_definitions: dict[str, dict] = {}
 
     @property
     def team_id(self) -> str:
         return self._team_id
+
+    def register_role_definition(self, role_name: str, frontmatter: dict) -> None:
+        """Register a TEAM.md role definition for tool whitelist enforcement."""
+        self._role_definitions[role_name] = frontmatter
 
     # ── Team lifecycle ─────────────────────────────────────────
 
@@ -126,12 +132,17 @@ class TeamCoordinator:
                 f"[TASK] {task_input}"
             )
 
+            # Look up allowed-tools from TEAM.md definition
+            role_def = self._role_definitions.get(role, {})
+            tool_name_whitelist = role_def.get("allowed-tools") or None
+
             spec = SubAgentSpec(
                 parent_run_id=self._team_id,
                 spawn_id=spawn_id,
                 task_input=team_task,
                 mode=SpawnMode.EPHEMERAL,
                 skill_id=skill_id,
+                tool_name_whitelist=tool_name_whitelist,
                 max_iterations=10,
             )
             # Spawn async — returns immediately, runs in background

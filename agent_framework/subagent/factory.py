@@ -132,6 +132,11 @@ class SubAgentFactory:
             all_tools, _BLOCKED_CATEGORIES, spec.tool_category_whitelist
         )
 
+        # Per-tool name whitelist (from TEAM.md allowed-tools)
+        if spec.tool_name_whitelist:
+            name_set = set(spec.tool_name_whitelist)
+            allowed_names = [n for n in allowed_names if n in name_set]
+
         tool_registry = ScopedToolRegistry(
             source=self._parent_deps.tool_registry,
             whitelist=allowed_names,

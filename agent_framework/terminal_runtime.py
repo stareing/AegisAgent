@@ -1023,19 +1023,22 @@ async def _cmd_team_list(
 ) -> None:
     teams = getattr(fw, "_discovered_teams", [])
     if not teams:
-        print(f"  {_dim('未发现团队定义 (在 .agent-team/ 下放置 TEAM.md)')}")
+        print(f"  {_dim('未发现角色定义 (在 .agent-team/<name>/TEAM.md 下放置)')}")
         return
-    print()
+    print(f"\n  {_bold(_yellow(f'已发现 {len(teams)} 个 Team 角色:'))}")
     for t in teams:
         fm = t.get("frontmatter", {})
         name = t.get("team_id", "?")
         desc = fm.get("description", "")
-        roles = fm.get("roles", [])
+        tools = fm.get("allowed-tools", [])
+        path = t.get("path", "")
         print(f"  {_cyan(name)}")
         if desc:
             print(f"    {_dim(desc)}")
-        if roles:
-            print(f"    roles: {', '.join(roles)}")
+        if tools:
+            print(f"    allowed-tools: {', '.join(tools)}")
+        if path:
+            print(f"    {_dim(str(path))}")
         print()
 
 
@@ -1074,14 +1077,10 @@ async def _cmd_team_start(
 
         print(f"  {_green('Team 已启动')}: {team_name}")
         print(f"    team_id: {state._team_coordinator.team_id}")
-        if matched_def:
-            fm = matched_def.get("frontmatter", {})
-            roles = fm.get("roles", [])
-            if roles:
-                print(f"    roles: {', '.join(roles)}")
-            desc = fm.get("description", "")
-            if desc:
-                print(f"    {_dim(desc)}")
+        discovered = getattr(fw, "_discovered_teams", [])
+        if discovered:
+            role_names = [t.get("team_id", "?") for t in discovered]
+            print(f"    可用角色: {', '.join(role_names)}")
         print(f"    工具: team(action=...) + mail(action=...)")
     except Exception as e:
         print(f"  {_red(f'Team 启动失败: {e}')}")
@@ -1688,6 +1687,14 @@ def _setup_team(fw: AgentFramework, team_name: str) -> dict:
         executor._current_agent_role = "lead"
         executor._current_team_id = team_id
         executor._current_spawn_id = lead_id
+
+    # Register discovered role definitions for tool whitelist enforcement
+    discovered = getattr(fw, "_discovered_teams", [])
+    for role_def in discovered:
+        role_name = role_def.get("team_id", "")
+        fm = role_def.get("frontmatter", {})
+        if role_name:
+            coordinator.register_role_definition(role_name, fm)
 
     return {
         "bus": bus,
