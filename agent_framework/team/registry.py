@@ -38,6 +38,14 @@ class TeamRegistry:
 
     def register(self, member: TeamMember) -> None:
         with self._lock:
+            # Enforce role uniqueness (except "lead" which is always one)
+            if member.role != "lead":
+                for existing in self._members.values():
+                    if existing.role == member.role and existing.agent_id != member.agent_id:
+                        raise ValueError(
+                            f"Role '{member.role}' already registered to '{existing.agent_id}'. "
+                            f"Each role must be unique within a team."
+                        )
             self._members[member.agent_id] = member
 
     def get(self, agent_id: str) -> TeamMember | None:

@@ -282,9 +282,9 @@ class TestModeCPubSub:
         mailbox = team_stack["mailbox"]
         make_tm = team_stack["make_teammate"]
 
-        tm_a = make_tm("tm_pub_a")
-        tm_b = make_tm("tm_pub_b")
-        tm_c = make_tm("tm_pub_c")
+        tm_a = make_tm("tm_pub_a", role="publisher")
+        tm_b = make_tm("tm_pub_b", role="subscriber_b")
+        tm_c = make_tm("tm_pub_c", role="subscriber_c")
 
         # B and C subscribe to "status.update"
         mailbox.subscribe("tm_pub_b", "status.update")
@@ -342,8 +342,8 @@ class TestModeCPubSub:
         mailbox = team_stack["mailbox"]
         make_tm = team_stack["make_teammate"]
 
-        tm_x = make_tm("tm_topicx")
-        tm_y = make_tm("tm_topicy")
+        tm_x = make_tm("tm_topicx", role="deployer")
+        tm_y = make_tm("tm_topicy", role="monitor")
 
         mailbox.subscribe("tm_topicx", "deploy.*")
         mailbox.subscribe("tm_topicy", "monitor.*")
@@ -372,8 +372,8 @@ class TestModeDRequestReply:
         mailbox = team_stack["mailbox"]
         make_tm = team_stack["make_teammate"]
 
-        tm_req = make_tm("tm_requester")
-        tm_resp = make_tm("tm_responder")
+        tm_req = make_tm("tm_requester", role="requester")
+        tm_resp = make_tm("tm_responder", role="responder")
 
         # Requester sends a question event
         request_event = MailEvent(
@@ -413,8 +413,8 @@ class TestModeDRequestReply:
         mailbox = team_stack["mailbox"]
         make_tm = team_stack["make_teammate"]
 
-        tm_a = make_tm("tm_rr_a")
-        tm_b = make_tm("tm_rr_b")
+        tm_a = make_tm("tm_rr_a", role="rr_asker")
+        tm_b = make_tm("tm_rr_b", role="rr_replier")
 
         # Round 1: A asks B
         q1 = mailbox.send(MailEvent(
@@ -505,9 +505,9 @@ class TestCrossModeIntegration:
         mailbox = team_stack["mailbox"]
         make_tm = team_stack["make_teammate"]
 
-        tm_ops = make_tm("tm_ops")
-        tm_dev = make_tm("tm_dev")
-        tm_qa = make_tm("tm_qa")
+        tm_ops = make_tm("tm_ops", role="ops")
+        tm_dev = make_tm("tm_dev", role="dev")
+        tm_qa = make_tm("tm_qa", role="qa")
 
         # Pub/Sub: ops broadcasts status
         mailbox.subscribe("tm_dev", "infra.*")

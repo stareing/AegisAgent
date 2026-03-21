@@ -236,7 +236,7 @@ class AgentFramework:
         # Load file-based skills from directories (SKILL.md)
         import pathlib
         skill_dirs: list[pathlib.Path] = []
-        project_skills = pathlib.Path.cwd() / "skills"
+        project_skills = pathlib.Path.cwd() / ".skills"
         if project_skills.is_dir():
             skill_dirs.append(project_skills)
         user_skills = pathlib.Path.home() / ".agent" / "skills"
@@ -352,6 +352,30 @@ class AgentFramework:
         self._coordinator._notification_channel.set_interaction_channel(
             self._interaction_channel
         )
+
+        # Discover and register team definitions from .agent-team/
+        self._discovered_teams: list[dict] = []
+        try:
+            import pathlib
+            from agent_framework.team.loader import discover_teams
+
+            team_dirs: list[pathlib.Path] = []
+            project_teams = pathlib.Path.cwd() / ".agent-team"
+            if project_teams.is_dir():
+                team_dirs.append(project_teams)
+            user_teams = pathlib.Path.home() / ".agent" / "teams"
+            if user_teams.is_dir():
+                team_dirs.append(user_teams)
+            if team_dirs:
+                self._discovered_teams = discover_teams(team_dirs)
+                if self._discovered_teams:
+                    logger.info(
+                        "teams.discovered",
+                        count=len(self._discovered_teams),
+                        names=[t["team_id"] for t in self._discovered_teams],
+                    )
+        except Exception:
+            pass
 
         self._setup_done = True
 

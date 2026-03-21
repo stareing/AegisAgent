@@ -1017,23 +1017,72 @@ async def _cmd_resume(
     print(f"\n  {_dim('对话已恢复，继续输入即可。')}")
 
 
-@_register_cmd("team-start", "启动 Agent Team 模式", usage="/team-start [team_name]", category="团队")
+@_register_cmd("team-list", "列出已发现的团队定义", category="团队")
+async def _cmd_team_list(
+    fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str,
+) -> None:
+    teams = getattr(fw, "_discovered_teams", [])
+    if not teams:
+        print(f"  {_dim('未发现团队定义 (在 .agent-team/ 下放置 TEAM.md)')}")
+        return
+    print()
+    for t in teams:
+        fm = t.get("frontmatter", {})
+        name = t.get("team_id", "?")
+        desc = fm.get("description", "")
+        roles = fm.get("roles", [])
+        print(f"  {_cyan(name)}")
+        if desc:
+            print(f"    {_dim(desc)}")
+        if roles:
+            print(f"    roles: {', '.join(roles)}")
+        print()
+
+
+@_register_cmd("team-start", "启动 Agent Team", usage="/team-start [team_name]", category="团队")
 async def _cmd_team_start(
     fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str,
 ) -> None:
     if hasattr(state, "_team_coordinator") and state._team_coordinator is not None:
         print(f"  {_yellow('Team 已启动')}: {state._team_coordinator.team_id}")
         return
-    team_name = args.strip() or "default_team"
+
+    team_name = args.strip()
+
+    # Try to match a discovered team definition
+    discovered = getattr(fw, "_discovered_teams", [])
+    matched_def = None
+    if team_name:
+        for t in discovered:
+            if t.get("team_id") == team_name:
+                matched_def = t
+                break
+
+    if not team_name:
+        if discovered:
+            # Auto-select first discovered team
+            matched_def = discovered[0]
+            team_name = matched_def["team_id"]
+        else:
+            team_name = "default_team"
+
     try:
         team_env = _setup_team(fw, team_name)
         state._team_coordinator = team_env["coordinator"]
         state._team_mailbox = team_env["mailbox"]
         state._team_registry = team_env["registry"]
+
         print(f"  {_green('Team 已启动')}: {team_name}")
         print(f"    team_id: {state._team_coordinator.team_id}")
+        if matched_def:
+            fm = matched_def.get("frontmatter", {})
+            roles = fm.get("roles", [])
+            if roles:
+                print(f"    roles: {', '.join(roles)}")
+            desc = fm.get("description", "")
+            if desc:
+                print(f"    {_dim(desc)}")
         print(f"    工具: team(action=...) + mail(action=...)")
-        print(f"    示例: team(action='spawn', role='coder', task='fix bug')")
     except Exception as e:
         print(f"  {_red(f'Team 启动失败: {e}')}")
 
