@@ -77,6 +77,9 @@ class TeamCoordinator:
         # Session manager for long-lived teammate sessions (AT-008)
         from agent_framework.team.session_manager import TeamSessionManager
         self._session_manager = TeamSessionManager(self._team_id)
+        # Recent completion log — so status can show what finished even after IDLE
+        self._recent_completions: list[dict] = []
+        _MAX_RECENT = 20
 
     @property
     def team_id(self) -> str:
@@ -637,6 +640,20 @@ class TeamCoordinator:
         logger.info("team.teammate_completed", agent_id=agent_id,
                      spawn_id=spawn_id, success=result.success,
                      status=new_status.value)
+
+        # Record in recent completions for status display
+        import time
+        self._recent_completions.append({
+            "role": role,
+            "agent_id": agent_id,
+            "status": status,
+            "task": task[:100],
+            "summary": summary[:200],
+            "timestamp": time.time(),
+        })
+        # Keep only last N
+        if len(self._recent_completions) > 20:
+            self._recent_completions = self._recent_completions[-20:]
 
         # Trigger framework-level notification callback
         if self._on_result_callback is not None:
@@ -1413,4 +1430,5 @@ class TeamCoordinator:
             "pending_shutdowns": len(self._shutdowns.list_pending()),
             "task_board": self._task_board.task_count() if self._task_board else {},
             "active_sessions": len(self._session_manager.list_sessions()),
+            "recent_completions": self._recent_completions[-5:],
         }

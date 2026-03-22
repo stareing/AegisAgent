@@ -8,6 +8,7 @@ import inspect
 import io
 import json
 import os
+import re
 import sys
 import traceback
 from contextlib import redirect_stdout
@@ -258,6 +259,90 @@ def build_framework(
     # Start conversation-level session for cross-turn delta optimization
     framework.begin_conversation()
     return framework, mock_model
+
+
+def _read_multiline_input(prompt: str) -> str:
+    """Read input with multi-line support.
+
+    Three input modes:
+    1. Normal: single line, press Enter to submit.
+    2. Multi-line block: type { on its own line to start, } to end.
+       All lines between { and } are joined with newlines.
+    3. Structured block: if the first line is a known opening marker
+       (for example ``<text>`` or `````), read until the matching closer.
+    4. Paste detection: if stdin has buffered data after first line
+       (clipboard paste), automatically collects the full buffered burst.
+
+    Also supports /paste command to enter explicit multi-line mode.
+    """
+    import select
+    import sys
+
+    def _structured_block_closer(line: str) -> str | None:
+        stripped_line = line.strip()
+        if stripped_line in ("{", "/paste"):
+            return "}"
+        if stripped_line.startswith("```") or stripped_line.startswith("~~~"):
+            return stripped_line[:3]
+        tag_match = re.fullmatch(r"<([A-Za-z][A-Za-z0-9_-]*)>", stripped_line)
+        if tag_match:
+            return f"</{tag_match.group(1)}>"
+        return None
+
+    def _read_until_closer(closer: str, first_line: str) -> str:
+        hint = f"输入内容，单独一行 {closer} 结束"
+        print(f"  {_dim(hint)}")
+        lines: list[str] = []
+        preserve_markers = first_line.strip() not in ("{", "/paste")
+        if preserve_markers:
+            lines.append(first_line)
+        while True:
+            try:
+                line = input(f"  {_dim('│')} ")
+            except (EOFError, KeyboardInterrupt):
+                break
+            if line.strip() in (closer, "/end"):
+                if preserve_markers:
+                    lines.append(line)
+                break
+            lines.append(line)
+        return "\n".join(lines).strip()
+
+    def _drain_paste_buffer(first: str) -> str:
+        extra_lines = [first]
+        idle_polls = 0
+        while True:
+            ready, _, _ = select.select([sys.stdin], [], [], 0.15)
+            if not ready:
+                idle_polls += 1
+                if idle_polls >= 2:
+                    break
+                continue
+            idle_polls = 0
+            line = sys.stdin.readline()
+            if not line:
+                break
+            extra_lines.append(line.rstrip("\n"))
+        return "\n".join(extra_lines).strip()
+
+    first_line = input(prompt)
+    stripped = first_line.strip()
+
+    # Explicit or structured multi-line start
+    closer = _structured_block_closer(first_line)
+    if closer is not None:
+        return _read_until_closer(closer, first_line)
+
+    # Paste detection — check if stdin has more buffered data
+    if sys.stdin.isatty():
+        try:
+            pasted = _drain_paste_buffer(first_line)
+            if pasted != first_line.strip():
+                return pasted
+        except (OSError, ValueError):
+            pass  # select not supported on some platforms
+
+    return first_line.strip()
 
 
 class TeammateFocusState:
@@ -1114,6 +1199,17 @@ async def _cmd_team_status(
         print(f"    待审计划: {status['pending_plans']}")
     if status.get("pending_shutdowns"):
         print(f"    待关闭: {status['pending_shutdowns']}")
+    # Recent completions
+    recent = status.get("recent_completions", [])
+    if recent:
+        print(f"    最近完成:")
+        for r in recent:
+            icon = _green("✓") if r["status"] == "completed" else _red("✗")
+            task_desc = r.get("task", "")[:60]
+            print(f"      {icon} {_cyan(r['role'])}: {task_desc}")
+            summary = r.get("summary", "")
+            if summary:
+                print(f"        {_dim(summary[:80])}")
     print()
 
 
@@ -1945,8 +2041,9 @@ async def run_classic_repl(fw: AgentFramework, mock_model: InteractiveMockModel 
             if focused else f"{_bold(_green('> '))}"
         )
         try:
-            user_input = await asyncio.to_thread(input, prompt_str)
-            user_input = user_input.strip()
+            user_input = await asyncio.to_thread(
+                _read_multiline_input, prompt_str,
+            )
         except (EOFError, KeyboardInterrupt):
             print(f"\n{_dim('再见!')}")
             break
