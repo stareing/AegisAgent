@@ -485,10 +485,13 @@ class TestArchitectureGuards:
         from agent_framework.models.session import SessionState
         assert not isinstance(ctx.payload, (SessionState, AgentState))
 
-    def test_all_deniable_points_are_pre_hooks(self) -> None:
-        """DENY should only be available at pre-execution hook points."""
+    def test_all_deniable_points_are_gate_hooks(self) -> None:
+        """DENY should only be available at gate hooks (pre-execution or completion gates)."""
+        _GATE_PATTERNS = ("pre", "task_completed")
         for hp in DENIABLE_HOOK_POINTS:
-            assert "pre" in hp.value or hp == HookPoint.CONTEXT_PRE_BUILD
+            assert any(p in hp.value for p in _GATE_PATTERNS), (
+                f"{hp.value} is deniable but not a gate hook"
+            )
 
     def test_hook_meta_is_frozen(self) -> None:
         meta = HookMeta(hook_id="x", hook_point=HookPoint.RUN_START)

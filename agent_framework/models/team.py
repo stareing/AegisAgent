@@ -309,6 +309,19 @@ class TeamNotificationType(str, Enum):
     PLAN_SUBMISSION = "PLAN_SUBMISSION"
     BROADCAST = "BROADCAST"
     ERROR = "ERROR"
+    TEAMMATE_IDLE = "TEAMMATE_IDLE"
+
+
+class TeamActionError(BaseModel, frozen=True):
+    """Protocol-level structured error (spec §11).
+
+    All team protocol failures MUST return this instead of loose dicts or exceptions.
+    """
+
+    ok: bool = False
+    error_code: str
+    message: str
+    retryable: bool = False
 
 
 class TeamNotification(BaseModel, frozen=True):
@@ -329,3 +342,41 @@ class TeamNotification(BaseModel, frozen=True):
     correlation_id: str = ""
     spawn_id: str = ""
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# ---------------------------------------------------------------------------
+# TeamConfigData — persistable team configuration (spec §4.1, AT-001)
+# ---------------------------------------------------------------------------
+
+class TeamConfigMember(BaseModel, frozen=True):
+    """A member entry in persisted team config."""
+    member_id: str
+    role: str
+    session_id: str = ""
+
+
+class TeamConfigData(BaseModel):
+    """Persistable team configuration (spec §4.1)."""
+    team_id: str
+    lead_id: str
+    name: str = ""
+    members: list[TeamConfigMember] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# ---------------------------------------------------------------------------
+# TeamSessionState — persistent teammate session (spec §4.3, AT-008)
+# ---------------------------------------------------------------------------
+
+class TeamSessionState(BaseModel):
+    """Persistent state for a long-lived teammate session."""
+    session_id: str
+    team_id: str
+    member_id: str
+    status: TeamMemberStatus = TeamMemberStatus.IDLE
+    current_task_id: str = ""
+    last_run_id: str = ""
+    history_ref: str = ""
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

@@ -51,12 +51,16 @@ class HookPoint(str, Enum):
     CONFIG_LOADED = "config.loaded"
     INSTRUCTIONS_LOADED = "instructions.loaded"
 
+    TEAMMATE_IDLE = "teammate.idle"
+    TEAMMATE_TASK_COMPLETED = "teammate.task_completed"
+
 
 # Hook points that allow DENY action
 DENIABLE_HOOK_POINTS: frozenset[HookPoint] = frozenset({
     HookPoint.PRE_TOOL_USE,
     HookPoint.PRE_DELEGATION,
     HookPoint.MEMORY_PRE_RECORD,
+    HookPoint.TEAMMATE_TASK_COMPLETED,
     HookPoint.CONTEXT_PRE_BUILD,
 })
 

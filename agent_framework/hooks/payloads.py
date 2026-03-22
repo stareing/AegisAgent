@@ -190,3 +190,32 @@ def artifact_finalize_payload(
     artifact_name: str, artifact_type: str, uri: str,
 ) -> dict[str, Any]:
     return {"artifact_name": artifact_name, "artifact_type": artifact_type, "uri": uri}
+
+
+def teammate_idle_payload(
+    agent_id: str, role: str, team_id: str,
+    tasks_completed: int = 0,
+) -> dict[str, Any]:
+    """Payload for TEAMMATE_IDLE hook."""
+    return {
+        "agent_id": agent_id,
+        "role": role,
+        "team_id": team_id,
+        "tasks_completed": tasks_completed,
+    }
+
+
+def teammate_task_completed_payload(
+    agent_id: str, role: str, team_id: str,
+    task_id: str = "", task_title: str = "",
+    result_summary: str = "",
+) -> dict[str, Any]:
+    """Payload for TEAMMATE_TASK_COMPLETED hook (deniable — exit 2 blocks completion)."""
+    return {
+        "agent_id": agent_id,
+        "role": role,
+        "team_id": team_id,
+        "task_id": task_id,
+        "task_title": task_title,
+        "result_summary": result_summary[:500],
+    }

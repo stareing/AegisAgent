@@ -598,29 +598,47 @@ class TestSubAgentScheduler:
                                                      SubAgentResult)
         from agent_framework.subagent.scheduler import SubAgentScheduler
 
-        scheduler = SubAgentScheduler(max_concurrent=2, max_per_run=2)
+        scheduler = SubAgentScheduler(max_concurrent=5, max_per_run=2)
 
         assert scheduler.check_quota("run1") is True
         status = scheduler.get_quota_status("run1")
         assert status["quota_remaining"] == 2
 
-        # Spawn two — should succeed
-        async def mock_task():
-            return SubAgentResult(spawn_id="s1", success=True, final_answer="done")
+        # Spawn two that block — should succeed and occupy both slots
+        started = asyncio.Event()
+        gate = asyncio.Event()
+
+        async def blocking_task(sid: str):
+            started.set()
+            await gate.wait()
+            return SubAgentResult(spawn_id=sid, success=True, final_answer="done")
 
         h1 = SubAgentHandle(sub_agent_id="a1", spawn_id="s1", parent_run_id="run1")
-        r1 = await scheduler.schedule(h1, mock_task(), deadline_ms=5000)
-        assert r1.success is True
+        # Use submit (non-blocking) to occupy slots concurrently
+        scheduler.submit(h1, blocking_task("s1"), deadline_ms=5000)
+        await started.wait()
 
+        started.clear()
         h2 = SubAgentHandle(sub_agent_id="a2", spawn_id="s2", parent_run_id="run1")
-        r2 = await scheduler.schedule(h2, mock_task(), deadline_ms=5000)
-        assert r2.success is True
+        scheduler.submit(h2, blocking_task("s2"), deadline_ms=5000)
+        await started.wait()
 
-        # Third should fail quota
+        # Both slots occupied — third should fail quota
         h3 = SubAgentHandle(sub_agent_id="a3", spawn_id="s3", parent_run_id="run1")
-        r3 = await scheduler.schedule(h3, mock_task(), deadline_ms=5000)
+        r3 = await scheduler.schedule(h3, blocking_task("s3"), deadline_ms=5000)
         assert r3.success is False
         assert "quota" in r3.error.lower()
+
+        # Release the blocked tasks
+        gate.set()
+        await asyncio.sleep(0.1)
+
+        # After completion, slots are freed — fourth should succeed
+        assert scheduler.check_quota("run1") is True
+        h4 = SubAgentHandle(sub_agent_id="a4", spawn_id="s4", parent_run_id="run1")
+        r4 = await scheduler.schedule(h4, blocking_task("s4"), deadline_ms=5000)
+        gate.set()  # Release again for s4
+        assert r4.success is True
 
     @pytest.mark.asyncio
     async def test_timeout(self):

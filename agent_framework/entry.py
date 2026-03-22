@@ -235,11 +235,13 @@ class AgentFramework:
             ))
 
         # Load file-based skills from directories (SKILL.md)
+        # Searches both "skills/" and ".skills/" (dot-prefixed, like .agent-team/)
         import pathlib
         skill_dirs: list[pathlib.Path] = []
-        project_skills = pathlib.Path.cwd() / "skills"
-        if project_skills.is_dir():
-            skill_dirs.append(project_skills)
+        for skill_dir_name in ("skills", ".skills"):
+            project_skills = pathlib.Path.cwd() / skill_dir_name
+            if project_skills.is_dir():
+                skill_dirs.append(project_skills)
         user_skills = pathlib.Path.home() / ".agent" / "skills"
         if user_skills.is_dir():
             skill_dirs.append(user_skills)
@@ -486,6 +488,27 @@ class AgentFramework:
                 self._run_dispatcher.submit_team_notification()
 
         coordinator._on_result_callback = _on_team_result
+        coordinator._hook_executor = self._hook_executor
+
+        # Persist team config to disk (AT-001)
+        from agent_framework.team.config_store import TeamConfigStore
+        from agent_framework.models.team import TeamConfigData, TeamConfigMember
+        config_store = TeamConfigStore()
+        coordinator._config_store = config_store
+        coordinator._config_name = "auto"  # Must match name used in save
+        try:
+            config_data = TeamConfigData(
+                team_id=team_id,
+                lead_id=lead_id,
+                name="auto",
+                members=[
+                    TeamConfigMember(member_id=f"role_{td['team_id']}", role=td["team_id"])
+                    for td in self._discovered_teams
+                ],
+            )
+            config_store.save(config_data)
+        except Exception as exc:
+            logger.warning("team.config_persist_failed", error=str(exc))
 
         # Wire notification policy from config for event escalation
         from agent_framework.team.notification_policy import TeamNotificationPolicy
@@ -507,6 +530,7 @@ class AgentFramework:
                 "PLAN_SUBMISSION": TeamNotificationType.PLAN_SUBMISSION,
                 "BROADCAST_NOTICE": TeamNotificationType.BROADCAST,
                 "ERROR_NOTICE": TeamNotificationType.ERROR,
+                "TEAMMATE_IDLE": TeamNotificationType.TEAMMATE_IDLE,
             }
             ntype = type_map.get(event_type, TeamNotificationType.BROADCAST)
             notification = TeamNotification(

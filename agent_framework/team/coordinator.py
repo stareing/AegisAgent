@@ -70,6 +70,16 @@ class TeamCoordinator:
         # Pending approval delivery: agent_id → {"approved": bool, "feedback": str}.
         # Set by approve_plan()/reject_plan(), consumed by _watch_teammate continuation.
         self._pending_approvals: dict[str, dict] = {}
+        # Shared task board for self-claim workflow (Claude Code alignment)
+        self._task_board: Any = None
+        # Hook executor for TEAMMATE_IDLE / TEAMMATE_TASK_COMPLETED
+        self._hook_executor: Any = None
+        # Session manager for long-lived teammate sessions (AT-008)
+        from agent_framework.team.session_manager import TeamSessionManager
+        self._session_manager = TeamSessionManager(self._team_id)
+        # Recent completion log — so status can show what finished even after IDLE
+        self._recent_completions: list[dict] = []
+        _MAX_RECENT = 20
 
     @property
     def team_id(self) -> str:
@@ -211,6 +221,9 @@ class TeamCoordinator:
         conversation_history: list[str] = [f"[Original Task] {task}"]
         max_rounds = 10  # Max Q&A rounds before forcing completion
 
+        # Track run_id in session (AT-008)
+        self._session_manager.update_session(agent_id, run_id=spawn_id)
+
         for round_num in range(max_rounds):
             # Poll until current run completes
             result = await self._poll_for_result(current_spawn_id, timeout_polls=600)
@@ -278,6 +291,9 @@ class TeamCoordinator:
                     )
                     if continuation_spawn_id:
                         current_spawn_id = continuation_spawn_id
+                        self._session_manager.update_session(
+                            agent_id, run_id=continuation_spawn_id,
+                        )
                         continue
                     logger.warning("team.continuation_spawn_failed",
                                    agent_id=agent_id, role=role)
@@ -332,6 +348,9 @@ class TeamCoordinator:
                     )
                     if continuation_spawn_id:
                         current_spawn_id = continuation_spawn_id
+                        self._session_manager.update_session(
+                            agent_id, run_id=continuation_spawn_id,
+                        )
                         continue
                     logger.warning("team.continuation_spawn_failed",
                                    agent_id=agent_id, role=role)
@@ -519,6 +538,73 @@ class TeamCoordinator:
             logger.error("team.continuation_spawn_error", error=str(exc))
             return None
 
+    async def send_user_message_to_teammate(
+        self, member_id: str, user_message: str,
+    ) -> dict:
+        """Route a direct user message to a teammate's session (AT-014).
+
+        Spawns a sub-agent run for the teammate with the user's input.
+        The teammate's session tracks this run. Returns the response.
+
+        This is a framework-core method — UI layers call it, not implement it.
+        """
+        from agent_framework.models.subagent import SpawnMode, SubAgentSpec
+
+        member = self._resolve_member(member_id)
+        if member is None:
+            return {"ok": False, "error": f"Teammate '{member_id}' not found"}
+
+        if self._runtime is None:
+            return {"ok": False, "error": "SubAgentRuntime not available"}
+
+        role = member.role
+        session = self._session_manager.get_or_create_session(member.agent_id)
+
+        body = ""
+        for td in getattr(self, "_discovered_teams_raw", []):
+            if td.get("team_id") == role:
+                body = td.get("body", "")
+                break
+
+        task_prompt = (
+            f"[TEAM PROTOCOL] You are '{role}' in team '{self._team_id}'. "
+            f"Your agent_id is '{member.agent_id}'. "
+            f"A user is talking to you directly.\n\n"
+        )
+        if body:
+            task_prompt += f"[ROLE INSTRUCTIONS]\n{body}\n\n"
+        task_prompt += f"[USER MESSAGE] {user_message}"
+
+        spawn_id = member.agent_id
+        spec = SubAgentSpec(
+            parent_run_id=self._team_id,
+            spawn_id=spawn_id,
+            task_input=task_prompt,
+            mode=SpawnMode.EPHEMERAL,
+            max_iterations=10,
+            deadline_ms=60_000,
+        )
+
+        try:
+            actual_sid = await self._runtime.spawn_async(spec, None)
+            self._session_manager.update_session(member.agent_id, run_id=actual_sid)
+            result = await self._poll_for_result(actual_sid, timeout_polls=120)
+            if result and result.final_answer:
+                return {
+                    "ok": True,
+                    "role": role,
+                    "agent_id": member.agent_id,
+                    "response": result.final_answer,
+                    "iterations": result.iterations_used,
+                    "session_id": session.session_id,
+                }
+            elif result and result.error:
+                return {"ok": False, "error": result.error, "role": role}
+            else:
+                return {"ok": False, "error": "No response", "role": role}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc), "role": role}
+
     async def _finalize_teammate_result(
         self, agent_id: str, spawn_id: str, role: str, task: str, result: Any,
     ) -> None:
@@ -554,6 +640,20 @@ class TeamCoordinator:
         logger.info("team.teammate_completed", agent_id=agent_id,
                      spawn_id=spawn_id, success=result.success,
                      status=new_status.value)
+
+        # Record in recent completions for status display
+        import time
+        self._recent_completions.append({
+            "role": role,
+            "agent_id": agent_id,
+            "status": status,
+            "task": task[:100],
+            "summary": summary[:200],
+            "timestamp": time.time(),
+        })
+        # Keep only last N
+        if len(self._recent_completions) > 20:
+            self._recent_completions = self._recent_completions[-20:]
 
         # Trigger framework-level notification callback
         if self._on_result_callback is not None:
@@ -831,6 +931,12 @@ class TeamCoordinator:
                 body = td.get("body", "")
                 break
 
+        # Create or reuse session for this member (AT-008)
+        session = self._session_manager.get_or_create_session(member.agent_id)
+        self._session_manager.update_session(
+            member.agent_id, status=TeamMemberStatus.WORKING,
+        )
+
         # Spawn the sub-agent (member already claimed as WORKING by assign_task)
         if self._runtime is not None:
             import uuid as _uuid
@@ -868,14 +974,22 @@ class TeamCoordinator:
                 # Spawn the sub-agent (awaited — runs reliably)
                 actual_sid = await self._runtime.spawn_async(spec, None)
             except Exception as exc:
+                error_msg = str(exc)
                 logger.error(
                     "team.assign.spawn_failed",
                     agent_id=member.agent_id,
                     role=role,
-                    error=str(exc),
+                    error=error_msg,
+                )
+                # Quota exceeded or transient errors → reset to IDLE so member
+                # can be retried. Only mark FAILED for permanent errors.
+                is_quota_error = "quota exceeded" in error_msg.lower()
+                recovery_status = (
+                    TeamMemberStatus.IDLE if is_quota_error
+                    else TeamMemberStatus.FAILED
                 )
                 try:
-                    self._registry.update_status(member.agent_id, TeamMemberStatus.FAILED)
+                    self._registry.update_status(member.agent_id, recovery_status)
                 except Exception:
                     pass
                 self._mailbox.send(MailEvent(
@@ -985,13 +1099,54 @@ class TeamCoordinator:
             self._registry.update_status(member.agent_id, TeamMemberStatus.NOTIFYING)
 
     def mark_result_delivered(self, agent_id: str) -> None:
-        """Transition NOTIFYING → IDLE (main model consumed the result)."""
+        """Transition NOTIFYING → IDLE (main model consumed the result).
+
+        Fires TEAMMATE_IDLE hook as advisory notification (not deniable).
+        TEAMMATE_IDLE is NOT in DENIABLE_HOOK_POINTS — the transition
+        always commits. Hooks observe but cannot block.
+        """
         from agent_framework.models.team import TeamMemberStatus
         member = self._resolve_member(agent_id)
-        if member and member.status in (
+        if member is None or member.status not in (
             TeamMemberStatus.NOTIFYING, TeamMemberStatus.RESULT_READY,
         ):
-            self._registry.update_status(member.agent_id, TeamMemberStatus.IDLE)
+            return
+
+        self._registry.update_status(member.agent_id, TeamMemberStatus.IDLE)
+
+        # Fire TEAMMATE_IDLE hook — advisory only, cannot block transition
+        if self._hook_executor is not None:
+            try:
+                from agent_framework.models.hook import HookPoint
+                from agent_framework.hooks.payloads import teammate_idle_payload
+                self._hook_executor.fire_sync_advisory(
+                    HookPoint.TEAMMATE_IDLE,
+                    payload=teammate_idle_payload(
+                        agent_id=member.agent_id, role=member.role,
+                        team_id=self._team_id,
+                    ),
+                )
+            except Exception:
+                pass
+
+        # Send TEAMMATE_IDLE notification to main model (AT-009)
+        if self._on_event_escalation is not None:
+            import asyncio
+            try:
+                coro = self._on_event_escalation(
+                    role=member.role,
+                    event_type="TEAMMATE_IDLE",
+                    summary=f"{member.role} is now idle and ready for new tasks",
+                    agent_id=member.agent_id,
+                    request_id="",
+                )
+                try:
+                    loop = asyncio.get_running_loop()
+                    asyncio.ensure_future(coro)
+                except RuntimeError:
+                    pass
+            except Exception:
+                pass
 
     def mark_result_delivery_failed(self, agent_id: str, reason: str = "") -> None:
         """Transition NOTIFYING/RESULT_READY → FAILED."""
@@ -1033,6 +1188,179 @@ class TeamCoordinator:
             rid = self.shutdown_teammate(member.agent_id, "team shutdown")
             request_ids.append(rid)
         return request_ids
+
+    # ── Cleanup (AT-010, AT-011) ──────────────────────────────
+
+    def cleanup_team(self) -> dict:
+        """Clean up team resources. Fails if active members exist (AT-010).
+
+        On success, clears all internal stores and handles (AT-011).
+        Returns structured result per spec §10/§11.
+        """
+        from agent_framework.models.team import BUSY_MEMBER_STATUSES
+
+        # AT-010: refuse if any non-lead member is in a busy status
+        active = [
+            m for m in self._registry.list_members()
+            if m.role != "lead" and m.status in BUSY_MEMBER_STATUSES
+        ]
+        if active:
+            return {
+                "ok": False,
+                "error_code": "TEAM_CLEANUP_ACTIVE_MEMBERS",
+                "message": f"Cannot clean up: {len(active)} member(s) still active",
+                "active_members": [m.agent_id for m in active],
+                "retryable": False,
+            }
+
+        # AT-011: clear all resources
+        # 1. Cancel runtime handles for all members
+        if self._runtime is not None:
+            for m in self._registry.list_members():
+                if m.role == "lead":
+                    continue
+                if m.spawn_id:
+                    try:
+                        import asyncio
+                        asyncio.ensure_future(self._runtime.cancel(m.spawn_id))
+                    except Exception:
+                        pass
+
+        # 2. Clear all internal stores
+        self._pending_requests.clear()
+        self._pending_answers.clear()
+        self._pending_approvals.clear()
+        self._active_teammate_ctx.clear()
+        self._session_manager.clear()
+        self._task_board = None
+
+        # 3. Clear plan and shutdown registries
+        try:
+            self._plans.clear()
+        except AttributeError:
+            pass
+        try:
+            self._shutdowns.clear()
+        except AttributeError:
+            pass
+
+        # 4. Persist cleanup to config store if available
+        if hasattr(self, "_config_store") and self._config_store is not None:
+            try:
+                config_name = getattr(self, "_config_name", self._team_id)
+                self._config_store.delete(config_name)
+            except Exception:
+                pass
+
+        logger.info("team.cleaned_up", team_id=self._team_id)
+        return {"ok": True, "team_id": self._team_id, "cleaned": True}
+
+    # ── Task board (shared task list) ─────────────────────────
+
+    def create_task(
+        self, title: str, description: str = "",
+        depends_on: list[str] | None = None,
+    ) -> dict:
+        """Create a task on the shared board."""
+        if self._task_board is None:
+            from agent_framework.team.task_board import TeamTaskBoard
+            self._task_board = TeamTaskBoard(self._team_id)
+        task = self._task_board.create_task(
+            title=title, description=description,
+            depends_on=depends_on, created_by=self._lead_id,
+        )
+        return {
+            "created": True,
+            "task_id": task.task_id,
+            "title": task.title,
+            "status": task.status.value,
+            "depends_on": task.depends_on,
+        }
+
+    def claim_task(self, agent_id: str, task_id: str = "") -> dict:
+        """Let a teammate atomically claim a task from the board."""
+        if self._task_board is None:
+            return {"claimed": False, "reason": "Task board not initialized. Lead must create_task first."}
+        task = self._task_board.claim_task(agent_id, task_id)
+        if task is None:
+            return {"claimed": False, "reason": "No claimable task available"}
+        return {
+            "claimed": True,
+            "task_id": task.task_id,
+            "title": task.title,
+            "description": task.description,
+        }
+
+    def complete_task(
+        self, task_id: str, result: str = "", agent_id: str = "",
+    ) -> dict:
+        """Mark a task as completed. Auto-unblocks dependent tasks.
+
+        Fires TEAMMATE_TASK_COMPLETED hook before committing. If hook
+        returns DENY, the task stays IN_PROGRESS (AT-012).
+        """
+        if self._task_board is None:
+            return {"ok": False, "error_code": "TEAM_NOT_INITIALIZED",
+                    "message": "Task board not initialized", "retryable": False}
+
+        # Fire hook before committing (AT-012)
+        if self._hook_executor is not None:
+            try:
+                from agent_framework.models.hook import HookPoint
+                from agent_framework.hooks.payloads import teammate_task_completed_payload
+                task_obj = self._task_board.get_task(task_id)
+                hook_result = self._hook_executor.fire_sync_advisory(
+                    HookPoint.TEAMMATE_TASK_COMPLETED,
+                    payload=teammate_task_completed_payload(
+                        agent_id=agent_id, role="",
+                        team_id=self._team_id,
+                        task_id=task_id,
+                        task_title=task_obj.title if task_obj else "",
+                        result_summary=result[:500],
+                    ),
+                )
+                if hook_result and getattr(hook_result, "action", "") == "DENY":
+                    feedback = getattr(hook_result, "feedback", "Completion blocked by hook")
+                    return {"ok": False, "error_code": "TEAM_HOOK_DENIED",
+                            "message": str(feedback), "retryable": True}
+            except Exception:
+                pass  # Hook failure doesn't block completion
+
+        task = self._task_board.complete_task(task_id, result, agent_id)
+        if task is None:
+            return {"ok": False, "error_code": "TEAM_TASK_NOT_FOUND",
+                    "message": "Task not found or not in progress", "retryable": False}
+        return {"ok": True, "completed": True, "task_id": task.task_id, "title": task.title}
+
+    def fail_task(self, task_id: str, error: str = "") -> dict:
+        """Mark a task as failed."""
+        if self._task_board is None:
+            return {"failed": False, "reason": "Task board not initialized"}
+        task = self._task_board.fail_task(task_id, error)
+        if task is None:
+            return {"failed": False, "reason": "Task not found"}
+        return {"failed": True, "task_id": task.task_id}
+
+    def list_tasks(self) -> dict:
+        """List all tasks on the shared board."""
+        if self._task_board is None:
+            return {"tasks": [], "total": 0, "claimable": 0}
+        tasks = self._task_board.list_tasks()
+        return {
+            "tasks": [
+                {
+                    "task_id": t.task_id,
+                    "title": t.title,
+                    "status": t.status.value,
+                    "assigned_to": t.assigned_to,
+                    "depends_on": t.depends_on,
+                    "result": t.result[:100] if t.result else "",
+                }
+                for t in tasks
+            ],
+            "total": len(tasks),
+            "claimable": len(self._task_board.list_claimable()),
+        }
 
     # ── Status ─────────────────────────────────────────────────
 
@@ -1100,4 +1428,7 @@ class TeamCoordinator:
             ),
             "pending_plans": len(self._plans.list_pending()),
             "pending_shutdowns": len(self._shutdowns.list_pending()),
+            "task_board": self._task_board.task_count() if self._task_board else {},
+            "active_sessions": len(self._session_manager.list_sessions()),
+            "recent_completions": self._recent_completions[-5:],
         }

@@ -119,7 +119,7 @@ class TestNotificationTypes:
     def test_all_types_exist(self):
         expected = {
             "TASK_COMPLETED", "TASK_FAILED", "QUESTION",
-            "PLAN_SUBMISSION", "BROADCAST", "ERROR",
+            "PLAN_SUBMISSION", "BROADCAST", "ERROR", "TEAMMATE_IDLE",
         }
         actual = {t.value for t in TeamNotificationType}
         assert expected == actual

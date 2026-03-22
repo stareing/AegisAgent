@@ -28,7 +28,7 @@ from textual.containers import Container, Horizontal
 from textual.reactive import reactive
 from textual.screen import ModalScreen
 from textual.widgets import (Button, Input, Label, ListItem, ListView, RichLog,
-                             Static)
+                             Static, TextArea)
 from textual.worker import Worker, WorkerState
 
 from agent_framework.terminal_runtime import (AEGIS_LOGO_LINES,
@@ -38,6 +38,31 @@ from agent_framework.terminal_runtime import (AEGIS_LOGO_LINES,
                                               execute_user_input,
                                               execute_user_input_stream,
                                               score_palette_entry)
+
+
+class PromptTextArea(TextArea):
+    """TextArea that submits on Enter and inserts newline on Shift+Enter.
+
+    Subclassed because TextArea handles Enter internally before
+    the app's on_key can intercept it.
+    """
+
+    BINDINGS = [
+        Binding("enter", "submit", show=False, priority=True),
+        Binding("shift+enter", "newline", show=False, priority=True),
+    ]
+
+    class Submitted(TextArea.Changed):
+        """Fired when user presses Enter to submit."""
+        pass
+
+    def action_submit(self) -> None:
+        """Enter key → fire Submitted message (not insert newline)."""
+        self.post_message(self.Submitted(self))
+
+    def action_newline(self) -> None:
+        """Shift+Enter → insert actual newline."""
+        self.insert("\n")
 
 # ── Colors ─────────────────────────────────────────────────
 _GOLD = "#d9c07c"
@@ -281,6 +306,7 @@ class AegisAgentApp(App[None]):
         Binding("ctrl+n", "new_session", priority=True, show=False),
         Binding("f6", "focus_chat", priority=True, show=False),
         Binding("escape", "focus_prompt", show=False, priority=True),
+        Binding("ctrl+u", "clear_prompt", priority=True, show=False),  # Clear input
         Binding("pageup", "scroll_chat_up_page", show=False, priority=True),
         Binding("pagedown", "scroll_chat_down_page", show=False, priority=True),
         Binding("ctrl+up", "scroll_chat_up", show=False, priority=True),
@@ -316,13 +342,23 @@ class AegisAgentApp(App[None]):
         color: {_DIM};
     }}
 
+    #input-hint {{
+        dock: bottom;
+        height: 1;
+        margin: 0 1 0 2;
+        color: {_DIM};
+    }}
     #input-bar {{
         dock: bottom;
-        height: 3;
+        height: auto;
+        max-height: 12;
         margin: 0 1 0 1;
     }}
     #prompt {{
         width: 1fr;
+        height: auto;
+        min-height: 1;
+        max-height: 10;
         border: solid {_BORDER};
         background: {_BG_INPUT};
     }}
@@ -372,8 +408,12 @@ class AegisAgentApp(App[None]):
         )
         yield Static("", id="active-stream")
         yield Static("", id="busy-line")
+        yield Static(
+            "[dim]Enter=发送  Shift+Enter=换行  ^U=清空  /=命令  ^P=面板  ^L=清屏  Esc=停止  F10=退出[/dim]",
+            id="input-hint",
+        )
         with Horizontal(id="input-bar"):
-            yield Input(placeholder="Ask anything...  /=cmds  ^P=palette  ^L=clear  ^N=new  F6=chat  Esc=input  F10=quit", id="prompt")
+            yield PromptTextArea("", id="prompt", language=None)
             yield Button("Send", id="btn-send", variant="default")
 
     # ── Mount ──────────────────────────────────────────
@@ -385,7 +425,7 @@ class AegisAgentApp(App[None]):
         self._header = self.query_one("#hdr", AegisHeader)
         self._chat = self.query_one("#chat", RichLog)
         self._active_stream = self.query_one("#active-stream", Static)
-        self._prompt = self.query_one("#prompt", Input)
+        self._prompt = self.query_one("#prompt", PromptTextArea)
         self._busy_line = self.query_one("#busy-line", Static)
         self._prompt.focus()
         self._state.conversation_id = str(uuid.uuid4()) # Placeholder
@@ -437,19 +477,21 @@ class AegisAgentApp(App[None]):
 
     # ── Input ──────────────────────────────────────────
 
-    async def on_input_changed(self, event: Input.Changed) -> None:
-        if event.input.id != "prompt":
+    async def on_prompt_text_area_submitted(self, event: PromptTextArea.Submitted) -> None:
+        """Handle Enter key from PromptTextArea → submit input."""
+        await self._submit_input()
+
+    async def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        if event.text_area.id != "prompt":
             return
         if self._suppress_slash:
             self._suppress_slash = False
             return
-        if event.value == "/":
-            event.input.value = ""
+        # Auto-open palette when "/" is typed alone
+        text = event.text_area.text
+        if text == "/":
+            event.text_area.clear()
             self.action_open_palette()
-
-    async def on_input_submitted(self, event: Input.Submitted) -> None:
-        if event.input.id == "prompt":
-            await self._submit_input()
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-send":
@@ -458,8 +500,8 @@ class AegisAgentApp(App[None]):
     async def _submit_input(self) -> None:
         prompt = self._prompt
         assert prompt is not None
-        text = prompt.value.strip()
-        prompt.value = ""
+        text = prompt.text.strip()
+        prompt.clear()
         if not text or self._busy:
             return
         self._set_follow_output(True)
@@ -730,6 +772,12 @@ class AegisAgentApp(App[None]):
         self.copy_to_clipboard(full_text)
         line_count = full_text.count("\n") + 1
         self._show_status(f"Copied {line_count} lines to clipboard")
+
+    def action_clear_prompt(self) -> None:
+        """Clear input area (Ctrl+U)."""
+        if self._prompt is not None:
+            self._prompt.clear()
+            self._prompt.focus()
 
     def action_focus_prompt(self) -> None:
         if self._busy and self._cancel_event:
