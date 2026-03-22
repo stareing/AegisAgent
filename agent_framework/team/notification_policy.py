@@ -17,6 +17,7 @@ _DEFAULT_ESCALATION_TYPES: frozenset[TeamNotificationType] = frozenset({
     TeamNotificationType.TASK_FAILED,
     TeamNotificationType.QUESTION,
     TeamNotificationType.ERROR,
+    TeamNotificationType.TEAMMATE_IDLE,
 })
 
 # Default mail event types that escalate (for Mode B/C/D)

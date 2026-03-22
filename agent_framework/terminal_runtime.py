@@ -260,6 +260,43 @@ def build_framework(
     return framework, mock_model
 
 
+class TeammateFocusState:
+    """Track which teammate (if any) the user is interacting with (AT-014)."""
+
+    def __init__(self) -> None:
+        self.focused_agent_id: str | None = None
+        self.agents: list[str] = []  # ordered list of teammate agent_ids
+
+    def set_agents(self, agent_ids: list[str]) -> None:
+        self.agents = list(agent_ids)
+
+    def cycle_next(self) -> str | None:
+        """Cycle to next teammate. Returns focused agent_id or None (back to lead)."""
+        if not self.agents:
+            return None
+        if self.focused_agent_id is None:
+            self.focused_agent_id = self.agents[0]
+            return self.focused_agent_id
+        try:
+            idx = self.agents.index(self.focused_agent_id)
+            next_idx = idx + 1
+            if next_idx >= len(self.agents):
+                self.focused_agent_id = None  # wrap back to lead
+                return None
+            self.focused_agent_id = self.agents[next_idx]
+            return self.focused_agent_id
+        except ValueError:
+            self.focused_agent_id = None
+            return None
+
+    def unfocus(self) -> None:
+        """Return focus to lead."""
+        self.focused_agent_id = None
+
+    def is_focused(self) -> bool:
+        return self.focused_agent_id is not None
+
+
 class ReplState:
     def __init__(self) -> None:
         self.history: list[Message] = []
@@ -268,6 +305,7 @@ class ReplState:
         self.recent_commands: list[str] = []
         self.total_tokens_estimate = 0
         self.conversation_id: str | None = None
+        self.teammate_focus = TeammateFocusState()
 
     def append_turn(self, user_input: str, result: Any) -> None:
         from agent_framework.agent.message_projector import MessageProjector
@@ -1079,6 +1117,99 @@ async def _cmd_team_status(
     print()
 
 
+@_register_cmd("team-focus", "聚焦到 teammate 直接交互", usage="/team-focus <agent_id>", category="团队")
+async def _cmd_team_focus(
+    fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str,
+) -> None:
+    """Focus on a specific teammate for direct interaction (AT-014)."""
+    agent_id = args.strip()
+    coord = _get_team_coordinator(fw, state)
+    if coord is None:
+        print(f"  {_yellow('Team 未启动')}")
+        return
+
+    if not agent_id:
+        # Show available teammates
+        members = coord._registry.list_members()
+        teammates = [m for m in members if m.role != "lead"]
+        if not teammates:
+            print(f"  {_yellow('无可聚焦的 teammate')}")
+            return
+        print(f"  可聚焦的 teammates:")
+        for m in teammates:
+            print(f"    {_cyan(m.agent_id)} ({m.role}) — {m.status.value}")
+        print(f"  使用: /team-focus <agent_id>")
+        state.teammate_focus.set_agents([m.agent_id for m in teammates])
+        return
+
+    member = coord._resolve_member(agent_id)
+    if member is None or member.role == "lead":
+        print(f"  {_red(f'未找到 teammate: {agent_id}')}")
+        return
+
+    state.teammate_focus.focused_agent_id = member.agent_id
+    print(f"  {_green(f'已聚焦到 {member.agent_id} ({member.role})')}")
+    print(f"  输入内容将直接发送给此 teammate。使用 /team-unfocus 返回 lead。")
+
+
+@_register_cmd("team-unfocus", "取消聚焦，返回 lead", category="团队")
+async def _cmd_team_unfocus(
+    fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str,
+) -> None:
+    """Unfocus from teammate, return to lead (AT-014)."""
+    if state.teammate_focus.is_focused():
+        old = state.teammate_focus.focused_agent_id
+        state.teammate_focus.unfocus()
+        print(f"  {_green(f'已返回 lead (离开 {old})')}")
+    else:
+        print(f"  {_dim('当前已在 lead 模式')}")
+
+
+@_register_cmd("team-cleanup", "清理团队资源", category="团队")
+async def _cmd_team_cleanup(
+    fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str,
+) -> None:
+    """Clean up team resources (AT-010, AT-011)."""
+    coord = _get_team_coordinator(fw, state)
+    if coord is None:
+        print(f"  {_yellow('Team 未启动')}")
+        return
+    result = coord.cleanup_team()
+    if result.get("ok"):
+        print(f"  {_green('团队资源已清理')}")
+    else:
+        msg = result.get("message", "")
+        print(f"  {_red('清理失败:')} {msg}")
+        active = result.get("active_members", [])
+        if active:
+            print(f"  活跃成员: {', '.join(active)}")
+            print(f"  请先使用 /team-shutdown 关闭所有成员")
+
+
+@_register_cmd("team-tasks", "查看共享任务面板", category="团队")
+async def _cmd_team_tasks(
+    fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str,
+) -> None:
+    """View the shared task board."""
+    coord = _get_team_coordinator(fw, state)
+    if coord is None:
+        print(f"  {_yellow('Team 未启动')}")
+        return
+    result = coord.list_tasks()
+    tasks = result.get("tasks", [])
+    if not tasks:
+        print(f"  {_dim('任务面板为空。使用 team(action=\"create_task\") 创建任务。')}")
+        return
+    print(f"\n  {_bold(_yellow('共享任务面板'))} ({result['total']} tasks, {result['claimable']} claimable)")
+    for t in tasks:
+        status = t["status"]
+        icon = {"pending": "○", "blocked": "⊘", "in_progress": "◉", "completed": "✓", "failed": "✗"}.get(status, "?")
+        assignee = f" → {t['assigned_to']}" if t["assigned_to"] else ""
+        deps = f" [deps: {', '.join(t['depends_on'])}]" if t["depends_on"] else ""
+        print(f"    {icon} {t['task_id']}: {t['title']} ({status}){assignee}{deps}")
+    print()
+
+
 @_register_cmd("team-identity", "开关 team 身份显示", usage="/team-identity on|off", category="团队")
 async def _cmd_team_identity(
     fw: AgentFramework, mock: InteractiveMockModel | None, state: ReplState, args: str,
@@ -1807,8 +1938,14 @@ async def run_classic_repl(fw: AgentFramework, mock_model: InteractiveMockModel 
         _has_dispatcher = fw._run_dispatcher is not None
 
     while True:
+        # Show prompt with focused teammate indicator
+        focused = state.teammate_focus.focused_agent_id
+        prompt_str = (
+            f"{_bold(_cyan(f'[{focused}]'))} {_bold(_green('> '))}"
+            if focused else f"{_bold(_green('> '))}"
+        )
         try:
-            user_input = await asyncio.to_thread(input, f"{_bold(_green('> '))}")
+            user_input = await asyncio.to_thread(input, prompt_str)
             user_input = user_input.strip()
         except (EOFError, KeyboardInterrupt):
             print(f"\n{_dim('再见!')}")
@@ -1823,6 +1960,26 @@ async def run_classic_repl(fw: AgentFramework, mock_model: InteractiveMockModel 
                 print(f"{_dim('再见!')}")
                 break
             continue
+
+        # AT-014: When focused on a teammate, route input to their session
+        if state.teammate_focus.is_focused():
+            focused_id = state.teammate_focus.focused_agent_id
+            coord = _get_team_coordinator(fw, state)
+            if coord:
+                result = await coord.send_user_message_to_teammate(
+                    focused_id, user_input,
+                )
+                if result.get("ok"):
+                    role = result.get("role", "teammate")
+                    print(f"\n  {_cyan(f'[{role}]')} {result['response']}")
+                    iters = result.get("iterations", 0)
+                    print(f"  {_dim(f'({iters} iters)')}")
+                else:
+                    print(f"  {_red('Teammate 错误:')} {result.get('error', '')}")
+            else:
+                print(f"  {_yellow('Team 未启动')}")
+            continue
+
         try:
             # fw.run_stream() acquires dispatcher lock internally,
             # so user turns are automatically serialized with background
