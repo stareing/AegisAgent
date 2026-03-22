@@ -489,6 +489,16 @@ class AgentFramework:
 
         coordinator._on_result_callback = _on_team_result
         coordinator._hook_executor = self._hook_executor
+        # Wire all team config parameters (no hardcodes in coordinator)
+        coordinator._max_qa_rounds = team_cfg.max_qa_rounds
+        coordinator._teammate_max_iterations = team_cfg.teammate_max_iterations
+        coordinator._poll_interval_s = team_cfg.poll_interval_ms / 1000.0
+        coordinator._recent_completions = __import__("collections").deque(
+            maxlen=team_cfg.recent_completions_max,
+        )
+        coordinator._continuation_context_size = team_cfg.continuation_context_size
+        coordinator._summary_max_chars = team_cfg.display_summary_max_chars
+        coordinator._task_preview_chars = team_cfg.display_task_preview_chars
 
         # Persist team config to disk (AT-001)
         from agent_framework.team.config_store import TeamConfigStore

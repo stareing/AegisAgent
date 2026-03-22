@@ -242,20 +242,21 @@ class TestPollForResultUsesCorrectId:
     async def test_poll_uses_given_spawn_id(self, coordinator_with_mock_runtime):
         """_poll_for_result must call collect_result with the spawn_id it receives."""
         coordinator, mock_runtime, _ = coordinator_with_mock_runtime
+        from agent_framework.models.subagent import SubAgentResult
 
-        # Make collect_result return None (no result yet)
         call_ids = []
-        original_collect = mock_runtime.collect_result
 
         async def track_collect(spawn_id, wait=False):
             call_ids.append(spawn_id)
+            # Return result on 3rd call so poll terminates
+            if len(call_ids) >= 3:
+                return SubAgentResult(spawn_id=spawn_id, success=True, final_answer="done")
             return None
 
         mock_runtime.collect_result = track_collect
 
-        # Poll with a specific ID (short timeout)
-        await coordinator._poll_for_result("the_correct_id", timeout_polls=3)
+        result = await coordinator._poll_for_result("the_correct_id")
 
-        # All calls must use "the_correct_id"
         assert len(call_ids) == 3
         assert all(sid == "the_correct_id" for sid in call_ids)
+        assert result is not None

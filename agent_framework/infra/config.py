@@ -188,20 +188,37 @@ class TeammateConfig(BaseModel):
 
 
 class TeamConfig(BaseModel):
-    """Configuration for Agent Team collaboration."""
+    """Configuration for Agent Team collaboration.
+
+    All team runtime parameters are centralized here. No hardcoded
+    magic numbers in coordinator/terminal — everything reads from config.
+    """
     enabled: bool = False
     name: str = ""
-    claim_policy: str = "SELF_CLAIM_WITH_APPROVAL"
-    max_teammates: int = 5
-    shutdown_timeout_ms: int = 30000
-    plan_approval_required_risk_levels: list[str] = Field(default_factory=lambda: ["medium", "high"])
-    bus_backend: str = "memory"
-    bus_db_path: str = "data/agent_bus.db"
-    teammates: list[TeammateConfig] = Field(default_factory=list)
-    # Notification policy for auto-escalation to main model
+
+    # ── Teammate execution ──────────────────────────────────
+    teammate_max_iterations: int = 20   # Max iterations per sub-agent run
+    max_qa_rounds: int = 10             # Max Q&A cycles per task (0 = unlimited)
+    poll_interval_ms: int = 500         # Polling interval for result/answer/approval checks
+    continuation_context_size: int = 6  # How many recent history entries to pass in continuation
+
+    # ── Notification & display ──────────────────────────────
     team_auto_notify_enabled: bool = True
     team_auto_notify_batch_window_ms: int = 500
     team_auto_notify_max_batch_size: int = 10
+    display_poll_interval_s: float = 2.0  # Terminal background display loop interval
+    recent_completions_max: int = 20      # Max entries in recent completion history
+
+    # ── Display truncation (does NOT limit model inference) ──
+    display_summary_max_chars: int = 2000  # Max chars stored/shown for result summaries
+    display_task_preview_chars: int = 200  # Max chars for task descriptions in logs/status
+
+    # ── Bus backend ─────────────────────────────────────────
+    bus_backend: str = "memory"
+    bus_db_path: str = "data/agent_bus.db"
+
+    # ── Teammate definitions ────────────────────────────────
+    teammates: list[TeammateConfig] = Field(default_factory=list)
 
 
 class LoggingConfig(BaseModel):

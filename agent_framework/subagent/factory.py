@@ -23,22 +23,38 @@ logger = get_logger(__name__)
 def _resolve_effective_tool_names(
     all_tools: list,
     blocked_categories: set[str],
-    whitelist: list[str] | None,
+    category_whitelist: list[str] | None,
+    name_whitelist: list[str] | None = None,
 ) -> list[str]:
     """Compute final tool name set for a sub-agent (v2.6.1 §33).
 
-    whitelist can only NARROW the visible set, never expand beyond
-    what the parent sees minus blocked categories.
+    Whitelists can only NARROW the visible set, never expand.
+    Effective set = parent_visible - blocked ∩ (category_whitelist ∪ name_whitelist).
 
-    Effective set = parent_visible - blocked ∩ whitelist (if specified).
+    Args:
+        all_tools: Full parent tool list.
+        blocked_categories: Categories always denied.
+        category_whitelist: If set, only tools in these categories pass.
+        name_whitelist: If set, only tools with these names pass.
+            From TEAM.md allowed-tools (tool names, not categories).
     """
     # Step 1: remove blocked categories (always enforced)
     safe_tools = [t for t in all_tools if t.meta.category not in blocked_categories]
 
-    if whitelist:
-        # Step 2: intersect with whitelist (can only narrow further)
-        whitelist_set = set(whitelist)
-        return [t.meta.name for t in safe_tools if t.meta.category in whitelist_set]
+    if name_whitelist:
+        # Tool name whitelist (from TEAM.md allowed-tools)
+        name_set = set(name_whitelist)
+        # Always include team/mail tools for team members
+        safe_names = [
+            t.meta.name for t in safe_tools
+            if t.meta.name in name_set or t.meta.category == "team"
+        ]
+        return safe_names
+
+    if category_whitelist:
+        # Category whitelist (from SubAgentSpec)
+        cat_set = set(category_whitelist)
+        return [t.meta.name for t in safe_tools if t.meta.category in cat_set]
 
     # No whitelist = all safe tools
     return [t.meta.name for t in safe_tools]
@@ -123,13 +139,27 @@ class SubAgentFactory:
         # Doc 2.6/20.1: sub-agents default-deny system/network/delegation categories
         _BLOCKED_CATEGORIES = {"system", "network", "subagent", "delegation"}
 
+        # Determine if this is a team-spawned sub-agent
+        _parent_executor = self._parent_deps.tool_executor
+        _is_team_spawn = False
+        if hasattr(_parent_executor, "_team_coordinator"):
+            _coord = getattr(_parent_executor, "_team_coordinator", None)
+            if _coord and spec.parent_run_id == _coord.team_id:
+                _is_team_spawn = True
+
+        # Non-team sub-agents also block "team" category (no team/mail tools)
+        if not _is_team_spawn:
+            _BLOCKED_CATEGORIES = _BLOCKED_CATEGORIES | {"team"}
+
         all_tools = self._parent_deps.tool_registry.list_tools()
 
         # v2.6.1 §33: tool_category_whitelist can only NARROW, never expand.
         # Final set = parent-visible ∩ NOT blocked ∩ whitelist (if specified).
         # Blocked categories are ALWAYS filtered regardless of whitelist.
         allowed_names = _resolve_effective_tool_names(
-            all_tools, _BLOCKED_CATEGORIES, spec.tool_category_whitelist
+            all_tools, _BLOCKED_CATEGORIES,
+            spec.tool_category_whitelist,
+            spec.tool_name_whitelist,
         )
 
         tool_registry = ScopedToolRegistry(
@@ -148,16 +178,21 @@ class SubAgentFactory:
             max_concurrent=getattr(parent_executor, "_max_concurrent", 5),
         )
 
-        # Propagate team context from parent executor to child
-        # so spawned teammates can use team()/mail() tools.
+        # Team context propagation:
+        # Only sub-agents spawned BY the team system (parent_run_id = team_id)
+        # get team context. Regular spawn_agent sub-agents do NOT get team tools.
         scoped_tool_executor._current_spawn_id = spec.spawn_id or sub_agent_id
-        for attr in ("_team_coordinator", "_team_mailbox", "_current_team_id", "_team_show_identity"):
-            parent_val = getattr(parent_executor, attr, None)
-            if parent_val is not None:
-                setattr(scoped_tool_executor, attr, parent_val)
-        # Spawned agents are teammates, not leads
-        if hasattr(parent_executor, "_team_coordinator"):
+
+        if _is_team_spawn:
+            # Team member: propagate coordinator, mailbox, team identity
+            for attr in ("_team_coordinator", "_team_mailbox", "_current_team_id", "_team_show_identity"):
+                parent_val = getattr(parent_executor, attr, None)
+                if parent_val is not None:
+                    setattr(scoped_tool_executor, attr, parent_val)
             scoped_tool_executor._current_agent_role = "teammate"
+        else:
+            # Regular sub-agent: no team context, team tools will return error
+            scoped_tool_executor._current_agent_role = "subagent"
 
         # Assemble deps
         deps = AgentRuntimeDeps(
