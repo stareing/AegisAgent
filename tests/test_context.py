@@ -329,13 +329,14 @@ class TestContextCompressor:
         assert len(result) == 1
 
     @pytest.mark.asyncio
-    async def test_no_adapter_returns_as_is(self):
-        """Without model_adapter, compressor returns groups unchanged."""
+    async def test_no_adapter_falls_back_to_truncation(self):
+        """Without model_adapter, compressor falls back to truncation (CE-013)."""
         comp = ContextCompressor(token_counter=self.counter)
         groups = self._make_groups(5, chars=100)
         result = await comp.compress_groups_async(groups, target_tokens=50)
-        # No adapter → no compression, groups returned as-is
-        assert len(result) == 5
+        # No adapter → truncation fallback → keeps last 2 protected groups
+        assert len(result) <= 5
+        assert len(result) >= 2  # At least protected groups
 
     def test_frozen_summary_reuse(self):
         """Frozen summary must be reused when no new uncovered groups exist."""

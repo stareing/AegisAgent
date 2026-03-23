@@ -64,8 +64,11 @@ class ContextCompressor:
     def __init__(
         self,
         token_counter: Callable[[list[Message]], int] | None = None,
+        strategy: str = "SUMMARIZATION",
     ) -> None:
+        from agent_framework.context.strategies import CompressionStrategy
         self._token_counter = token_counter or self._rough_count
+        self._strategy = CompressionStrategy(strategy) if isinstance(strategy, str) else strategy
         # Persistent frozen summary — survives across rounds within a run
         self._frozen_summary: SummaryBlock | None = None
         self._frozen_summary_group_count: int = 0
@@ -76,22 +79,82 @@ class ContextCompressor:
         target_tokens: int,
         model_adapter: Any = None,
     ) -> list[ToolTransactionGroup]:
-        """Compress session groups via LLM summarization.
+        """Compress session groups using the configured strategy.
 
-        If no model_adapter is available or LLM fails, returns groups as-is
-        (no lossy fallback — better to send full history than silently drop it).
+        Strategies:
+        - SUMMARIZATION: LLM incremental summarization (default)
+        - TRUNCATION: Drop oldest groups, keep recent N
+        - HYBRID: Summarize old, keep recent verbatim
+        - NONE: No compression (return as-is)
+
+        On LLM failure, falls back to TRUNCATION (CE-013).
         """
+        from agent_framework.context.strategies import CompressionStrategy
+
         current_tokens = sum(
             g.token_estimate or self._count_group(g) for g in groups
         )
         if current_tokens <= target_tokens:
             return self._prepend_frozen_summary(groups, target_tokens)
 
-        if not model_adapter:
-            logger.warning("compression.no_adapter — returning groups as-is")
+        if self._strategy == CompressionStrategy.NONE:
             return groups
 
-        return await self._llm_summarize(groups, target_tokens, model_adapter)
+        if self._strategy == CompressionStrategy.TRUNCATION:
+            return self._truncate_groups(groups, target_tokens)
+
+        # SUMMARIZATION or HYBRID — need model_adapter
+        if not model_adapter:
+            logger.warning("compression.no_adapter — falling back to truncation")
+            return self._truncate_groups(groups, target_tokens)
+
+        try:
+            if self._strategy == CompressionStrategy.HYBRID:
+                return await self._hybrid_compress(groups, target_tokens, model_adapter)
+            # Default: SUMMARIZATION
+            return await self._llm_summarize(groups, target_tokens, model_adapter)
+        except Exception as exc:
+            # CE-013: LLM failure → fallback to TRUNCATION
+            logger.warning("compression.llm_failed_fallback_truncation",
+                           strategy=self._strategy.value, error=str(exc))
+            return self._truncate_groups(groups, target_tokens)
+
+    def _truncate_groups(
+        self,
+        groups: list[ToolTransactionGroup],
+        target_tokens: int,
+    ) -> list[ToolTransactionGroup]:
+        """Drop oldest groups until within budget. Protects last N groups."""
+        if not groups:
+            return groups
+
+        protected = groups[-_PROTECTED_RECENT_GROUPS:]
+        trimmable = groups[:-_PROTECTED_RECENT_GROUPS] if len(groups) > _PROTECTED_RECENT_GROUPS else []
+
+        while trimmable:
+            total = sum(g.token_estimate or self._count_group(g) for g in trimmable + protected)
+            if total <= target_tokens:
+                break
+            trimmable.pop(0)
+
+        return trimmable + protected
+
+    async def _hybrid_compress(
+        self,
+        groups: list[ToolTransactionGroup],
+        target_tokens: int,
+        model_adapter: Any,
+    ) -> list[ToolTransactionGroup]:
+        """Summarize old groups, keep recent N verbatim."""
+        protected = groups[-_PROTECTED_RECENT_GROUPS:]
+        old_groups = groups[:-_PROTECTED_RECENT_GROUPS] if len(groups) > _PROTECTED_RECENT_GROUPS else []
+
+        if not old_groups:
+            return groups
+
+        # Summarize old groups
+        summarized = await self._llm_summarize(old_groups, target_tokens // 2, model_adapter)
+        return summarized + protected
 
     # ------------------------------------------------------------------
     # Frozen summary management

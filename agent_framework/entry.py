@@ -206,13 +206,25 @@ class AgentFramework:
             hook_executor=self._hook_executor,
         )
 
-        # Context
-        source_provider = ContextSourceProvider()
-        builder = ContextBuilder(
-            max_context_tokens=self.config.context.max_context_tokens,
-            reserve_for_output=self.config.context.reserve_for_output,
+        # Context — supports pluggable components (CE-005~009)
+        ctx_cfg = self.config.context
+        source_provider = self._load_context_component(
+            ctx_cfg.source_provider_class, "providers", "Provider",
+            default_factory=ContextSourceProvider,
         )
-        compressor = ContextCompressor()
+        builder = self._load_context_component(
+            ctx_cfg.builder_class, "builders", "Builder",
+            default_factory=lambda: ContextBuilder(
+                max_context_tokens=ctx_cfg.max_context_tokens,
+                reserve_for_output=ctx_cfg.reserve_for_output,
+            ),
+        )
+        compressor = self._load_context_component(
+            ctx_cfg.compressor_class, "compressors", "Compressor",
+            default_factory=lambda: ContextCompressor(
+                strategy=ctx_cfg.default_compression_strategy,
+            ),
+        )
         context_engineer = ContextEngineer(
             source_provider=source_provider,
             builder=builder,
@@ -761,6 +773,60 @@ class AgentFramework:
         # Patch methods on the agent instance (not the class)
         agent.get_memory_policy = lambda _state: config_memory_policy
         agent.get_context_policy = lambda _state: config_context_policy
+
+    def _load_context_component(
+        self,
+        class_path: str,
+        discovery_subdir: str,
+        class_suffix: str,
+        default_factory: Any,
+    ) -> Any:
+        """Load a context component from config class path, .context/ discovery, or default.
+
+        Priority: config class_path > .context/{subdir}/ discovery > default_factory.
+        """
+        import importlib
+        import inspect
+        import pathlib
+
+        # Priority 1: config class path (CE-009)
+        if class_path:
+            try:
+                module_path, _, class_name = class_path.rpartition(".")
+                module = importlib.import_module(module_path)
+                cls = getattr(module, class_name)
+                instance = cls()
+                logger.info("context.component_loaded_from_config",
+                            class_path=class_path)
+                return instance
+            except Exception as exc:
+                logger.warning("context.config_class_load_failed",
+                               class_path=class_path, error=str(exc))
+
+        # Priority 2: .context/ directory discovery (CE-008)
+        context_dir = pathlib.Path.cwd() / ".context" / discovery_subdir
+        if context_dir.is_dir():
+            for py_file in sorted(context_dir.glob("*.py")):
+                if py_file.name.startswith("_"):
+                    continue
+                try:
+                    spec = importlib.util.spec_from_file_location(
+                        py_file.stem, py_file,
+                    )
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    for name, obj in inspect.getmembers(module, inspect.isclass):
+                        if name.endswith(class_suffix):
+                            instance = obj()
+                            logger.info("context.component_discovered",
+                                        path=str(py_file), class_name=name)
+                            return instance
+                except Exception as exc:
+                    logger.warning("context.discovery_failed",
+                                   path=str(py_file), error=str(exc))
+
+        # Priority 3: default
+        return default_factory() if callable(default_factory) else default_factory
 
     def _create_model_adapter(self) -> BaseModelAdapter:
         """Create model adapter based on config.model.adapter_type.

@@ -36,8 +36,12 @@ class ContextConfig(BaseModel):
     max_context_tokens: int = 8192
     reserve_for_output: int = 1024
     compress_threshold_ratio: float = 0.85
-    default_compression_strategy: str = "LLM_SUMMARIZE"
+    default_compression_strategy: str = "SUMMARIZATION"
     spawn_seed_ratio: float = 0.3
+    # Pluggable context components (importlib dotted path, CE-009)
+    source_provider_class: str = ""
+    compressor_class: str = ""
+    builder_class: str = ""
 
 
 class MemoryConfig(BaseModel):
