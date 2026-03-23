@@ -1,6 +1,6 @@
 ---
 name: spec-dev
-description: "Spec-Driven Development: spec → plan → code → verify. Works with any language or stack."
+description: "Spec-Driven Development: outputs spec + plan + code triple-doc system. Auto-detects greenfield/brownfield/bugfix mode. Any language."
 argument-hint: "[feature name or requirement description]"
 allowed-tools:
   - read_file

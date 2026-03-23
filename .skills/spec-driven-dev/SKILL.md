@@ -1,6 +1,6 @@
 ---
 name: spec-driven-dev
-description: "规范驱动开发：先协议规范 → 再实施计划 → 最后编码验证。自动识别首次/增量/修复模式。"
+description: "规范驱动开发：输出 规范文档 + 实施计划 + 编码验证 三文档体系。自动识别全新/增量/修复模式，增量模式先探索代码再制定规范。"
 argument-hint: "[功能名称或需求描述]"
 allowed-tools:
   - read_file
@@ -141,17 +141,17 @@ find . -name "*feature*" -type f
 验收记录格式：
 
 ```md
-## Phase X Acceptance Record
+## 阶段 X 验收记录
 
-- Feature:
-- Mode: [Greenfield / Brownfield / Bugfix]
-- Source of truth:
-- Runtime path: [入口 → 核心逻辑 → 输出]
-- Compliance coverage: [XX-001 ✅, XX-002 ✅, ...]
-- Tests passed:
-- Failure path tests:
-- Regression tests: [已有测试仍通过]
-- Known gaps:
+- 功能:
+- 模式: [全新 / 增量 / 修复]
+- 真相源:
+- 运行路径: [入口 → 核心逻辑 → 输出]
+- 合规覆盖: [XX-001 ✅, XX-002 ✅, ...]
+- 通过测试:
+- 失败路径测试:
+- 回归测试: [已有测试仍通过]
+- 已知缺口:
 ```
 
 ---
