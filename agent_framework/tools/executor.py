@@ -94,6 +94,8 @@ class ToolExecutor:
         self._hook_dispatcher: HookDispatchService | None = (
             HookDispatchService(hook_executor) if hook_executor is not None else None
         )
+        # Container sandbox (lazy-init from config when first needed)
+        self._sandbox: Any = None
         # Set by RunCoordinator at run start — used for parent_run_id in spawn
         self._current_run_id: str = ""
         # Set by RunCoordinator each iteration — used for child context seed.
@@ -516,6 +518,21 @@ class ToolExecutor:
 
         if entry.callable_ref is None:
             raise RuntimeError(f"No callable for tool {entry.meta.name}")
+
+        # Sandbox path validation for file-system tools
+        if entry.meta.category in ("filesystem", "shell") and self._sandbox is not None:
+            from agent_framework.tools.sandbox.path_security import (
+                SandboxPathError,
+                validate_sandbox_path,
+            )
+            for key in ("path", "file_path", "directory"):
+                path_arg = args.get(key)
+                if path_arg and isinstance(path_arg, str):
+                    try:
+                        validate_sandbox_path(path_arg, self._sandbox)
+                    except SandboxPathError:
+                        return f"Path '{path_arg}' is outside the sandbox boundary."
+
         if entry.meta.is_async:
             return await entry.callable_ref(**args)
         return await asyncio.to_thread(entry.callable_ref, **args)

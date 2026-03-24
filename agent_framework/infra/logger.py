@@ -18,6 +18,7 @@ from typing import Any
 import structlog
 
 from agent_framework.infra.config import LoggingConfig
+from agent_framework.infra.redaction import redact_sensitive_processor
 
 _configured = False
 
@@ -180,11 +181,15 @@ def configure_logging(config: LoggingConfig | None = None) -> None:
         cache_logger_on_first_use=True,
     )
 
+    format_processors: list[structlog.types.Processor] = [
+        structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+    ]
+    if config.redaction_enabled:
+        format_processors.append(redact_sensitive_processor)
+    format_processors.append(renderer)
+
     formatter = structlog.stdlib.ProcessorFormatter(
-        processors=[
-            structlog.stdlib.ProcessorFormatter.remove_processors_meta,
-            renderer,
-        ],
+        processors=format_processors,
     )
 
     handler = logging.StreamHandler(sys.stderr)

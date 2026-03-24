@@ -32,6 +32,10 @@ Bypass prohibition (v2.5.2 §24):
 
 from __future__ import annotations
 
+import os as _os
+# Suppress litellm remote model cost map fetch (SSL timeout in restricted networks)
+_os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+
 import asyncio
 from typing import Any
 
@@ -85,6 +89,7 @@ class AgentFramework:
         self._a2a_adapter: Any = None
         self._setup_done = False
         self._memory_store: SQLiteMemoryStore | None = None
+        self._model_catalog: Any = None
         # Integration-layer active skill tracking for interactive UIs.
         # This is NOT the run-scoped active skill — it's a UI convenience
         # that the interactive terminal uses between runs.
@@ -138,6 +143,17 @@ class AgentFramework:
         memory_manager.set_quota(MemoryQuota(
             max_items_per_user=self.config.memory.max_memory_items_per_user,
         ))
+
+        # Model catalog + ID normalization
+        from agent_framework.adapters.model.catalog import ModelCatalog
+        from agent_framework.adapters.model.id_normalization import normalize_model_id
+        self._model_catalog = ModelCatalog()
+
+        # Normalize configured model name
+        normalized_model = normalize_model_id(
+            self.config.model.default_model_name,
+            self.config.model.adapter_type,
+        )
 
         # Model adapter
         model_adapter = model_adapter or self._create_model_adapter()
@@ -206,16 +222,27 @@ class AgentFramework:
             hook_executor=self._hook_executor,
         )
 
+        # Resolve provider-specific context window
+        from agent_framework.context.token_budgets import resolve_context_window
+        resolved_context_window = resolve_context_window(
+            self.config.model.adapter_type,
+            self.config.model.default_model_name,
+            self.config.context.provider_context_window_override or None,
+        )
+
         # Context — supports pluggable components (CE-005~009)
         ctx_cfg = self.config.context
         source_provider = self._load_context_component(
             ctx_cfg.source_provider_class, "providers", "Provider",
             default_factory=ContextSourceProvider,
         )
+        # Use resolved context window if larger than config default
+        effective_context_tokens = max(ctx_cfg.max_context_tokens, resolved_context_window)
+
         builder = self._load_context_component(
             ctx_cfg.builder_class, "builders", "Builder",
             default_factory=lambda: ContextBuilder(
-                max_context_tokens=ctx_cfg.max_context_tokens,
+                max_context_tokens=effective_context_tokens,
                 reserve_for_output=ctx_cfg.reserve_for_output,
             ),
         )
@@ -266,7 +293,58 @@ class AgentFramework:
             logger.info("skills.file_loaded", count=file_count,
                         dirs=[str(d) for d in skill_dirs])
 
-        # INSTRUCTIONS_LOADED hook — fires after skills/tools are assembled
+        # Plugin system — discover, load, and enable plugins (OC-compatible)
+        self._plugin_registry_obj: Any = None
+        self._plugin_lifecycle: Any = None
+        try:
+            from agent_framework.plugins.lifecycle import PluginLifecycleManager
+            from agent_framework.plugins.loader import PluginLoader
+            from agent_framework.plugins.registry import PluginRegistry as _PluginReg
+
+            plugin_reg = _PluginReg()
+            plugin_loader = PluginLoader(plugin_reg)
+            plugin_lifecycle = PluginLifecycleManager(
+                plugin_registry=plugin_reg,
+                hook_registry=self._hook_registry,
+                tool_registry=self._registry,
+                skill_router=skill_router,
+            )
+
+            # Discover plugins from configured directories
+            plugin_cfg = self.config.plugins
+            if plugin_cfg.auto_discover:
+                for pdir in plugin_cfg.plugin_dirs:
+                    try:
+                        plugin_loader.discover_directory(pdir)
+                    except Exception as pd_err:
+                        logger.warning("plugin.discover_error", dir=pdir, error=str(pd_err))
+
+            # Enable plugins (respect enabled/disabled lists)
+            for manifest in plugin_reg.list_plugins():
+                pid = manifest.plugin_id
+                if pid in plugin_cfg.disabled_plugins:
+                    continue
+                should_enable = (
+                    manifest.enabled_by_default
+                    or pid in plugin_cfg.enabled_plugins
+                )
+                if should_enable:
+                    try:
+                        plugin_lifecycle.enable(pid)
+                    except Exception as pe:
+                        logger.warning("plugin.enable_skipped", plugin_id=pid, error=str(pe))
+                        plugin_reg.add_diagnostic(pid, "error", str(pe))
+
+            self._plugin_registry_obj = plugin_reg
+            self._plugin_lifecycle = plugin_lifecycle
+
+            enabled_count = len(plugin_reg.list_enabled())
+            if enabled_count > 0:
+                logger.info("plugins.loaded", enabled=enabled_count, total=plugin_reg.count)
+        except Exception as plugin_err:
+            logger.warning("plugins.init_failed", error=str(plugin_err))
+
+        # INSTRUCTIONS_LOADED hook — fires after skills/tools/plugins are assembled
         from agent_framework.hooks.payloads import instructions_loaded_payload
         try:
             self._hook_dispatcher.fire_sync_advisory(
@@ -502,6 +580,7 @@ class AgentFramework:
         coordinator._on_result_callback = _on_team_result
         coordinator._hook_executor = self._hook_executor
         # Wire all team config parameters (no hardcodes in coordinator)
+        team_cfg = self.config.team
         coordinator._max_qa_rounds = team_cfg.max_qa_rounds
         coordinator._teammate_max_iterations = team_cfg.teammate_max_iterations
         coordinator._poll_interval_s = team_cfg.poll_interval_ms / 1000.0
@@ -534,7 +613,6 @@ class AgentFramework:
 
         # Wire notification policy from config for event escalation
         from agent_framework.team.notification_policy import TeamNotificationPolicy
-        team_cfg = self.config.team
         coordinator._notification_policy = TeamNotificationPolicy.from_config({
             "team_auto_notify_enabled": team_cfg.team_auto_notify_enabled,
             "team_auto_notify_batch_window_ms": team_cfg.team_auto_notify_batch_window_ms,
@@ -864,12 +942,48 @@ class AgentFramework:
                 max_output_tokens=fb_dict.get("max_output_tokens", cfg.max_output_tokens),
             ))
 
+        # Wire circuit breaker (OC-style exponential cooldown)
+        circuit_breaker = None
+        if cfg.circuit_breaker_enabled:
+            from agent_framework.adapters.model.circuit_breaker import (
+                CircuitBreaker, CooldownConfig,
+            )
+            circuit_breaker = CircuitBreaker(CooldownConfig(
+                tiers_seconds=cfg.cooldown_tiers_seconds,
+                probe_transient=cfg.probe_transient_failures,
+            ))
+
+        # Wire auth profile rotation (multiple API keys per provider)
+        auth_store = None
+        if cfg.auth_profiles:
+            from agent_framework.adapters.model.auth_profiles import (
+                AuthProfile, AuthProfileStore,
+            )
+            profiles = [
+                AuthProfile(
+                    profile_id=p.get("profile_id", f"profile_{i}"),
+                    api_key=p["api_key"],
+                    api_base=p.get("api_base"),
+                )
+                for i, p in enumerate(cfg.auth_profiles)
+                if "api_key" in p
+            ]
+            if profiles:
+                auth_store = AuthProfileStore(profiles)
+
         logger.info(
             "model.fallback_chain_created",
             primary=cfg.adapter_type,
             fallback_count=len(fallbacks),
+            circuit_breaker=cfg.circuit_breaker_enabled,
+            auth_profiles=len(cfg.auth_profiles),
         )
-        return FallbackModelAdapter(primary=primary, fallbacks=fallbacks)
+        return FallbackModelAdapter(
+            primary=primary,
+            fallbacks=fallbacks,
+            circuit_breaker=circuit_breaker,
+            auth_profile_store=auth_store,
+        )
 
     @staticmethod
     def _build_adapter(
@@ -1115,6 +1229,57 @@ class AgentFramework:
         if not self._setup_done:
             self.setup()
         self._deps.memory_manager.set_enabled(enabled)
+
+    # ---------------------------------------------------------------
+    # Workspace public API
+    # ---------------------------------------------------------------
+
+    @staticmethod
+    def init_workspace(
+        template: str = "default",
+        target_dir: str = ".",
+    ) -> list[str]:
+        """[Admin] Initialize workspace from template. Returns created file paths."""
+        from agent_framework.workspace.templates import init_workspace
+        return init_workspace(template=template, target_dir=target_dir)
+
+    @staticmethod
+    def list_workspace_templates() -> list[str]:
+        """[Admin] List available workspace templates."""
+        from agent_framework.workspace.templates import list_templates
+        return list_templates()
+
+    # ---------------------------------------------------------------
+    # Model catalog public API
+    # ---------------------------------------------------------------
+
+    def list_available_models(self, provider: str | None = None) -> list:
+        """[Admin] List models in the catalog, optionally filtered by provider."""
+        if self._model_catalog is None:
+            from agent_framework.adapters.model.catalog import ModelCatalog
+            self._model_catalog = ModelCatalog()
+        return self._model_catalog.list_models(provider)
+
+    def resolve_model_id(self, raw_id: str) -> str:
+        """Normalize a model ID to its canonical form."""
+        from agent_framework.adapters.model.id_normalization import normalize_model_id
+        return normalize_model_id(raw_id, self.config.model.adapter_type)
+
+    # ---------------------------------------------------------------
+    # Agent identity public API
+    # ---------------------------------------------------------------
+
+    def resolve_agent_identity(self, agent_id: str | None = None) -> Any:
+        """Resolve identity metadata for an agent."""
+        from agent_framework.agent.identity import resolve_identity
+        aid = agent_id or (self._agent.agent_id if self._agent else "default")
+        cfg = self.config.identity
+        return resolve_identity(
+            aid,
+            config_name=cfg.name,
+            config_emoji=cfg.emoji,
+            config_avatar=cfg.avatar_path,
+        )
 
     # ---------------------------------------------------------------
     # Skill public API

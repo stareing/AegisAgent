@@ -37,6 +37,9 @@ _MAX_REPEATED_TOOL_CALLS = 2
 # Safety: force ABORT after N consecutive LLM errors
 _MAX_CONSECUTIVE_ERRORS = 3
 
+# Enhanced multi-level tool loop detector (OC-style)
+from agent_framework.agent.tool_loop_detector import ToolLoopDetector
+
 
 @dataclass(frozen=True)
 class AgentLoopDeps:
@@ -74,6 +77,10 @@ class AgentLoop:
     3. Dispatch tool calls if any
     4. Return structured IterationResult
     """
+
+    def __init__(self) -> None:
+        # Enhanced multi-level loop detector (OC-style), reset per run
+        self._loop_detector = ToolLoopDetector()
 
     async def execute_iteration(
         self,
@@ -322,6 +329,10 @@ class AgentLoop:
         tool_call_accum: dict[int, dict] = {}  # index -> {id, name, arguments_parts}
         finish_reason: str | None = None
 
+        # Think tag parser for reasoning model support (OC-style)
+        from agent_framework.agent.think_tag_parser import ThinkTagState, parse_stream_chunk, SegmentType
+        _think_state = ThinkTagState()
+
         async for chunk in model_adapter.stream_complete(
             messages=actual_messages,
             tools=tools_schema if tools_schema else None,
@@ -330,10 +341,24 @@ class AgentLoop:
         ):
             if chunk.delta_content:
                 content_parts.append(chunk.delta_content)
-                yield StreamEvent(
-                    type=StreamEventType.TOKEN,
-                    data={"text": chunk.delta_content},
-                )
+                # Parse through think tag parser for reasoning models
+                segments = parse_stream_chunk(chunk.delta_content, _think_state)
+                for seg in segments:
+                    if seg.type == SegmentType.THINKING:
+                        yield StreamEvent(
+                            type=StreamEventType.THINKING_DELTA,
+                            data={"text": seg.content, "thinking": True},
+                        )
+                    elif seg.type == SegmentType.THINKING_END:
+                        yield StreamEvent(
+                            type=StreamEventType.THINKING_END,
+                            data={"thinking": False},
+                        )
+                    elif seg.content:
+                        yield StreamEvent(
+                            type=StreamEventType.TOKEN,
+                            data={"text": seg.content},
+                        )
 
             if chunk.delta_tool_calls:
                 for tc_delta in chunk.delta_tool_calls:
@@ -524,6 +549,22 @@ class AgentLoop:
                     completed += 1
                     tool_results.append(result)
                     tool_metas.append(meta)
+
+                    # Record in enhanced loop detector for multi-level pattern detection
+                    try:
+                        # Use tool arguments (not call_id) for hash-based loop detection
+                        tool_args = ""
+                        for tc in model_response.tool_calls:
+                            if tc.id == result.tool_call_id:
+                                tool_args = str(tc.arguments) if tc.arguments else ""
+                                break
+                        self._loop_detector.record(
+                            result.tool_name or "",
+                            tool_args,
+                            str(result.output)[:500] if result.output else "",
+                        )
+                    except Exception:
+                        pass
 
                     # Full output string — no truncation for downstream consumers
                     raw_output = result.output

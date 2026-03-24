@@ -84,6 +84,7 @@ async def call_llm_compress(
     previous_summary: str | None = None,
     max_tokens: int | None = None,
     messages: list[Message] | None = None,
+    extra_instructions: str = "",
 ) -> str | None:
     """Call LLM with compression prompt to produce structured summary.
 
@@ -97,6 +98,8 @@ async def call_llm_compress(
         previous_summary: Existing summary to merge with (for incremental).
         max_tokens: Optional hard cap on output tokens.
         messages: Original Message objects (unused, kept for API compat).
+        extra_instructions: Additional instructions appended to the system prompt
+            (e.g. identifier preservation directives).
 
     Returns:
         Summary text string, or None on failure.
@@ -117,8 +120,12 @@ async def call_llm_compress(
     if max_tokens is not None:
         budget = min(budget, max_tokens)
 
+    system_prompt = CONTEXT_COMPRESSION_PROMPT
+    if extra_instructions:
+        system_prompt = f"{system_prompt}\n\n{extra_instructions}"
+
     compress_messages = [
-        Message(role="system", content=CONTEXT_COMPRESSION_PROMPT),
+        Message(role="system", content=system_prompt),
         Message(role="user", content=user_content),
     ]
 

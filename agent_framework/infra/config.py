@@ -22,6 +22,18 @@ class ModelConfig(BaseModel):
         default_factory=list,
         description="Fallback model configs tried in order when primary fails. Each dict has same fields as ModelConfig.",
     )
+    # Circuit breaker (OC-style model failover)
+    circuit_breaker_enabled: bool = True
+    cooldown_tiers_seconds: list[int] = Field(
+        default_factory=lambda: [60, 300, 1500, 3600],
+        description="Exponential cooldown tiers in seconds per consecutive failure",
+    )
+    probe_transient_failures: bool = True
+    # Auth profile rotation (multiple API keys per provider)
+    auth_profiles: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="List of auth profiles: [{profile_id, api_key, api_base?}]",
+    )
 
 
 class ContextConfig(BaseModel):
@@ -42,6 +54,16 @@ class ContextConfig(BaseModel):
     source_provider_class: str = ""
     compressor_class: str = ""
     builder_class: str = ""
+    # Adaptive compaction (OC-style)
+    adaptive_compaction: bool = True
+    compaction_base_ratio: float = 0.4
+    compaction_safety_margin: float = 1.2
+    identifier_preservation: bool = True
+    # Provider context window override (0 = auto-detect from adapter)
+    provider_context_window_override: int = 0
+    # Bootstrap budget limits
+    bootstrap_max_chars_per_file: int = 50_000
+    bootstrap_max_total_chars: int = 200_000
 
 
 class MemoryConfig(BaseModel):
@@ -81,6 +103,17 @@ class ToolConfig(BaseModel):
     max_concurrent_tool_calls: int = 5
     allow_parallel_tool_calls: bool = True
     shell_enabled: bool = False  # High-risk: must be explicitly enabled
+    # Sandbox config (OC-style container isolation)
+    sandbox_enabled: bool = False
+    sandbox_runtime: str = "docker"  # "docker" | "podman" | "none"
+    sandbox_image: str = "python:3.11-slim"
+    sandbox_memory_limit: str = "512m"
+    sandbox_pids_limit: int = 256
+    sandbox_network: str = "none"
+    sandbox_workspace_mount: str = "rw"  # "rw" | "ro" | "none"
+    # Tool loop detection thresholds
+    loop_detection_threshold: int = 3
+    loop_detection_history_size: int = 30
 
 
 class TodoConfig(BaseModel):
@@ -148,6 +181,8 @@ class SubAgentConfig(BaseModel):
     execution_mode: str = "progressive"  # "parallel" | "progressive"
     default_collection_strategy: str = "HYBRID"  # "SEQUENTIAL" | "BATCH_ALL" | "HYBRID"
     collection_poll_interval_ms: int = 500
+    # Poll backoff
+    collection_poll_max_interval_ms: int = 10000
     live_agent_ttl_seconds: int = 300  # LONG_LIVED agent IDLE timeout before auto-cleanup
     max_live_agents_per_run: int = 3   # Max LONG_LIVED agents alive simultaneously
     # Dynamic pool auto-scaling (replaces fixed semaphore when enabled)
@@ -225,10 +260,34 @@ class TeamConfig(BaseModel):
     teammates: list[TeammateConfig] = Field(default_factory=list)
 
 
+class PluginConfig(BaseModel):
+    """Plugin system configuration (OC-compatible)."""
+
+    plugin_dirs: list[str] = Field(
+        default_factory=list,
+        description="Directories to scan for plugins (supports plugin.json and __init__.py)",
+    )
+    enabled_plugins: list[str] = Field(
+        default_factory=list,
+        description="Plugin IDs to enable (overrides enabled_by_default=false)",
+    )
+    disabled_plugins: list[str] = Field(
+        default_factory=list,
+        description="Plugin IDs to disable (overrides enabled_by_default=true)",
+    )
+    plugin_configs: dict[str, dict] = Field(
+        default_factory=dict,
+        description="Per-plugin configuration: plugin_id -> config dict",
+    )
+    auto_discover: bool = True
+
+
 class LoggingConfig(BaseModel):
     log_dir: str = "logs"
     json_output: bool = True
     level: str = "INFO"
+    redaction_enabled: bool = True
+    extra_sensitive_patterns: list[str] = Field(default_factory=list)
 
 
 class TracingConfig(BaseModel):
@@ -238,6 +297,13 @@ class TracingConfig(BaseModel):
     exporter_type: str = "otlp"  # "otlp" | "console"
     otlp_endpoint: str = "http://localhost:4317"
     service_name: str = "aegis-agent"
+
+
+class AgentIdentityConfig(BaseModel):
+    """Agent identity configuration."""
+    name: str = ""
+    emoji: str = ""
+    avatar_path: str = ""
 
 
 class FrameworkConfig(BaseSettings):
@@ -279,8 +345,10 @@ class FrameworkConfig(BaseSettings):
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     a2a: A2AConfig = Field(default_factory=A2AConfig)
     team: TeamConfig = Field(default_factory=lambda: TeamConfig())
+    plugins: PluginConfig = Field(default_factory=PluginConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     tracing: TracingConfig = Field(default_factory=TracingConfig)
+    identity: AgentIdentityConfig = Field(default_factory=AgentIdentityConfig)
 
     model_config = {"env_prefix": "AGENT_", "env_nested_delimiter": "__"}
 

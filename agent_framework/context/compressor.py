@@ -23,10 +23,57 @@ from typing import Any, Callable
 
 from pydantic import BaseModel, Field
 
+from agent_framework.context.identifier_preservation import (
+    build_preservation_instructions,
+    extract_identifiers,
+)
 from agent_framework.context.transaction_group import ToolTransactionGroup
 from agent_framework.models.message import ContentPart, Message
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Adaptive compaction (OC-style)
+# ---------------------------------------------------------------------------
+
+class AdaptiveCompactionConfig(BaseModel):
+    """Controls adaptive compression ratio based on message characteristics."""
+
+    model_config = {"frozen": True}
+
+    base_ratio: float = 0.4
+    safety_margin: float = 1.2
+    min_ratio: float = 0.15
+    max_ratio: float = 0.8
+
+
+def compute_adaptive_ratio(
+    message_count: int,
+    avg_message_tokens: int,
+    context_window: int,
+    config: AdaptiveCompactionConfig | None = None,
+) -> float:
+    """Compute adaptive compression ratio based on message size vs context window.
+
+    When messages are large relative to context, use a smaller ratio
+    (more aggressive compression). When messages are small, use the base ratio.
+    """
+    if config is None:
+        config = AdaptiveCompactionConfig()
+
+    if context_window <= 0 or message_count <= 0:
+        return config.base_ratio
+
+    # If average message is > 10% of context, reduce ratio
+    message_fraction = avg_message_tokens / context_window
+    if message_fraction > 0.1:
+        scale = max(0.0, 1.0 - (message_fraction - 0.1) * 5)
+        ratio = config.min_ratio + (config.base_ratio - config.min_ratio) * scale
+    else:
+        ratio = config.base_ratio
+
+    return max(config.min_ratio, min(config.max_ratio, ratio))
 
 
 class SummaryBlock(BaseModel):
@@ -292,10 +339,30 @@ class ContextCompressor:
         history_text = messages_to_text(uncovered_msgs)
         previous_summary = self._frozen_summary.summary_text if self._frozen_summary else None
 
-        summary_text = await call_llm_compress(
-            history_text, model_adapter,
-            previous_summary=previous_summary,
-        )
+        # Identifier preservation: extract IDs before compression and inject
+        # "MUST preserve" instructions so the LLM keeps them in the summary
+        identifiers = extract_identifiers(history_text)
+        preservation_addon = build_preservation_instructions(identifiers)
+
+        from agent_framework.infra.retry import RetryConfig, retry_async
+
+        async def _do_compress() -> str:
+            result = await call_llm_compress(
+                history_text, model_adapter,
+                previous_summary=previous_summary,
+                extra_instructions=preservation_addon,
+            )
+            if not result:
+                raise RuntimeError("LLM compression returned empty result")
+            return result
+
+        try:
+            summary_text = await retry_async(
+                _do_compress,
+                config=RetryConfig(max_attempts=3, min_delay_ms=500, max_delay_ms=5000, label="compaction"),
+            )
+        except (RuntimeError, Exception):
+            summary_text = None
 
         if not summary_text:
             # LLM failed — return groups as-is rather than lossy fallback

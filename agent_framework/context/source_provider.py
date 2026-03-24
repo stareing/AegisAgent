@@ -217,6 +217,17 @@ class ContextSourceProvider:
         SessionState. When SessionSnapshot is passed, the context layer
         sees a frozen view that cannot change mid-build.
         """
+        # Transcript repair: fix malformed tool calls before building context
+        from agent_framework.models.transcript_repair import repair_session_messages
+        try:
+            raw_msgs = [m.model_dump() for m in session_state.messages]
+            repaired = repair_session_messages(raw_msgs)
+            # Only apply if repair changed something (avoid unnecessary mutation)
+            if len(repaired) != len(raw_msgs):
+                session_state.messages = [Message(**m) for m in repaired]
+        except Exception:
+            pass  # Repair is best-effort; never block context build
+
         # If pre-computed index is available, use it directly
         if transaction_index is not None:
             return self._consume_transaction_index(transaction_index)

@@ -30,6 +30,10 @@ from agent_framework.infra.logger import get_logger
 
 logger = get_logger(__name__)
 
+# Exponential backoff schedule (ms) for empty poll cycles.
+# Index = min(consecutive_empty_polls, len-1).
+_BACKOFF_SCHEDULE_MS: list[int] = [500, 1000, 2000, 5000, 10000]
+
 # Sentinel value returned by collect_fn to indicate "still running".
 # Using a unique object avoids collision with any real result dict.
 _STILL_RUNNING = object()
@@ -172,6 +176,7 @@ class LeadCollector:
             return self._make_batch([])
 
         cycles = 0
+        consecutive_empty_polls = 0
         while cycles < self._max_poll_cycles:
             for tracker in pending:
                 result = await collect_fn(tracker.spawn_id, wait=False)
@@ -183,12 +188,14 @@ class LeadCollector:
                     result_with_label["_spawn_id"] = tracker.spawn_id
                     return self._make_batch([result_with_label])
 
+            backoff_idx = min(consecutive_empty_polls, len(_BACKOFF_SCHEDULE_MS) - 1)
+            delay_s = _BACKOFF_SCHEDULE_MS[backoff_idx] / 1000.0
+            consecutive_empty_polls += 1
             cycles += 1
-            await asyncio.sleep(self._poll_interval_s)
+            await asyncio.sleep(delay_s)
 
         raise CollectionTimeoutError(
-            f"SEQUENTIAL poll exceeded {self._max_poll_cycles} cycles "
-            f"({self._max_poll_cycles * self._poll_interval_s:.0f}s). "
+            f"SEQUENTIAL poll exceeded {self._max_poll_cycles} cycles. "
             f"Pending: {[t.spawn_id for t in pending]}"
         )
 
@@ -227,13 +234,15 @@ class LeadCollector:
         """Mode C: Return all currently-completed results (≥1).
 
         Polls until at least one result is available, then returns
-        ALL completed results in that poll cycle.
+        ALL completed results in that poll cycle. Uses exponential
+        backoff on consecutive empty polls to reduce busy-waiting.
         """
         pending = [s for s in self._spawns.values() if not s.collected]
         if not pending:
             return self._make_batch([])
 
         cycles = 0
+        consecutive_empty_polls = 0
         while cycles < self._max_poll_cycles:
             completed_this_cycle: list[dict] = []
             for tracker in pending:
@@ -249,12 +258,14 @@ class LeadCollector:
             if completed_this_cycle:
                 return self._make_batch(completed_this_cycle)
 
+            consecutive_empty_polls += 1
+            backoff_idx = min(consecutive_empty_polls, len(_BACKOFF_SCHEDULE_MS) - 1)
+            delay_s = _BACKOFF_SCHEDULE_MS[backoff_idx] / 1000.0
             cycles += 1
-            await asyncio.sleep(self._poll_interval_s)
+            await asyncio.sleep(delay_s)
 
         raise CollectionTimeoutError(
-            f"HYBRID poll exceeded {self._max_poll_cycles} cycles "
-            f"({self._max_poll_cycles * self._poll_interval_s:.0f}s). "
+            f"HYBRID poll exceeded {self._max_poll_cycles} cycles. "
             f"Pending: {[t.spawn_id for t in pending]}"
         )
 

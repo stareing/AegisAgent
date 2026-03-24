@@ -20,6 +20,19 @@ def run(argv: Sequence[str] | None = None) -> int:
     parser = build_argument_parser("AI Agent Framework CLI")
     args = parser.parse_args(list(argv) if argv is not None else None)
 
+    # Handle --init before framework setup (no config needed)
+    if getattr(args, "init", None):
+        from agent_framework.workspace.templates import init_workspace
+        template = args.init
+        created = init_workspace(template=template)
+        if created:
+            print(f"工作区已初始化 (模板: {template}):")
+            for f in created:
+                print(f"  + {f}")
+        else:
+            print("工作区已存在，无需创建。")
+        return 0
+
     try:
         framework, mock_model = build_framework_from_args(args)
     except Exception as exc:

@@ -2,10 +2,13 @@
 
 All plugin-related pydantic models live here (under models/).
 The plugins/ package re-exports from this module.
+
+OC-compatible manifest schema supports cross-ecosystem plugin discovery.
 """
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from enum import Enum
 
 from pydantic import BaseModel, Field
@@ -31,12 +34,19 @@ class PluginPermission(str, Enum):
     REGISTER_TOOLS = "register_tools"
     REGISTER_HOOKS = "register_hooks"
     SPAWN_AGENT = "spawn_agent"
+    REGISTER_CHANNELS = "register_channels"
+    REGISTER_PROVIDERS = "register_providers"
+    MODIFY_CONTEXT = "modify_context"
+    ACCESS_NETWORK = "access_network"
 
 
 # High-risk permissions that need explicit user confirmation
 HIGH_RISK_PERMISSIONS: frozenset[PluginPermission] = frozenset({
     PluginPermission.REGISTER_TOOLS,
     PluginPermission.SPAWN_AGENT,
+    PluginPermission.REGISTER_CHANNELS,
+    PluginPermission.REGISTER_PROVIDERS,
+    PluginPermission.ACCESS_NETWORK,
 })
 
 
@@ -54,6 +64,79 @@ class PluginStatus(str, Enum):
     DISABLED = "disabled"
     FAILED = "failed"
     UNLOADED = "unloaded"
+
+
+# ---------------------------------------------------------------------------
+# Plugin Kind — classifies plugin type (OC-compatible)
+# ---------------------------------------------------------------------------
+
+class PluginKind(str, Enum):
+    """Plugin type classification for registry filtering and UI display."""
+
+    GENERAL = "general"
+    MEMORY = "memory"
+    CONTEXT_ENGINE = "context_engine"
+    PROVIDER = "provider"
+    CHANNEL = "channel"
+    TOOL = "tool"
+
+
+# ---------------------------------------------------------------------------
+# Plugin Config UI Hints (OC-compatible)
+# ---------------------------------------------------------------------------
+
+class PluginConfigUiHint(BaseModel):
+    """UI rendering hints for plugin configuration fields."""
+
+    model_config = {"frozen": True}
+
+    label: str = ""
+    help: str = ""
+    tags: list[str] = Field(default_factory=list)
+    advanced: bool = False
+    sensitive: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Plugin Diagnostic — error/warning tracking per plugin
+# ---------------------------------------------------------------------------
+
+class PluginDiagnostic(BaseModel):
+    """Diagnostic entry for plugin errors and warnings."""
+
+    model_config = {"frozen": True}
+
+    plugin_id: str
+    level: str = "error"  # "error" | "warning" | "info"
+    message: str
+    timestamp: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Plugin Record — runtime status tracking (OC-compatible)
+# ---------------------------------------------------------------------------
+
+class PluginRecord(BaseModel):
+    """Runtime tracking record for a loaded plugin.
+
+    Mirrors OC's PluginRecord for cross-ecosystem observability.
+    """
+
+    plugin_id: str
+    name: str = ""
+    version: str = ""
+    kind: PluginKind = PluginKind.GENERAL
+    status: str = "discovered"  # loaded | disabled | error | enabled
+    enabled: bool = False
+    tool_names: list[str] = Field(default_factory=list)
+    hook_names: list[str] = Field(default_factory=list)
+    provider_ids: list[str] = Field(default_factory=list)
+    channel_ids: list[str] = Field(default_factory=list)
+    skill_ids: list[str] = Field(default_factory=list)
+    diagnostics: list[PluginDiagnostic] = Field(default_factory=list)
+    error: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -93,3 +176,11 @@ class PluginManifest(BaseModel):
 
     config_schema: dict | None = None
     marketplace_meta: dict | None = None
+
+    # OC-compatible extensions (maximize cross-ecosystem interop)
+    kind: PluginKind = PluginKind.GENERAL
+    channels: list[str] = Field(default_factory=list)
+    providers: list[str] = Field(default_factory=list)
+    skills: list[str] = Field(default_factory=list)
+    ui_hints: dict[str, PluginConfigUiHint] | None = None
+    min_host_version: str | None = None

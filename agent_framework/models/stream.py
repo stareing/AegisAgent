@@ -27,6 +27,10 @@ class StreamEventType(str, Enum):
     ITERATION_START = "iteration_start"
     DONE = "done"
     ERROR = "error"
+    # Thinking / reasoning block events (provider think-tag parsing)
+    THINKING_START = "thinking_start"
+    THINKING_DELTA = "thinking_delta"
+    THINKING_END = "thinking_end"
     ASSISTANT_TOOL_CALLS = "assistant_tool_calls"
     # Progressive tool-completion events (transient UI — never enter SessionState)
     # Fired for every tool in progressive mode, not just spawn_agent.
