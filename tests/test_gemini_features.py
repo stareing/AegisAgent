@@ -8,7 +8,8 @@ Feature 5: StreamEvent JSONL Serialization
 Feature 6: MCP Server (IDE Companion)
 """
 
-from __future__ import annotations
+# NOTE: Do NOT use `from __future__ import annotations` here.
+# It breaks TypedDict + Annotated at runtime, which the Graph tests need.
 
 import asyncio
 import json
@@ -379,7 +380,10 @@ class TestSDK:
 
         expected = {
             "AgentSDK", "SDKConfig",
-            "SDKAgentInfo", "SDKHookInfo", "SDKMCPServerInfo",
+            "SDKAgentInfo", "SDKCancelToken", "SDKCheckpoint",
+            "SDKCommandResult", "SDKContextStats", "SDKEventSubscription",
+            "SDKGraphEvent", "SDKHookInfo", "SDKIsolatedRunResult",
+            "SDKMCPServerInfo",
             "SDKMemoryEntry", "SDKModelInfo", "SDKPluginInfo",
             "SDKRunResult", "SDKSkillInfo", "SDKStreamEvent",
             "SDKStreamEventType", "SDKTeamNotification",
@@ -392,10 +396,14 @@ class TestSDK:
             AgentSDK, SDKConfig, SDKRunResult, SDKStreamEvent,
             SDKToolInfo, SDKSkillInfo, SDKPluginInfo, SDKHookInfo,
             SDKModelInfo, SDKMCPServerInfo, SDKTeamNotification,
+            SDKCancelToken, SDKContextStats, SDKCheckpoint,
+            SDKCommandResult, SDKEventSubscription,
         )
         for cls in [AgentSDK, SDKConfig, SDKRunResult, SDKStreamEvent,
                      SDKToolInfo, SDKSkillInfo, SDKPluginInfo, SDKHookInfo,
-                     SDKModelInfo, SDKMCPServerInfo, SDKTeamNotification]:
+                     SDKModelInfo, SDKMCPServerInfo, SDKTeamNotification,
+                     SDKCancelToken, SDKContextStats, SDKCheckpoint,
+                     SDKCommandResult, SDKEventSubscription]:
             assert cls is not None
 
     # ── Config Tests ─────────────────────────────────────────────
@@ -739,6 +747,316 @@ class TestSDK:
         assert len(sdk_result.artifacts) == 1
         assert sdk_result.artifacts[0]["name"] == "file.py"
         assert sdk_result.progressive_responses == ["Step 1"]
+
+
+    # ── Deep SDK Integration Tests ─────────────────────────────
+
+    def test_sdk_cancel_token(self):
+        from agent_framework.sdk.types import SDKCancelToken
+
+        token = SDKCancelToken()
+        assert not token.is_cancelled
+        token.cancel()
+        assert token.is_cancelled
+        assert token.event.is_set()
+
+    def test_sdk_context_stats(self):
+        from agent_framework.sdk.types import SDKContextStats
+
+        stats = SDKContextStats(
+            system_tokens=200, memory_tokens=50,
+            session_tokens=300, total_tokens=550,
+            groups_trimmed=2, prefix_reused=True,
+        )
+        assert stats.total_tokens == 550
+        assert stats.prefix_reused
+
+    def test_sdk_checkpoint(self):
+        from agent_framework.sdk.types import SDKCheckpoint
+
+        cp = SDKCheckpoint(
+            checkpoint_id="cp_001",
+            created_at="2026-03-25T10:00:00Z",
+            description="before refactor",
+            git_commit_hash="abc123",
+            has_conversation=True,
+            has_tool_call=True,
+        )
+        assert cp.git_commit_hash == "abc123"
+        assert cp.has_conversation
+
+    def test_sdk_command_result(self):
+        from agent_framework.sdk.types import SDKCommandResult
+
+        # Message result
+        r1 = SDKCommandResult(type="message", content="OK", message_type="info")
+        assert r1.type == "message"
+
+        # Tool result
+        r2 = SDKCommandResult(type="tool", tool_name="read_file", tool_args={"path": "x.py"})
+        assert r2.tool_name == "read_file"
+
+        # Prompt result
+        r3 = SDKCommandResult(type="prompt", prompt="Analyze project")
+        assert r3.prompt is not None
+
+    def test_sdk_event_subscription(self):
+        from agent_framework.sdk.types import SDKEventSubscription
+
+        sub = SDKEventSubscription(event_type="tool_done")
+        assert len(sub.subscription_id) == 12
+        assert sub.active
+
+    def test_sdk_event_callbacks(self):
+        from agent_framework.sdk import AgentSDK, SDKConfig
+
+        sdk = AgentSDK(SDKConfig())
+        events_received = []
+
+        sub_id = sdk.on_event("tool_start", lambda data: events_received.append(data))
+        assert sub_id
+
+        # Fire event
+        sdk._fire_event("tool_start", {"key": "value"})
+        assert len(events_received) == 1
+        assert events_received[0]["key"] == "value"
+
+        # Unsubscribe
+        sdk.off_event(sub_id)
+        sdk._fire_event("tool_start", {"key": "value2"})
+        assert len(events_received) == 1  # No new events
+
+    def test_sdk_set_approval_mode(self):
+        from agent_framework.sdk import AgentSDK, SDKConfig
+
+        sdk = AgentSDK(SDKConfig())
+        sdk.set_approval_mode("PLAN")
+        assert sdk._config.approval_mode == "PLAN"
+
+        sdk.set_approval_mode("AUTO_EDIT")
+        assert sdk._config.approval_mode == "AUTO_EDIT"
+
+    def test_sdk_set_approval_mode_invalid(self):
+        from agent_framework.sdk import AgentSDK, SDKConfig
+
+        sdk = AgentSDK(SDKConfig())
+        try:
+            sdk.set_approval_mode("INVALID")
+            assert False, "Should have raised ValueError"
+        except ValueError:
+            pass
+
+    def test_sdk_fork(self):
+        from agent_framework.sdk import AgentSDK, SDKConfig
+
+        parent = AgentSDK(SDKConfig(model_name="gpt-4", temperature=0.5))
+
+        @parent.tool(name="my_tool", description="test")
+        def my_tool() -> str:
+            return "ok"
+
+        child = parent.fork({"model_name": "claude-sonnet-4-20250514", "temperature": 0.8})
+        assert child.config.model_name == "claude-sonnet-4-20250514"
+        assert child.config.temperature == 0.8
+        # Parent unchanged
+        assert parent.config.model_name == "gpt-4"
+        assert parent.config.temperature == 0.5
+        # Custom tools copied
+        assert len(child._custom_tools) == 1
+
+    def test_sdk_policy_rules(self):
+        from agent_framework.sdk import AgentSDK, SDKConfig
+
+        sdk = AgentSDK(SDKConfig())
+        assert len(sdk.list_policy_rules()) == 0
+
+        sdk.add_policy_rule({"type": "tool_deny", "tool": "bash_exec", "approval": "ASK"})
+        sdk.add_policy_rule({"type": "tool_allow", "tool": "mcp_*", "approval": "ALLOW"})
+        assert len(sdk.list_policy_rules()) == 2
+
+        sdk.clear_policy_rules()
+        assert len(sdk.list_policy_rules()) == 0
+
+    def test_sdk_create_cancel_token_static(self):
+        from agent_framework.sdk import AgentSDK
+
+        token = AgentSDK.create_cancel_token()
+        assert not token.is_cancelled
+        token.cancel()
+        assert token.is_cancelled
+
+    # ── Graph Engine Tests ───────────────────────────────────
+
+    def test_sdk_create_graph(self):
+        import operator
+        from typing import Annotated
+        from typing_extensions import TypedDict
+        from agent_framework.sdk import AgentSDK, SDKConfig
+
+        class State(TypedDict):
+            messages: Annotated[list[str], operator.add]
+            count: int
+
+        sdk = AgentSDK(SDKConfig())
+        graph = sdk.create_graph(State)
+        assert graph is not None
+
+        # Build a simple graph
+        def greet(state: dict) -> dict:
+            return {"messages": ["Hello!"], "count": state["count"] + 1}
+
+        from agent_framework.graph import START, END
+        graph.add_node("greet", greet)
+        graph.add_edge(START, "greet")
+        graph.add_edge("greet", END)
+
+        compiled = sdk.compile_graph(graph)
+        assert compiled is not None
+
+    @pytest.mark.asyncio
+    async def test_sdk_invoke_graph(self):
+        import operator
+        from typing import Annotated
+        from typing_extensions import TypedDict
+        from agent_framework.sdk import AgentSDK, SDKConfig
+
+        class State(TypedDict):
+            messages: Annotated[list[str], operator.add]
+            count: int
+
+        sdk = AgentSDK(SDKConfig())
+        graph = sdk.create_graph(State)
+
+        def increment(state: dict) -> dict:
+            return {"messages": [f"step_{state['count']}"], "count": state["count"] + 1}
+
+        from agent_framework.graph import START, END
+        graph.add_node("inc", increment)
+        graph.add_edge(START, "inc")
+        graph.add_edge("inc", END)
+
+        compiled = sdk.compile_graph(graph)
+        result = await sdk.invoke_graph(compiled, {"messages": [], "count": 0})
+
+        assert result["count"] == 1
+        assert "step_0" in result["messages"]
+
+    @pytest.mark.asyncio
+    async def test_sdk_stream_graph(self):
+        import operator
+        from typing import Annotated
+        from typing_extensions import TypedDict
+        from agent_framework.sdk import AgentSDK, SDKConfig
+
+        class State(TypedDict):
+            values: Annotated[list[str], operator.add]
+
+        sdk = AgentSDK(SDKConfig())
+        graph = sdk.create_graph(State)
+
+        def step_a(state: dict) -> dict:
+            return {"values": ["a"]}
+
+        def step_b(state: dict) -> dict:
+            return {"values": ["b"]}
+
+        from agent_framework.graph import START, END
+        graph.add_node("a", step_a)
+        graph.add_node("b", step_b)
+        graph.add_edge(START, "a")
+        graph.add_edge("a", "b")
+        graph.add_edge("b", END)
+
+        compiled = sdk.compile_graph(graph)
+        events = []
+        async for event in sdk.stream_graph(compiled, {"values": []}):
+            events.append(event)
+
+        assert len(events) >= 2
+        nodes_seen = {e["node"] for e in events}
+        assert "a" in nodes_seen
+        assert "b" in nodes_seen
+
+    def test_sdk_graph_constants(self):
+        from agent_framework.sdk import AgentSDK, SDKConfig
+
+        sdk = AgentSDK(SDKConfig())
+        constants = sdk.graph_constants
+        assert constants["START"] == "__start__"
+        assert constants["END"] == "__end__"
+
+    def test_sdk_create_memory_saver(self):
+        from agent_framework.sdk import AgentSDK
+
+        saver = AgentSDK.create_memory_saver()
+        assert saver is not None
+        assert hasattr(saver, "save")
+        assert hasattr(saver, "load")
+
+    def test_sdk_create_tool_node(self):
+        from agent_framework.sdk import AgentSDK
+
+        def my_fn(x: str) -> str:
+            return f"processed: {x}"
+
+        node = AgentSDK.create_tool_node(my_fn, input_key="input", output_key="output")
+        assert callable(node)
+
+    # ── Multi-Instance Isolation Tests ────────────────────────
+
+    def test_sdk_create_isolated(self):
+        from agent_framework.sdk import AgentSDK, SDKConfig
+
+        instance = AgentSDK.create_isolated(
+            SDKConfig(model_name="test-model"),
+            auto_setup=False,
+        )
+        assert instance is not None
+        # Auto-generated unique memory path
+        assert instance.config.memory_db_path != "data/memories.db"
+        assert "memories_" in instance.config.memory_db_path
+
+    def test_sdk_create_isolated_custom_db(self):
+        from agent_framework.sdk import AgentSDK, SDKConfig
+
+        instance = AgentSDK.create_isolated(
+            SDKConfig(),
+            memory_db_path="data/custom_agent.db",
+            auto_setup=False,
+        )
+        assert instance.config.memory_db_path == "data/custom_agent.db"
+
+    def test_sdk_fork_isolation(self):
+        from agent_framework.sdk import AgentSDK, SDKConfig
+
+        parent = AgentSDK(SDKConfig(model_name="parent-model"))
+        child = parent.fork({"model_name": "child-model"})
+
+        # Independent configs
+        assert parent.config.model_name == "parent-model"
+        assert child.config.model_name == "child-model"
+
+        # Modifications to child don't affect parent
+        child.set_approval_mode("PLAN")
+        assert child.config.approval_mode == "PLAN"
+        assert parent.config.approval_mode == "DEFAULT"
+
+    def test_sdk_graph_event_type(self):
+        from agent_framework.sdk.types import SDKGraphEvent
+
+        event = SDKGraphEvent(node="step_a", data={"result": 42}, stream_mode="updates")
+        assert event.node == "step_a"
+        assert event.data["result"] == 42
+
+    def test_sdk_isolated_run_result_type(self):
+        from agent_framework.sdk.types import SDKIsolatedRunResult, SDKRunResult
+
+        r = SDKIsolatedRunResult(
+            results=[SDKRunResult(success=True), SDKRunResult(success=False)],
+            total_tasks=2, succeeded=1, failed=1,
+        )
+        assert r.total_tasks == 2
+        assert r.succeeded == 1
 
 
 # =====================================================================

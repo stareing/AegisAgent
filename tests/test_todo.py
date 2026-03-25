@@ -383,30 +383,30 @@ class TestContextInjection:
     def test_summary_text_empty(self, mgr):
         assert mgr.summary_text() == ""
 
-    def test_todo_state_in_system_core(self):
+    def test_todo_state_excluded_from_system_core(self):
+        """Todo state is excluded from system_core to keep prefix immutable."""
         from agent_framework.context.source_provider import \
             ContextSourceProvider
         from agent_framework.models.agent import AgentConfig
 
         provider = ContextSourceProvider()
-        config = AgentConfig()
         runtime_info = {
+            "operating_system": "Linux",
             "todo_summary": "2/4 done, 1 active, 1 ready",
             "todo_reminder": "Update your tasks.",
         }
-        result = provider.collect_system_core(config, runtime_info)
-        assert "<todo-state>" in result
-        assert "<summary>" in result
-        assert "<reminder>" in result
+        result = provider.collect_system_core(AgentConfig(), runtime_info)
+        assert "todo_summary" not in result
+        assert "todo_reminder" not in result
 
-    def test_no_todo_state_without_info(self):
+    def test_no_todo_in_system_core(self):
         from agent_framework.context.source_provider import \
             ContextSourceProvider
         from agent_framework.models.agent import AgentConfig
 
         provider = ContextSourceProvider()
         result = provider.collect_system_core(AgentConfig(), {"operating_system": "Linux"})
-        assert "<todo-state>" not in result
+        assert "todo" not in result
 
 
 # ══════════════════════════════════════════════════════════════════

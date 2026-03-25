@@ -506,12 +506,15 @@ class TestContextEngineer:
             },
         )
 
-        # Should have: system, user (from session), assistant (from session)
+        # Should have: system (frozen prefix), [system (injection)], user, assistant
         assert len(messages) >= 3
         assert messages[0].role == "system"
         # User message is first non-system message (from session history)
-        assert messages[1].role == "user"
-        assert messages[1].content == "What is 1+1?"
+        # May be at index 1 or 2 depending on whether injection message exists
+        non_system = [m for m in messages if m.role != "system"]
+        assert len(non_system) >= 2
+        assert non_system[0].role == "user"
+        assert non_system[0].content == "What is 1+1?"
 
     @pytest.mark.asyncio
     async def test_context_stats(self):

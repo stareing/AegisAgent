@@ -485,9 +485,13 @@ class TestContextEngineer:
             "task": "test",
         }
         messages = await engineer.prepare_context_for_llm(state, materials)
-        system_content = messages[0].content
-        assert "saved-memories" in system_content
-        assert "Pref" in system_content
+        # Memories are in a trailing context-update injection message
+        # (placed AFTER session history for KV cache optimization).
+        all_content = "\n".join(m.content or "" for m in messages)
+        assert "saved-memories" in all_content
+        assert "Pref" in all_content
+        # Frozen prefix (messages[0]) must NOT contain memories
+        assert "saved-memories" not in (messages[0].content or "")
 
     @pytest.mark.asyncio
     async def test_set_skill_context(self):
@@ -543,9 +547,13 @@ class TestContextEngineer:
             "task": "hello",
         }
         messages = await engineer.prepare_context_for_llm(state, materials)
-        user_msgs = [m for m in messages if m.role == "user"]
+        # Task user messages (excluding trailing context-update injection)
+        task_user_msgs = [
+            m for m in messages
+            if m.role == "user" and "<context-update>" not in (m.content or "")
+        ]
         # Task appears exactly once (from session), not duplicated
-        assert len(user_msgs) == 1
+        assert len(task_user_msgs) == 1
 
     @pytest.mark.asyncio
     async def test_user_message_before_tool_results(self):

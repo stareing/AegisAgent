@@ -126,6 +126,13 @@ class ContextEngineer:
                           and not self._prefix_mgr.should_rotate(system_core, skill_addon)))
         system_tokens = prefix.token_estimate
 
+        # --- Session context (Gemini-style environment awareness) ---
+        # Appended to system message so LLM knows date, platform, git branch.
+        # Only injected on first iteration to avoid token waste.
+        session_context = None
+        if agent_state.iteration_count == 0:
+            session_context = self._source.collect_session_context(runtime_info)
+
         # --- Suffix: memories + session ---
         # Task is already in SessionState as the first user message (written by
         # RunCoordinator at run start).  Do NOT re-inject as current_input —
@@ -163,30 +170,72 @@ class ContextEngineer:
                 model_adapter=model_adapter,
             )
 
-        # Build final context: prefix.messages + session history
-        messages = list(prefix.messages)  # frozen prefix first
+        # ══════════════════════════════════════════════════════════
+        # KV CACHE-OPTIMAL MESSAGE ORDERING
+        #
+        # LLM KV cache is prefix-matched: if the first K tokens are
+        # identical to the previous call, those K tokens are reused.
+        # Any change at position P invalidates ALL cache from P onward.
+        #
+        # Optimal ordering for maximum cache reuse:
+        #
+        #   messages[0]     = system (frozen prefix)     — IMMUTABLE
+        #   messages[1..N]  = session history             — STABLE (old turns never change)
+        #   messages[N+1]   = context injection           — CHANGES per iteration
+        #
+        # Between iteration i and i+1, only NEW messages are appended
+        # to session history. The frozen prefix + all prior history
+        # tokens form an identical prefix → KV cache fully reused.
+        #
+        # The injection message (dynamic state, memories, hooks) goes
+        # LAST so its per-iteration changes never invalidate prior cache.
+        #
+        # Frozen prefix rotation triggers (exhaustive):
+        #   ✓ tools/MCP added/removed     → system_core hash changes
+        #   ✓ skill activated/deactivated  → skill_addon hash changes
+        #   ✓ approval_mode changed        → system_core hash changes
+        #   ✗ iteration progress           — does NOT rotate
+        #   ✗ memory changes               — does NOT rotate
+        #   ✗ todo state                   — does NOT rotate
+        # ══════════════════════════════════════════════════════════
 
-        # Append memory block to system message if present
-        if memory_block:
-            sys_content = messages[0].content or ""
-            messages[0] = Message(role="system", content=f"{sys_content}\n\n{memory_block}")
+        # 1. Frozen prefix — IMMUTABLE, only rotates on hash change
+        messages = list(prefix.messages)
 
-        # Append hook-injected extra instructions if present
-        if _hook_extra_instructions:
-            sys_content = messages[0].content or ""
-            messages[0] = Message(
-                role="system",
-                content=f"{sys_content}\n\n<hook-instructions>{_hook_extra_instructions}</hook-instructions>",
-            )
-
-        # Append session history (includes user task as first message)
+        # 2. Session history — STABLE (prior turns are append-only, never mutated)
         for group in session_groups:
             messages.extend(group.messages)
 
+        # 3. Context injection — LAST position, changes per iteration
+        #    Placed after session history so it never invalidates KV cache
+        #    for the prefix + prior turns.
+        injection_parts: list[str] = []
+
+        if session_context:
+            injection_parts.append(session_context)
+
+        if memory_block:
+            injection_parts.append(memory_block)
+
+        if _hook_extra_instructions:
+            injection_parts.append(
+                f"<hook-instructions>{_hook_extra_instructions}</hook-instructions>"
+            )
+
+        if injection_parts:
+            messages.append(Message(
+                role="user",
+                content="<context-update>\n"
+                + "\n\n".join(injection_parts)
+                + "\n</context-update>",
+            ))
+
         total_tokens = self._builder.calculate_tokens(messages)
 
-        actual_session_msgs = [m for m in messages if m.role not in ("system",)]
-        groups_trimmed = max(0, original_session_msgs_count - len(actual_session_msgs))
+        # Count session messages (excluding frozen prefix and trailing injection)
+        injection_count = 1 if injection_parts else 0
+        actual_session_msgs_count = len(messages) - len(prefix.messages) - injection_count
+        groups_trimmed = max(0, original_session_msgs_count - actual_session_msgs_count)
 
         self._last_stats = ContextStats(
             system_tokens=system_tokens,

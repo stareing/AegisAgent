@@ -18,11 +18,21 @@ Full capability coverage:
   - Team notifications: drain / peek / mark delivered
   - Agent identity: resolve identity metadata
   - Workspace: init / list templates
+  - Slash commands: execute framework commands programmatically
+  - Cancellation: cancel running tasks via SDKCancelToken
+  - Event callbacks: subscribe to SDK lifecycle events
+  - Context stats: inspect context engineering statistics
+  - Manual compression: trigger history compaction
+  - Approval mode: switch approval mode at runtime
+  - Checkpoints: save / list / restore state snapshots
+  - Policy rules: add / list / clear declarative policy rules
+  - Fork: create independent child SDK instances
 """
 
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections.abc import AsyncGenerator
 from typing import Any, Callable
 
@@ -30,6 +40,11 @@ from agent_framework.infra.logger import get_logger
 from agent_framework.sdk.config import SDKConfig
 from agent_framework.sdk.types import (
     SDKAgentInfo,
+    SDKCancelToken,
+    SDKCheckpoint,
+    SDKCommandResult,
+    SDKContextStats,
+    SDKEventSubscription,
     SDKHookInfo,
     SDKMCPServerInfo,
     SDKMemoryEntry,
@@ -45,6 +60,16 @@ from agent_framework.sdk.types import (
 )
 
 logger = get_logger(__name__)
+
+# Valid event types for the event callback system
+_VALID_EVENT_TYPES = frozenset({
+    "tool_start",
+    "tool_done",
+    "iteration_start",
+    "run_start",
+    "run_done",
+    "error",
+})
 
 
 class AgentSDK:
@@ -64,6 +89,8 @@ class AgentSDK:
         self._framework: Any = None
         self._setup_done = False
         self._custom_tools: list[tuple[Callable, SDKToolDefinition]] = []
+        self._event_callbacks: dict[str, tuple[str, Callable]] = {}
+        self._policy_rules: list[dict[str, Any]] = []
 
     @property
     def config(self) -> SDKConfig:
@@ -175,6 +202,7 @@ class AgentSDK:
         timeout_ms: int | None = None,
         conversation_history: list[dict[str, str]] | None = None,
         content_parts: list[dict[str, Any]] | None = None,
+        cancel_token: SDKCancelToken | None = None,
     ) -> SDKRunResult:
         """Run the agent on a task and return the result.
 
@@ -185,6 +213,9 @@ class AgentSDK:
             conversation_history: Prior conversation as list of
                 {"role": "user"|"assistant", "content": "..."} dicts.
             content_parts: Multimodal content (images, files).
+            cancel_token: Optional cancellation token. Call
+                cancel_token.cancel() to stop the run at the next
+                iteration boundary.
         """
         self._ensure_setup()
 
@@ -203,14 +234,25 @@ class AgentSDK:
             from agent_framework.models.message import ContentPart
             parts = [ContentPart(**p) for p in content_parts]
 
-        result = await self._framework.run(
-            task,
-            initial_session_messages=initial_messages,
-            user_id=user_id,
-            content_parts=parts,
-        )
+        # Extract asyncio.Event from cancel token if provided
+        cancel_event = cancel_token.event if cancel_token is not None else None
 
-        return self._convert_run_result(result)
+        self._fire_event("run_start", {"task": task})
+
+        try:
+            result = await self._framework.run(
+                task,
+                initial_session_messages=initial_messages,
+                user_id=user_id,
+                cancel_event=cancel_event,
+                content_parts=parts,
+            )
+            sdk_result = self._convert_run_result(result)
+            self._fire_event("run_done", {"run_id": sdk_result.run_id, "success": sdk_result.success})
+            return sdk_result
+        except Exception as exc:
+            self._fire_event("error", {"error": str(exc), "phase": "run"})
+            raise
 
     def run_sync(
         self,
@@ -230,6 +272,7 @@ class AgentSDK:
         timeout_ms: int | None = None,
         conversation_history: list[dict[str, str]] | None = None,
         content_parts: list[dict[str, Any]] | None = None,
+        cancel_token: SDKCancelToken | None = None,
     ) -> AsyncGenerator[SDKStreamEvent, None]:
         """Stream agent execution events in real-time.
 
@@ -250,13 +293,27 @@ class AgentSDK:
             from agent_framework.models.message import ContentPart
             parts = [ContentPart(**p) for p in content_parts]
 
+        cancel_event = cancel_token.event if cancel_token is not None else None
+
+        self._fire_event("run_start", {"task": task})
+
         async for event in self._framework.run_stream(
             task,
             initial_session_messages=initial_messages,
             user_id=user_id,
+            cancel_event=cancel_event,
             content_parts=parts,
         ):
-            yield self._convert_stream_event(event)
+            sdk_event = self._convert_stream_event(event)
+
+            # Fire matching event callbacks during stream processing
+            event_type_str = sdk_event.type.value
+            if event_type_str in _VALID_EVENT_TYPES:
+                self._fire_event(event_type_str, sdk_event.data)
+
+            yield sdk_event
+
+        self._fire_event("run_done", {"task": task})
 
     async def run_stream_jsonl(
         self,
@@ -693,6 +750,1160 @@ class AgentSDK:
             tools_available=tools,
             skills_available=skills,
         )
+
+    # ==================================================================
+    # Slash Command Execution
+    # ==================================================================
+
+    async def execute_command(self, command: str) -> dict[str, Any]:
+        """Execute a slash command (e.g. '/init', '/memory show', '/model list').
+
+        Returns a dict with 'type' and command-specific data fields:
+          - type='message': content, message_type
+          - type='tool': tool_name, tool_args, result
+          - type='submit_prompt': prompt, result
+          - type='load_history': message_count
+          - type='none': (command returned None)
+        """
+        self._ensure_setup()
+
+        from agent_framework.commands.protocol import (
+            CommandContext,
+            LoadHistoryAction,
+            MessageAction,
+            SubmitPromptAction,
+            ToolAction,
+        )
+        from agent_framework.commands.registry import CommandRegistry
+
+        # Parse command string: "/name args..." or "name args..."
+        raw = command.strip()
+        if raw.startswith("/"):
+            raw = raw[1:]
+
+        parts = raw.split(maxsplit=1)
+        cmd_name = parts[0] if parts else ""
+        cmd_args = parts[1] if len(parts) > 1 else ""
+
+        if not cmd_name:
+            return {"type": "error", "content": "Empty command"}
+
+        # Build context from framework internals
+        context = CommandContext(
+            framework=self._framework,
+            config=getattr(self._framework, "_config", None),
+            state=None,
+            args=cmd_args,
+        )
+
+        # Use framework's command registry if available, otherwise create one
+        registry: CommandRegistry | None = getattr(
+            self._framework, "_command_registry", None
+        )
+        if registry is None:
+            registry = CommandRegistry()
+
+        action = await registry.dispatch(cmd_name, context, cmd_args)
+
+        if action is None:
+            return {"type": "none"}
+
+        # Convert action to SDK-friendly dict
+        if isinstance(action, MessageAction):
+            return {
+                "type": "message",
+                "message_type": action.message_type,
+                "content": action.content,
+            }
+
+        if isinstance(action, ToolAction):
+            # Execute the tool through the framework
+            tool_result: Any = None
+            try:
+                executor = self._framework._deps.tool_executor
+                tool_result = await executor.execute(
+                    action.tool_name, action.tool_args
+                )
+            except Exception as exc:
+                tool_result = f"Tool execution failed: {exc}"
+
+            return {
+                "type": "tool",
+                "tool_name": action.tool_name,
+                "tool_args": action.tool_args,
+                "result": tool_result,
+            }
+
+        if isinstance(action, SubmitPromptAction):
+            # Run the agent with the injected prompt
+            result = await self.run(action.content)
+            return {
+                "type": "submit_prompt",
+                "prompt": action.content,
+                "result": result.model_dump(),
+            }
+
+        if isinstance(action, LoadHistoryAction):
+            return {
+                "type": "load_history",
+                "message_count": len(action.messages),
+            }
+
+        # Fallback for unknown action types
+        if hasattr(action, "model_dump"):
+            return {"type": getattr(action, "type", "unknown"), **action.model_dump()}
+
+        return {"type": "unknown", "raw": str(action)}
+
+    # ==================================================================
+    # Cancel Mechanism
+    # ==================================================================
+
+    @staticmethod
+    def create_cancel_token() -> SDKCancelToken:
+        """Create a cancellation token for a running task.
+
+        Usage:
+            token = sdk.create_cancel_token()
+            # Pass to run/run_stream:
+            task = asyncio.create_task(sdk.run("long task", cancel_token=token))
+            # Later, from another coroutine or thread:
+            token.cancel()
+        """
+        return SDKCancelToken()
+
+    # ==================================================================
+    # Event Callbacks
+    # ==================================================================
+
+    def on_event(self, event_type: str, callback: Callable) -> str:
+        """Subscribe to SDK events. Returns a subscription ID.
+
+        Supported event types:
+          - "tool_start":       fired when a tool invocation begins
+          - "tool_done":        fired when a tool invocation completes
+          - "iteration_start":  fired at the start of each agent iteration
+          - "run_start":        fired when a run() or run_stream() begins
+          - "run_done":         fired when a run completes
+          - "error":            fired on errors during execution
+
+        The callback receives a single dict argument with event-specific data.
+        """
+        if event_type not in _VALID_EVENT_TYPES:
+            raise ValueError(
+                f"Unknown event type: {event_type!r}. "
+                f"Valid types: {sorted(_VALID_EVENT_TYPES)}"
+            )
+
+        subscription_id = uuid.uuid4().hex[:12]
+        self._event_callbacks[subscription_id] = (event_type, callback)
+        return subscription_id
+
+    def off_event(self, subscription_id: str) -> None:
+        """Unsubscribe from events by subscription ID.
+
+        Silently ignores unknown subscription IDs.
+        """
+        self._event_callbacks.pop(subscription_id, None)
+
+    def _fire_event(self, event_type: str, data: dict[str, Any]) -> None:
+        """Invoke all registered callbacks for the given event type."""
+        for _sub_id, (registered_type, callback) in list(self._event_callbacks.items()):
+            if registered_type != event_type:
+                continue
+            try:
+                callback(data)
+            except Exception:
+                logger.warning(
+                    "event_callback_error",
+                    event_type=event_type,
+                    subscription_id=_sub_id,
+                    exc_info=True,
+                )
+
+    # ==================================================================
+    # Context Stats
+    # ==================================================================
+
+    def get_context_stats(self) -> SDKContextStats:
+        """Get last context engineering statistics.
+
+        Returns zeros if no run has been executed yet.
+        """
+        self._ensure_setup()
+
+        deps = getattr(self._framework, "_deps", None)
+        if deps is None:
+            return SDKContextStats()
+
+        context_engineer = getattr(deps, "context_engineer", None)
+        if context_engineer is None:
+            return SDKContextStats()
+
+        try:
+            stats = context_engineer.report_context_stats()
+        except Exception:
+            return SDKContextStats()
+
+        return SDKContextStats(
+            system_tokens=getattr(stats, "system_tokens", 0),
+            memory_tokens=getattr(stats, "memory_tokens", 0),
+            session_tokens=getattr(stats, "session_tokens", 0),
+            total_tokens=getattr(stats, "total_tokens", 0),
+            groups_trimmed=getattr(stats, "groups_trimmed", 0),
+            prefix_reused=getattr(stats, "prefix_reused", False),
+        )
+
+    # ==================================================================
+    # Manual Compression
+    # ==================================================================
+
+    async def compact_history(self, instruction: str = "") -> SDKRunResult:
+        """Manually trigger conversation history compression.
+
+        Submits a compression instruction to the agent framework, which
+        causes the context engineer to compress the current session
+        history. If no instruction is provided, a default is used.
+
+        Returns the run result from the compression pass.
+        """
+        default_instruction = (
+            "Please compress and summarize the conversation history so far, "
+            "preserving key decisions, facts, and context."
+        )
+        prompt = instruction or default_instruction
+        return await self.run(prompt)
+
+    # ==================================================================
+    # Approval Mode Switching
+    # ==================================================================
+
+    def set_approval_mode(self, mode: str) -> None:
+        """Switch approval mode at runtime.
+
+        Valid modes:
+          - 'DEFAULT': prompt user for confirmation on destructive tools
+          - 'AUTO_EDIT': auto-approve file edits, prompt for others
+          - 'PLAN': plan-only mode, no tool execution
+
+        Raises ValueError for invalid modes.
+        """
+        valid_modes = {"DEFAULT", "AUTO_EDIT", "PLAN"}
+        if mode not in valid_modes:
+            raise ValueError(
+                f"Invalid approval mode: {mode!r}. Valid modes: {sorted(valid_modes)}"
+            )
+
+        self._config = self._config.model_copy(update={"approval_mode": mode})
+
+        # Apply to running framework if setup
+        if self._setup_done and self._framework is not None:
+            fw_config = getattr(self._framework, "_config", None)
+            if fw_config is not None and hasattr(fw_config, "tools"):
+                tools_config = fw_config.tools
+                if hasattr(tools_config, "approval_mode"):
+                    # Update the tools config with new approval mode
+                    object.__setattr__(tools_config, "approval_mode", mode)
+
+            # Swap confirmation handler based on mode
+            if mode == "DEFAULT":
+                from agent_framework.tools.confirmation import (
+                    CLIConfirmationHandler,
+                )
+                self._framework._deps.confirmation_handler = CLIConfirmationHandler()
+            elif mode in ("AUTO_EDIT", "PLAN"):
+                from agent_framework.tools.confirmation import (
+                    AutoApproveConfirmationHandler,
+                )
+                self._framework._deps.confirmation_handler = AutoApproveConfirmationHandler()
+
+    # ==================================================================
+    # Checkpoint Management
+    # ==================================================================
+
+    async def save_checkpoint(self, description: str = "") -> str:
+        """Save current state as a checkpoint. Returns the checkpoint_id.
+
+        Captures conversation history and (if available) the current git
+        commit hash. The checkpoint is persisted as a JSON file in the
+        configured checkpoint directory.
+        """
+        self._ensure_setup()
+
+        from agent_framework.commands.restore_cmd import (
+            CheckpointData,
+            DEFAULT_CHECKPOINT_DIR,
+            save_checkpoint as _save_checkpoint,
+        )
+
+        checkpoint_id = uuid.uuid4().hex[:12]
+
+        # Capture git commit hash if in a git repository
+        git_hash: str | None = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "rev-parse", "HEAD",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await proc.communicate()
+            if proc.returncode == 0:
+                git_hash = stdout.decode().strip()
+        except (FileNotFoundError, OSError):
+            pass
+
+        # Capture conversation messages from session state
+        conversation_messages: list[dict[str, Any]] = []
+        session_state = getattr(self._framework, "_last_session_state", None)
+        if session_state is not None:
+            messages = getattr(session_state, "messages", [])
+            for msg in messages:
+                if hasattr(msg, "model_dump"):
+                    conversation_messages.append(msg.model_dump())
+                elif isinstance(msg, dict):
+                    conversation_messages.append(msg)
+
+        data = CheckpointData(
+            checkpoint_id=checkpoint_id,
+            git_commit_hash=git_hash,
+            conversation_messages=conversation_messages,
+            description=description,
+        )
+
+        checkpoint_dir = self._resolve_checkpoint_dir()
+        _save_checkpoint(checkpoint_dir, data)
+
+        return checkpoint_id
+
+    def list_checkpoints(self) -> list[dict[str, Any]]:
+        """List available checkpoints.
+
+        Returns a list of dicts with checkpoint metadata, sorted by
+        creation time (newest first).
+        """
+        self._ensure_setup()
+
+        from agent_framework.commands.restore_cmd import (
+            list_checkpoints as _list_checkpoints,
+        )
+
+        checkpoint_dir = self._resolve_checkpoint_dir()
+        checkpoints = _list_checkpoints(checkpoint_dir)
+
+        return [
+            {
+                "checkpoint_id": cp.checkpoint_id,
+                "created_at": cp.created_at,
+                "description": cp.description,
+                "git_commit_hash": cp.git_commit_hash,
+                "has_conversation": bool(cp.conversation_messages),
+                "has_tool_call": cp.tool_call is not None,
+            }
+            for cp in checkpoints
+        ]
+
+    async def restore_checkpoint(self, checkpoint_id: str) -> SDKRunResult:
+        """Restore from a checkpoint.
+
+        Finds the checkpoint matching the given ID (or prefix), performs
+        git checkout if applicable, and restores conversation history.
+
+        Returns an SDKRunResult summarizing the restore outcome.
+        """
+        self._ensure_setup()
+
+        from agent_framework.commands.restore_cmd import (
+            list_checkpoints as _list_checkpoints,
+            perform_restore,
+        )
+        from agent_framework.commands.protocol import (
+            LoadHistoryAction,
+            MessageAction,
+            ToolAction,
+        )
+
+        checkpoint_dir = self._resolve_checkpoint_dir()
+        checkpoints = _list_checkpoints(checkpoint_dir)
+
+        matches = [
+            cp for cp in checkpoints
+            if cp.checkpoint_id.startswith(checkpoint_id)
+        ]
+
+        if not matches:
+            return SDKRunResult(
+                success=False,
+                error=f"No checkpoint found matching '{checkpoint_id}'.",
+            )
+
+        if len(matches) > 1:
+            ids = ", ".join(m.checkpoint_id for m in matches)
+            return SDKRunResult(
+                success=False,
+                error=(
+                    f"Ambiguous checkpoint prefix '{checkpoint_id}' matches "
+                    f"{len(matches)} checkpoints: {ids}. "
+                    f"Please provide a longer prefix."
+                ),
+            )
+
+        checkpoint = matches[0]
+
+        # Collect all restore actions
+        messages: list[str] = []
+        async for action in perform_restore(checkpoint):
+            if isinstance(action, MessageAction):
+                if action.message_type == "error":
+                    return SDKRunResult(
+                        success=False,
+                        error=action.content,
+                    )
+                messages.append(action.content)
+            elif isinstance(action, LoadHistoryAction):
+                messages.append(
+                    f"Restored {len(action.messages)} conversation messages."
+                )
+            elif isinstance(action, ToolAction):
+                messages.append(
+                    f"Re-executing tool: {action.tool_name}"
+                )
+                # Execute the tool replay
+                try:
+                    executor = self._framework._deps.tool_executor
+                    await executor.execute(action.tool_name, action.tool_args)
+                except Exception as exc:
+                    messages.append(f"Tool replay failed: {exc}")
+
+        return SDKRunResult(
+            success=True,
+            final_answer="; ".join(messages) if messages else "Checkpoint restored.",
+        )
+
+    def _resolve_checkpoint_dir(self) -> str:
+        """Determine the checkpoint directory from config or default."""
+        from agent_framework.commands.restore_cmd import DEFAULT_CHECKPOINT_DIR
+
+        fw_config = getattr(self._framework, "_config", None)
+        if fw_config is not None:
+            checkpoint_dir = getattr(fw_config, "checkpoint_dir", None)
+            if checkpoint_dir:
+                return str(checkpoint_dir)
+
+        return DEFAULT_CHECKPOINT_DIR
+
+    # ==================================================================
+    # Policy Engine
+    # ==================================================================
+
+    def add_policy_rule(self, rule: dict[str, Any]) -> None:
+        """Add a declarative policy rule at runtime.
+
+        Policy rules are dicts with at minimum a 'type' key specifying
+        the rule kind (e.g. 'tool_deny', 'tool_allow', 'rate_limit').
+        Additional keys depend on the rule type.
+
+        Example:
+            sdk.add_policy_rule({
+                "type": "tool_deny",
+                "tool_name": "shell_exec",
+                "reason": "Shell disabled by policy",
+            })
+        """
+        if "type" not in rule:
+            raise ValueError("Policy rule must have a 'type' key")
+
+        self._policy_rules.append(rule)
+
+        # Apply to framework config if running
+        if self._setup_done and self._framework is not None:
+            fw_config = getattr(self._framework, "_config", None)
+            if fw_config is not None:
+                policy_config = getattr(fw_config, "policy", None)
+                if policy_config is not None and hasattr(policy_config, "rules"):
+                    current_rules = list(policy_config.rules)
+                    current_rules.append(rule)
+                    object.__setattr__(policy_config, "rules", current_rules)
+
+    def list_policy_rules(self) -> list[dict[str, Any]]:
+        """List active policy rules.
+
+        Returns a combined list of rules from SDK-level additions and
+        framework-level policy configuration.
+        """
+        result: list[dict[str, Any]] = list(self._policy_rules)
+
+        if self._setup_done and self._framework is not None:
+            fw_config = getattr(self._framework, "_config", None)
+            if fw_config is not None:
+                policy_config = getattr(fw_config, "policy", None)
+                if policy_config is not None:
+                    fw_rules = getattr(policy_config, "rules", [])
+                    # Merge framework rules not already in SDK-level list
+                    for fw_rule in fw_rules:
+                        if fw_rule not in result:
+                            result.append(fw_rule)
+
+        return result
+
+    def clear_policy_rules(self) -> None:
+        """Clear all policy rules added via the SDK.
+
+        Also clears rules in the framework's policy config if running.
+        """
+        self._policy_rules.clear()
+
+        if self._setup_done and self._framework is not None:
+            fw_config = getattr(self._framework, "_config", None)
+            if fw_config is not None:
+                policy_config = getattr(fw_config, "policy", None)
+                if policy_config is not None and hasattr(policy_config, "rules"):
+                    object.__setattr__(policy_config, "rules", [])
+
+    # ==================================================================
+    # Fork (Sub-SDK)
+    # ==================================================================
+
+    def fork(self, config_overrides: dict[str, Any] | None = None) -> AgentSDK:
+        """Create an independent child SDK instance with optional config overrides.
+
+        The child starts with a copy of this SDK's configuration, with
+        any provided overrides applied. The child has its own framework
+        instance, tool registrations, and event subscriptions.
+
+        The child is NOT automatically set up — call setup() or let it
+        auto-initialize on first use.
+
+        Usage:
+            child = sdk.fork({"model_name": "gpt-4", "max_iterations": 10})
+            result = await child.run("Solve this complex problem")
+        """
+        # Build child config from current config with overrides
+        current_config_dict = self._config.model_dump()
+        if config_overrides:
+            current_config_dict.update(config_overrides)
+
+        child_config = SDKConfig(**current_config_dict)
+        child = AgentSDK(config=child_config)
+
+        # Copy custom tool registrations so they are available in the child
+        for callable_ref, tool_def in self._custom_tools:
+            child._custom_tools.append((callable_ref, tool_def))
+
+        # Copy policy rules
+        child._policy_rules = list(self._policy_rules)
+
+        return child
+
+    # ==================================================================
+    # Graph Engine (LangGraph-compatible)
+    # ==================================================================
+
+    def create_graph(self, state_schema: type) -> Any:
+        """Create a new StateGraph builder with the given state schema.
+
+        The state schema should be a TypedDict with optional Annotated
+        reducers for merge semantics (e.g. list append).
+
+        Usage::
+
+            import operator
+            from typing import Annotated
+            from typing_extensions import TypedDict
+
+            class State(TypedDict):
+                messages: Annotated[list[str], operator.add]
+                count: int
+
+            graph = sdk.create_graph(State)
+            graph.add_node("greet", lambda s: {"messages": ["Hi!"], "count": s["count"]+1})
+            graph.add_edge("__start__", "greet")
+            graph.add_edge("greet", "__end__")
+            app = sdk.compile_graph(graph)
+            result = await sdk.invoke_graph(app, {"messages": [], "count": 0})
+
+        Returns:
+            A StateGraph builder instance.
+        """
+        from agent_framework.graph import StateGraph
+        return StateGraph(state_schema)
+
+    def compile_graph(
+        self,
+        graph: Any,
+        *,
+        checkpointer: Any = None,
+        interrupt_before: list[str] | None = None,
+        interrupt_after: list[str] | None = None,
+    ) -> Any:
+        """Compile a StateGraph into an executable CompiledGraph.
+
+        Args:
+            graph: A StateGraph builder instance.
+            checkpointer: Optional persistence backend for graph state.
+                Use ``sdk.create_memory_saver()`` for in-memory checkpointing.
+            interrupt_before: Node names to pause before (for HITL).
+            interrupt_after: Node names to pause after.
+
+        Returns:
+            A CompiledGraph that can be invoked or streamed.
+        """
+        return graph.compile(
+            checkpointer=checkpointer,
+            interrupt_before=interrupt_before,
+            interrupt_after=interrupt_after,
+        )
+
+    async def invoke_graph(
+        self,
+        compiled_graph: Any,
+        input_state: dict[str, Any],
+        *,
+        thread_id: str = "",
+        recursion_limit: int | None = None,
+    ) -> dict[str, Any]:
+        """Run a compiled graph to completion.
+
+        Args:
+            compiled_graph: A CompiledGraph instance.
+            input_state: Initial state dict matching the graph's schema.
+            thread_id: Optional thread ID for checkpointing.
+            recursion_limit: Max node executions (default from graph).
+
+        Returns:
+            Final state dict after graph execution.
+        """
+        kwargs: dict[str, Any] = {}
+        if thread_id:
+            kwargs["config"] = {"configurable": {"thread_id": thread_id}}
+        if recursion_limit is not None:
+            kwargs["recursion_limit"] = recursion_limit
+        return await compiled_graph.invoke(input_state, **kwargs)
+
+    async def stream_graph(
+        self,
+        compiled_graph: Any,
+        input_state: dict[str, Any],
+        *,
+        thread_id: str = "",
+        stream_mode: str = "values",
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Stream graph execution events.
+
+        Args:
+            compiled_graph: A CompiledGraph instance.
+            input_state: Initial state dict.
+            thread_id: Optional thread ID for checkpointing.
+            stream_mode: "values" (full state), "updates" (deltas), or "debug".
+
+        Yields:
+            Dicts with "node" and "data" keys per executed node.
+        """
+        from agent_framework.graph import StreamMode
+        mode_map = {
+            "values": StreamMode.VALUES,
+            "updates": StreamMode.UPDATES,
+            "debug": StreamMode.DEBUG,
+        }
+        mode = mode_map.get(stream_mode, StreamMode.VALUES)
+
+        kwargs: dict[str, Any] = {"stream_mode": mode}
+        if thread_id:
+            kwargs["config"] = {"configurable": {"thread_id": thread_id}}
+
+        async for event in compiled_graph.stream(input_state, **kwargs):
+            yield {"node": event.node, "data": event.data}
+
+    def create_agent_node(
+        self,
+        *,
+        task_key: str = "task",
+        output_key: str = "result",
+        user_id: str | None = None,
+    ) -> Callable:
+        """Create a graph node that runs a full agent execution.
+
+        The node reads ``state[task_key]`` as the task, runs the agent,
+        and writes the final answer to ``state[output_key]``.
+
+        Usage::
+
+            graph.add_node("researcher", sdk.create_agent_node(task_key="query"))
+        """
+        self._ensure_setup()
+        from agent_framework.graph.nodes import agent_node
+        return agent_node(self._framework, task_key=task_key,
+                          output_key=output_key, user_id=user_id)
+
+    @staticmethod
+    def create_tool_node(
+        fn: Callable,
+        *,
+        input_key: str | None = None,
+        output_key: str | None = None,
+    ) -> Callable:
+        """Wrap a function as a graph node.
+
+        If *input_key* is set, passes ``state[input_key]`` as the argument.
+        If *output_key* is set, wraps the return value as ``{output_key: result}``.
+        """
+        from agent_framework.graph.nodes import tool_node
+        return tool_node(fn, input_key=input_key, output_key=output_key)
+
+    @staticmethod
+    def create_memory_saver() -> Any:
+        """Create an in-memory checkpointer for graph state persistence.
+
+        Returns an InMemorySaver compatible with compile_graph(checkpointer=...).
+        """
+        from agent_framework.graph import InMemorySaver
+        return InMemorySaver()
+
+    @property
+    def graph_constants(self) -> dict[str, str]:
+        """Graph sentinel constants: START and END node names."""
+        from agent_framework.graph import START, END
+        return {"START": START, "END": END}
+
+    # ==================================================================
+    # Multi-Instance Isolation
+    # ==================================================================
+
+    @classmethod
+    def create_isolated(
+        cls,
+        config: SDKConfig | None = None,
+        *,
+        workspace_dir: str | None = None,
+        memory_db_path: str | None = None,
+        auto_setup: bool = True,
+    ) -> AgentSDK:
+        """Create a fully isolated SDK instance with its own state.
+
+        Each isolated instance has:
+        - Its own memory store (separate SQLite DB)
+        - Its own working directory
+        - Its own tool registry (no shared global state)
+        - Its own event subscriptions
+        - Its own policy rules
+
+        Use this when running multiple agents concurrently that must
+        NOT share memory, tools, or conversation context.
+
+        Args:
+            config: SDK configuration (optional, uses defaults).
+            workspace_dir: Override working directory for this instance.
+            memory_db_path: Override memory DB path for isolation.
+            auto_setup: If True, initialize immediately.
+
+        Usage::
+
+            # Two agents with completely separate state
+            agent_a = AgentSDK.create_isolated(
+                SDKConfig(model_name="gpt-4"),
+                memory_db_path="data/agent_a.db",
+            )
+            agent_b = AgentSDK.create_isolated(
+                SDKConfig(model_name="claude-sonnet-4-20250514"),
+                memory_db_path="data/agent_b.db",
+            )
+            # They share NOTHING — separate memory, tools, context
+            result_a = await agent_a.run("Task A")
+            result_b = await agent_b.run("Task B")
+        """
+        import os
+        import uuid
+
+        effective_config = config or SDKConfig()
+
+        # Override memory path for isolation
+        if memory_db_path:
+            effective_config = effective_config.model_copy(
+                update={"memory_db_path": memory_db_path}
+            )
+        elif effective_config.memory_db_path == "data/memories.db":
+            # Auto-generate unique DB path to prevent sharing
+            instance_id = uuid.uuid4().hex[:8]
+            effective_config = effective_config.model_copy(
+                update={"memory_db_path": f"data/memories_{instance_id}.db"}
+            )
+
+        instance = cls(config=effective_config)
+
+        # Set workspace directory if provided
+        if workspace_dir:
+            instance._workspace_dir = workspace_dir
+
+        if auto_setup:
+            # Change working directory temporarily for setup if specified
+            if workspace_dir:
+                original_cwd = os.getcwd()
+                try:
+                    os.makedirs(workspace_dir, exist_ok=True)
+                    os.chdir(workspace_dir)
+                    instance.setup()
+                finally:
+                    os.chdir(original_cwd)
+            else:
+                instance.setup()
+
+        return instance
+
+    async def run_isolated(
+        self,
+        task: str,
+        *,
+        config_overrides: dict[str, Any] | None = None,
+        user_id: str | None = None,
+        timeout_ms: int | None = None,
+    ) -> SDKRunResult:
+        """Run a task in a forked, isolated child instance.
+
+        Creates a temporary child SDK, runs the task, collects the result,
+        and cleans up. The parent SDK state is completely unaffected.
+
+        Useful for parallel execution of independent tasks.
+
+        Args:
+            task: The task to execute.
+            config_overrides: Optional config changes for this run.
+            user_id: User ID for memory scoping.
+            timeout_ms: Timeout in milliseconds.
+
+        Returns:
+            SDKRunResult from the isolated execution.
+        """
+        child = self.fork(config_overrides)
+        try:
+            return await child.run(task, user_id=user_id, timeout_ms=timeout_ms)
+        finally:
+            await child.shutdown()
+
+    async def run_parallel(
+        self,
+        tasks: list[str | dict[str, Any]],
+        *,
+        max_concurrent: int = 3,
+        user_id: str | None = None,
+        timeout_ms: int | None = None,
+    ) -> list[SDKRunResult]:
+        """Run multiple tasks in parallel using isolated child instances.
+
+        Each task gets its own forked SDK instance with independent state.
+        Results are returned in the same order as the input tasks.
+
+        Args:
+            tasks: List of task strings, or dicts with "task" and optional
+                "config_overrides" keys.
+            max_concurrent: Maximum concurrent executions.
+            user_id: Shared user ID for all tasks.
+            timeout_ms: Per-task timeout.
+
+        Usage::
+
+            results = await sdk.run_parallel([
+                "Analyze auth module",
+                "Analyze payment module",
+                {"task": "Analyze API layer", "config_overrides": {"max_iterations": 30}},
+            ])
+            for r in results:
+                print(r.final_answer)
+        """
+        import asyncio as _aio
+
+        sem = _aio.Semaphore(max_concurrent)
+
+        async def _run_one(task_spec: str | dict[str, Any]) -> SDKRunResult:
+            if isinstance(task_spec, str):
+                task_str = task_spec
+                overrides = None
+            else:
+                task_str = task_spec["task"]
+                overrides = task_spec.get("config_overrides")
+
+            async with sem:
+                return await self.run_isolated(
+                    task_str,
+                    config_overrides=overrides,
+                    user_id=user_id,
+                    timeout_ms=timeout_ms,
+                )
+
+        return list(await _aio.gather(*[_run_one(t) for t in tasks]))
+
+    # ==================================================================
+    # Direct Tool Execution
+    # ==================================================================
+
+    async def execute_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Execute a registered tool directly (bypass LLM).
+
+        Useful for programmatic tool invocation from external systems,
+        testing, or pipelines that don't need LLM decision-making.
+
+        Args:
+            tool_name: Name of the registered tool.
+            arguments: Tool arguments dict.
+
+        Returns:
+            Dict with 'success', 'output', and optional 'error'.
+        """
+        self._ensure_setup()
+        from agent_framework.models.message import ToolCallRequest
+
+        req = ToolCallRequest(
+            id=f"sdk_exec_{tool_name}",
+            function_name=tool_name,
+            arguments=arguments or {},
+        )
+        result, meta = await self._framework._deps.tool_executor.execute(req)
+        return {
+            "success": result.success,
+            "output": result.output,
+            "error": result.error.model_dump() if result.error else None,
+            "execution_time_ms": meta.execution_time_ms,
+            "source": meta.source,
+        }
+
+    def export_tool_schemas(
+        self, whitelist: list[str] | None = None
+    ) -> list[dict[str, Any]]:
+        """Export tool JSON schemas for external systems (OpenAI function format).
+
+        Useful for feeding tool definitions to external LLMs, documentation
+        generators, or API clients.
+
+        Args:
+            whitelist: Only export schemas for these tool names (None=all).
+
+        Returns:
+            List of OpenAI-compatible function schema dicts.
+        """
+        self._ensure_setup()
+        if self._framework._registry is None:
+            return []
+        return self._framework._registry.export_schemas(whitelist=whitelist)
+
+    # ==================================================================
+    # Conversation History
+    # ==================================================================
+
+    def get_history(self) -> list[dict[str, str]]:
+        """Get current conversation history as portable dicts.
+
+        Returns list of {"role": "user"|"assistant"|"tool", "content": "..."}.
+        Empty list if no conversation active.
+        """
+        self._ensure_setup()
+        # Access the coordinator's last session state if available
+        coordinator = getattr(self._framework, "_coordinator", None)
+        if coordinator is None:
+            return []
+        state_ctrl = getattr(coordinator, "_state_ctrl", None)
+        if state_ctrl is None:
+            return []
+        # Check for cached session messages on the tool executor
+        executor = getattr(self._framework._deps, "tool_executor", None)
+        if executor and hasattr(executor, "_current_session_messages"):
+            msgs = executor._current_session_messages
+            return [{"role": m.role, "content": m.content or ""} for m in msgs]
+        return []
+
+    def export_history(self) -> str:
+        """Export conversation history as JSON string.
+
+        Portable format that can be saved to file and imported later.
+        """
+        import json
+        return json.dumps(self.get_history(), ensure_ascii=False, indent=2)
+
+    def import_history(self, history_json: str) -> int:
+        """Import conversation history from JSON string.
+
+        Returns number of messages imported.
+        """
+        import json
+        messages = json.loads(history_json)
+        if not isinstance(messages, list):
+            raise ValueError("History must be a JSON array of message objects")
+        # Store for next run() call via conversation_history parameter
+        self._imported_history = messages
+        return len(messages)
+
+    # ==================================================================
+    # Command Risk Assessment (Sandbox)
+    # ==================================================================
+
+    @staticmethod
+    def assess_command_risk(command: str) -> dict[str, Any]:
+        """Assess the risk level of a shell command.
+
+        Returns risk level, score, and matched patterns.
+        Useful for pre-screening commands before execution.
+
+        Args:
+            command: Shell command to assess.
+
+        Returns:
+            Dict with 'level' (SAFE/LOW/MEDIUM/HIGH/CRITICAL),
+            'score' (int), 'reasons' (list[str]).
+        """
+        from agent_framework.tools.sandbox.risk_scorer import score_command_risk
+        assessment = score_command_risk(command)
+        return {
+            "level": assessment.level.name,
+            "score": assessment.score,
+            "reasons": assessment.reasons,
+            "matched_patterns": assessment.matched_patterns,
+        }
+
+    @staticmethod
+    def select_sandbox(
+        command: str,
+        available_runtimes: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Select appropriate sandbox strategy for a command.
+
+        Args:
+            command: Shell command to assess.
+            available_runtimes: Available container runtimes (e.g. ["docker"]).
+
+        Returns:
+            Dict with risk assessment and selected strategy.
+        """
+        from agent_framework.tools.sandbox.risk_scorer import select_sandbox_strategy
+        assessment, strategy = select_sandbox_strategy(
+            command, available_runtimes=available_runtimes,
+        )
+        return {
+            "risk": {
+                "level": assessment.level.name,
+                "score": assessment.score,
+                "reasons": assessment.reasons,
+            },
+            "strategy": {
+                "name": strategy.name,
+                "require_confirmation": strategy.require_confirmation,
+                "container_read_only": strategy.container_read_only,
+                "container_network": strategy.container_network,
+            },
+        }
+
+    # ==================================================================
+    # IDE MCP Server
+    # ==================================================================
+
+    def create_ide_server(
+        self,
+        workspace_dir: str | None = None,
+    ) -> Any:
+        """Create an MCP IDE server exposing this SDK's capabilities.
+
+        The server can be connected to VS Code, JetBrains, or any
+        MCP-compatible IDE client.
+
+        Args:
+            workspace_dir: Workspace directory for file operations.
+
+        Returns:
+            MCPIDEServer instance with run_stdio() method.
+        """
+        from agent_framework.ide.server import MCPIDEServer
+        return MCPIDEServer(
+            config_path=None,
+            workspace_dir=workspace_dir,
+        )
+
+    # ==================================================================
+    # Missing entry.py Methods
+    # ==================================================================
+
+    def peek_team_notifications(self) -> list[dict[str, Any]]:
+        """Peek at pending team notifications without consuming them."""
+        self._ensure_setup()
+        return self._framework.peek_team_notifications()
+
+    def setup_run_dispatcher(
+        self,
+        history_getter: Callable | None = None,
+        max_notification_retries: int = 2,
+    ) -> None:
+        """Initialize background notification dispatcher.
+
+        Enables automatic team notification processing without manual polling.
+
+        Args:
+            history_getter: Callable returning conversation history as list[Message].
+            max_notification_retries: Retry count for failed notification turns.
+        """
+        self._ensure_setup()
+        self._framework.setup_run_dispatcher(
+            history_getter=history_getter,
+            max_notification_retries=max_notification_retries,
+        )
+
+    def list_plugin_agent_templates(self) -> dict[str, list]:
+        """Return {plugin_id: [agent_templates]} for all enabled plugins."""
+        self._ensure_setup()
+        return self._framework.list_plugin_agent_templates()
+
+    def get_plugin_agent_templates(self, plugin_id: str) -> list:
+        """Return agent templates from a specific plugin."""
+        self._ensure_setup()
+        return self._framework.get_plugin_agent_templates(plugin_id)
+
+    async def list_mcp_resource_templates(self, server_id: str) -> list:
+        """List resource templates from an MCP server."""
+        self._ensure_setup()
+        return await self._framework.list_mcp_resource_templates(server_id)
+
+    # ==================================================================
+    # Health Check
+    # ==================================================================
+
+    def health_check(self) -> dict[str, Any]:
+        """Check SDK readiness and component health.
+
+        Returns a dict with status of each subsystem.
+        Useful for monitoring, readiness probes, and diagnostics.
+        """
+        status: dict[str, Any] = {
+            "status": "ready" if self._setup_done else "not_initialized",
+            "setup_done": self._setup_done,
+        }
+        if not self._setup_done:
+            return status
+
+        fw = self._framework
+        status["model"] = {
+            "adapter_type": self._config.model_adapter_type,
+            "model_name": self._config.model_name,
+            "adapter_ready": fw._deps is not None and fw._deps.model_adapter is not None,
+        }
+        status["tools"] = {
+            "count": len(fw._registry.list_tools()) if fw._registry else 0,
+        }
+        status["memory"] = {
+            "enabled": self._config.memory_enabled,
+            "store_ready": fw._memory_store is not None,
+        }
+        status["plugins"] = {
+            "count": len(fw._plugin_registry_obj.list_enabled())
+            if getattr(fw, "_plugin_registry_obj", None) else 0,
+        }
+        status["mcp"] = {
+            "connected": fw._mcp_manager is not None,
+        }
+        status["custom_tools"] = len(self._custom_tools)
+        status["event_subscriptions"] = sum(
+            len(cbs) for cbs in self._event_callbacks.values()
+        )
+        status["policy_rules"] = len(self._policy_rules)
+
+        return status
 
     # ==================================================================
     # Cleanup

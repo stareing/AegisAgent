@@ -34,48 +34,90 @@ class ContextSourceProvider:
     - Missing metadata → degrade to "not safely trimmable", NOT rebuild.
     """
 
+    # Keys excluded from system_core (per-iteration volatile, not injected)
+    _EXCLUDED_RUNTIME_KEYS: frozenset[str] = frozenset({
+        "current_iteration",
+        "spawned_subagents",
+        "todo_summary",
+        "todo_reminder",
+    })
+
+    # Keys that form the static environment context (stable within a run)
+    _ENV_KEYS: frozenset[str] = frozenset({
+        "operating_system",
+        "working_directory",
+    })
+
+    # Keys that form static capability declaration
+    _STATIC_CAP_KEYS: frozenset[str] = frozenset({
+        "can_spawn_subagents",
+        "parallel_tool_calls",
+        "max_iterations",
+        "max_concurrent_subagents",
+        "max_subagents_per_run",
+        "approval_mode",
+    })
+
+    # Meta keys handled specially (not rendered as generic XML)
+    _META_KEYS: frozenset[str] = frozenset({
+        "investigation_mode",
+        "investigation_expectation",
+        "plan_mode_notice",
+    })
+
     def collect_system_core(
         self,
         agent_config: AgentConfig,
         runtime_info: dict | None = None,
         tool_entries: list | None = None,
     ) -> str:
-        """Build the core system prompt with XML structure.
+        """Build the STATIC core system prompt (frozen prefix candidate).
+
+        Only includes values that do NOT change between iterations within
+        a run. This enables PromptPrefixManager to cache and reuse the
+        prefix across iterations via hash comparison.
+
+        Dynamic per-iteration values (current_iteration, spawned_subagents,
+        todo_summary, todo_reminder) are emitted by collect_dynamic_state()
+        and appended to the system message OUTSIDE the frozen prefix.
 
         Output format:
         <system-identity>...</system-identity>
+        <plan-mode-active>...</plan-mode-active>       (if PLAN mode)
         <runtime-environment>...</runtime-environment>
-        <agent-capabilities>...</agent-capabilities>
-        <available-tools>
-          <local-tools>...</local-tools>
-          <mcp-tools>...</mcp-tools>
-          <a2a-tools>...</a2a-tools>
-        </available-tools>
+        <agent-capabilities>...</agent-capabilities>    (static only)
+        <investigation-protocol>...</investigation-protocol>  (if applicable)
+        <available-tools>...</available-tools>
         """
         parts = [f"<system-identity>\n{agent_config.system_prompt}\n</system-identity>"]
-        if runtime_info:
-            # Split into environment vs capabilities
-            env_keys = {"operating_system", "working_directory"}
-            cap_keys = {
-                "can_spawn_subagents", "parallel_tool_calls",
-                "max_iterations", "max_concurrent_subagents", "max_subagents_per_run",
-                "current_iteration", "spawned_subagents",
-            }
-            meta_keys = {"investigation_mode", "investigation_expectation"}
-            todo_keys = {"todo_summary", "todo_reminder"}
 
+        # Plan mode addon — injected when approval_mode is PLAN
+        if runtime_info and runtime_info.get("approval_mode") == "PLAN":
+            from agent_framework.agent.prompt_templates import PLAN_MODE_ADDON
+            parts.append(
+                f"<plan-mode-active>\n{PLAN_MODE_ADDON}\n</plan-mode-active>"
+            )
+
+        if runtime_info:
             env_lines = [
                 f"  <{k}>{_xml_escape(str(v))}</{k}>"
-                for k, v in runtime_info.items() if k in env_keys
+                for k, v in runtime_info.items()
+                if k in self._ENV_KEYS
             ]
-            cap_lines = [
+            static_cap_lines = [
                 f"  <{k}>{_xml_escape(str(v))}</{k}>"
-                for k, v in runtime_info.items() if k in cap_keys
+                for k, v in runtime_info.items()
+                if k in self._STATIC_CAP_KEYS
             ]
+            # Other keys that are not dynamic/env/cap/meta/todo
+            all_known = (
+                self._ENV_KEYS | self._STATIC_CAP_KEYS
+                | self._EXCLUDED_RUNTIME_KEYS | self._META_KEYS
+            )
             other_lines = [
                 f"  <{k}>{_xml_escape(str(v))}</{k}>"
                 for k, v in runtime_info.items()
-                if k not in env_keys and k not in cap_keys and k not in meta_keys and k not in todo_keys
+                if k not in all_known
             ]
 
             if env_lines or other_lines:
@@ -84,12 +126,14 @@ class ContextSourceProvider:
                     + "\n".join(env_lines + other_lines)
                     + "\n</runtime-environment>"
                 )
-            if cap_lines:
+            if static_cap_lines:
                 parts.append(
                     "<agent-capabilities>\n"
-                    + "\n".join(cap_lines)
+                    + "\n".join(static_cap_lines)
                     + "\n</agent-capabilities>"
                 )
+
+            # Investigation protocol (stable within a run)
             if runtime_info.get("investigation_mode") == "codebase_analysis":
                 expectation = _xml_escape(str(runtime_info.get("investigation_expectation", "")))
                 parts.append(
@@ -104,17 +148,6 @@ class ContextSourceProvider:
                     "  </rules>\n"
                     "</investigation-protocol>"
                 )
-            # Todo state block (rendered via runtime_info, not user messages)
-            todo_summary = runtime_info.get("todo_summary")
-            todo_reminder = runtime_info.get("todo_reminder")
-            if todo_summary or todo_reminder:
-                todo_lines = ["<todo-state>"]
-                if todo_summary:
-                    todo_lines.append(f"  <summary>{_xml_escape(todo_summary)}</summary>")
-                if todo_reminder:
-                    todo_lines.append(f"  <reminder>{_xml_escape(todo_reminder)}</reminder>")
-                todo_lines.append("</todo-state>")
-                parts.append("\n".join(todo_lines))
 
         # Tool catalog with source-based XML grouping
         if tool_entries:
@@ -337,6 +370,64 @@ class ContextSourceProvider:
             lines.append(f"    {_xml_escape(desc['description'])}")
             lines.append("  </skill>")
         lines.append("</available-skills>")
+        return "\n".join(lines)
+
+    def collect_session_context(
+        self,
+        runtime_info: dict | None = None,
+    ) -> str | None:
+        """Build Gemini-style session context block (environment info).
+
+        Injected as part of the system message to provide the LLM with
+        awareness of its execution environment. Contains date, platform,
+        workspace, and git status if available.
+        """
+        import datetime
+        import os
+        import platform
+
+        lines = ["<session-context>"]
+
+        # Date
+        now = datetime.datetime.now()
+        date_str = now.strftime("%A, %B %d, %Y")
+        lines.append(f"  <date>{_xml_escape(date_str)}</date>")
+
+        # Platform
+        os_name = {"Darwin": "macOS", "Windows": "Windows", "Linux": "Linux"}.get(
+            platform.system(), platform.system()
+        )
+        lines.append(f"  <platform>{_xml_escape(os_name)}</platform>")
+
+        # Working directory
+        cwd = os.getcwd()
+        lines.append(f"  <working_directory>{_xml_escape(cwd)}</working_directory>")
+
+        # Git info (best-effort)
+        try:
+            import subprocess
+            git_branch = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True, text=True, timeout=3, cwd=cwd,
+            )
+            if git_branch.returncode == 0:
+                branch = git_branch.stdout.strip()
+                lines.append(f"  <git_branch>{_xml_escape(branch)}</git_branch>")
+
+                # Recent commits (last 3)
+                git_log = subprocess.run(
+                    ["git", "log", "--oneline", "-3"],
+                    capture_output=True, text=True, timeout=3, cwd=cwd,
+                )
+                if git_log.returncode == 0 and git_log.stdout.strip():
+                    lines.append("  <recent_commits>")
+                    for commit_line in git_log.stdout.strip().split("\n")[:3]:
+                        lines.append(f"    <commit>{_xml_escape(commit_line)}</commit>")
+                    lines.append("  </recent_commits>")
+        except Exception:
+            pass
+
+        lines.append("</session-context>")
         return "\n".join(lines)
 
     def collect_current_input(self, task_or_prompt: str) -> Message:

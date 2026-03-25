@@ -29,7 +29,9 @@ class TestReadFile:
     def test_read_existing_file(self, tmp_path):
         f = tmp_path / "test.txt"
         f.write_text("hello world")
-        assert read_file(str(f)) == "hello world"
+        result = read_file(str(f))
+        # Now returns cat -n format with line numbers
+        assert "1\thello world" in result
 
     def test_read_nonexistent_raises(self, tmp_path):
         with pytest.raises(FileNotFoundError):
@@ -53,7 +55,7 @@ class TestWriteFile:
         result = write_file(str(target), "test content")
         assert target.exists()
         assert target.read_text() == "test content"
-        assert "12" in result  # "Written 12 characters"
+        assert "12 characters" in result
 
     def test_write_creates_parent_dirs(self, tmp_path):
         target = tmp_path / "sub" / "dir" / "file.txt"

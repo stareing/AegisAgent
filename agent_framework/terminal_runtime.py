@@ -618,6 +618,31 @@ class ReplState:
 
 _COMMANDS: dict[str, tuple[Any, str, str, str]] = {}
 
+# Typed command registry (Gemini-style protocol commands)
+_command_registry_cache: Any = None
+
+
+def _get_command_registry(fw: Any = None) -> Any:
+    """Get or create the typed command registry with all protocol commands."""
+    global _command_registry_cache
+    if _command_registry_cache is not None:
+        return _command_registry_cache
+
+    from agent_framework.commands.registry import CommandRegistry
+    from agent_framework.commands.init_cmd import init_command
+    from agent_framework.commands.restore_cmd import restore_command
+    from agent_framework.commands.memory_cmd import memory_command
+    from agent_framework.commands.plugin_cmd import plugins_command
+    from agent_framework.commands.model_cmd import model_command
+
+    registry = CommandRegistry()
+    for cmd in [init_command, restore_command, memory_command,
+                plugins_command, model_command]:
+        registry.register(cmd)
+
+    _command_registry_cache = registry
+    return registry
+
 
 def _register_cmd(name: str, desc: str, usage: str = "", category: str = "通用") -> Any:
     def decorator(func: Any) -> Any:
@@ -639,6 +664,23 @@ async def _cmd_help(fw: AgentFramework, mock: InteractiveMockModel | None, state
             usage_hint = f" {_dim(usage)}" if usage else ""
             print(f"    {_cyan('/' + name):24s} {desc}{usage_hint}")
         print()
+    # Show protocol commands from the typed registry
+    try:
+        registry = _get_command_registry(fw)
+        by_cat = registry.list_by_category()
+        for cat_name, cmds in sorted(by_cat.items()):
+            print(f"  {_bold(_yellow(f'[ {cat_name} ]'))}")
+            for cmd in cmds:
+                aliases = f" ({', '.join('/' + a for a in cmd.aliases)})" if cmd.aliases else ""
+                subs = ""
+                if cmd.subcommands:
+                    sub_names = " | ".join(s.name for s in cmd.subcommands)
+                    subs = f" {_dim(f'[{sub_names}]')}"
+                print(f"    {_cyan('/' + cmd.name):24s} {cmd.description}{aliases}{subs}")
+            print()
+    except Exception:
+        pass
+
     print(f"  {_bold(_yellow('[ Tool Examples ]'))}")
     print(f"    {_dim('持久任务图: task_create → task_update(in_progress/completed) → task_list/task_get')}")
     print(f"    {_dim('后台 shell 任务: bash_exec(run_in_background=True) → bash_output(task_id) → task_stop(task_id)')}")
@@ -1667,6 +1709,52 @@ async def execute_slash_command(
         with redirect_stdout(buffer):
             await handler(fw, mock_model, state, command_args)
         return CommandExecution(output=buffer.getvalue().rstrip(), handled=True)
+
+    # Typed command registry (Gemini-style protocol commands)
+    try:
+        from agent_framework.commands.registry import CommandRegistry
+        from agent_framework.commands.protocol import (
+            CommandContext, MessageAction, ToolAction,
+            SubmitPromptAction, LoadHistoryAction,
+        )
+        registry = _get_command_registry(fw)
+        cmd = registry.get(command_name)
+        if cmd is not None:
+            state.record_command(f"/{command_name}")
+            ctx = CommandContext(framework=fw, config=fw.config, state=state, args=command_args)
+            result = await registry.dispatch(command_name, ctx, command_args)
+            if result is None:
+                return CommandExecution(handled=True)
+            if isinstance(result, MessageAction):
+                prefix = "" if result.message_type == "info" else "ERROR: "
+                return CommandExecution(output=f"{prefix}{result.content}", handled=True)
+            if isinstance(result, SubmitPromptAction):
+                # Execute the prompt as a user turn
+                run_result = await fw.run(
+                    result.content,
+                    initial_session_messages=state.history,
+                    user_id=state.user_id,
+                )
+                output = format_result(run_result, include_trace=True)
+                if run_result.success:
+                    state.append_turn(result.content, run_result)
+                return CommandExecution(output=output, handled=True)
+            if isinstance(result, ToolAction):
+                from agent_framework.models.message import ToolCallRequest
+                req = ToolCallRequest(
+                    id=f"cmd_{command_name}",
+                    function_name=result.tool_name,
+                    arguments=result.tool_args,
+                )
+                tool_result, _ = await fw._deps.tool_executor.execute(req)
+                output_text = str(tool_result.output) if tool_result.success else str(tool_result.error)
+                return CommandExecution(output=output_text, handled=True)
+            if isinstance(result, LoadHistoryAction):
+                state.history = list(result.messages)
+                return CommandExecution(output="Conversation history restored.", handled=True)
+            return CommandExecution(output=str(result), handled=True)
+    except ImportError:
+        pass
 
     matches = [name for name in _COMMANDS if name.startswith(command_name)]
     if matches:

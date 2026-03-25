@@ -1,0 +1,49 @@
+[project]
+name = "agent-framework-sdk"
+version = "0.1.0"
+description = "Agent Framework SDK — clean public API for embedding AI agents"
+requires-python = ">=3.11"
+license = {file = "../LICENSE"}
+readme = "README.md"
+keywords = ["ai", "agent", "sdk", "llm", "framework"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+dependencies = [
+    "agent-framework>=0.1.0",
+]
+
+[project.optional-dependencies]
+openai = ["openai>=1.0", "tiktoken>=0.5"]
+anthropic = ["anthropic>=0.40"]
+google = ["google-genai>=1.0"]
+all = [
+    "openai>=1.0",
+    "anthropic>=0.40",
+    "google-genai>=1.0",
+    "tiktoken>=0.5",
+]
+
+[project.urls]
+Homepage = "https://github.com/stareing/AegisAgent"
+Documentation = "https://github.com/stareing/AegisAgent/tree/develop/docs"
+Repository = "https://github.com/stareing/AegisAgent"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+# SDK re-exports from the main package — no separate source tree needed.
+# This pyproject.toml exists for standalone `pip install agent-framework-sdk`.
+py-modules = []
+
+[tool.setuptools.packages.find]
+where = [".."]
+include = ["agent_framework.sdk*"]
