@@ -1322,9 +1322,12 @@ class TestMCPIDEServer:
 
     @pytest.mark.asyncio
     async def test_search_codebase(self):
+        import os
         from agent_framework.ide.server import MCPIDEServer
 
-        server = MCPIDEServer(workspace_dir="/home/jiojio/my-agent")
+        # Use actual project root (works in both local and CI)
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        server = MCPIDEServer(workspace_dir=project_root)
         result = await server.handle_tool_call(
             "search_codebase",
             {"pattern": "class StreamEvent", "file_pattern": "*.py"},

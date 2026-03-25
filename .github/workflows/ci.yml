@@ -31,7 +31,7 @@ jobs:
             ${{ runner.os }}-pip-${{ matrix.python-version }}-
 
       - name: Install dependencies
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev,all]"
 
       - name: Run tests
         run: python -m pytest tests/ -q --tb=short
