@@ -54,6 +54,17 @@ class HookPoint(str, Enum):
     TEAMMATE_IDLE = "teammate.idle"
     TEAMMATE_TASK_COMPLETED = "teammate.task_completed"
 
+    # OC-equivalent hook points for plugin interop
+    LLM_INPUT = "llm.input"                        # Pre-send to LLM (modify messages)
+    LLM_OUTPUT = "llm.output"                      # Post-receive from LLM (observe/modify)
+    SESSION_START = "session.start"                 # Agent session opened
+    SESSION_END = "session.end"                     # Agent session closed
+    SUBAGENT_SPAWNING = "subagent.spawning"         # Before sub-agent spawn
+    SUBAGENT_SPAWNED = "subagent.spawned"           # After sub-agent started
+    SUBAGENT_ENDED = "subagent.ended"               # Sub-agent completed/failed
+    AFTER_COMPACTION = "context.after_compaction"    # Post-compaction observation
+    MODEL_RESOLVE = "model.resolve"                 # Before model selection
+
 
 # Hook points that allow DENY action
 DENIABLE_HOOK_POINTS: frozenset[HookPoint] = frozenset({
@@ -62,6 +73,9 @@ DENIABLE_HOOK_POINTS: frozenset[HookPoint] = frozenset({
     HookPoint.MEMORY_PRE_RECORD,
     HookPoint.TEAMMATE_TASK_COMPLETED,
     HookPoint.CONTEXT_PRE_BUILD,
+    HookPoint.LLM_INPUT,
+    HookPoint.MODEL_RESOLVE,
+    HookPoint.SUBAGENT_SPAWNING,
 })
 
 

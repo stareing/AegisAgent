@@ -226,7 +226,13 @@ def build_argument_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--auto-approve", dest="auto_approve", action="store_true", help="自动批准工具调用")
     parser.add_argument("--no-approve", dest="auto_approve", action="store_false", help="工具调用需要手动确认")
     parser.add_argument("--team", action="store_true", help="启动 Agent Team 模式")
-    parser.set_defaults(auto_approve=True)
+    parser.add_argument("--init", nargs="?", const="default", metavar="TEMPLATE",
+                        help="初始化工作区 (模板: default, minimal)")
+    parser.add_argument("--no-qa-limit", dest="no_qa_limit", action="store_true",
+                        help="取消 team Q&A 轮次限制 (默认最多 10 轮)")
+    parser.add_argument("--team-iterations", type=int, default=0,
+                        help="team 成员每次任务最大迭代数 (默认 20, 0=使用配置值)")
+    parser.set_defaults(auto_approve=True, no_qa_limit=False)
     return parser
 
 
@@ -1191,8 +1197,10 @@ async def _cmd_team_status(
     teammates = status.get("teammates", [])
     if teammates:
         print(f"    活跃成员: {len(teammates)}")
+        from agent_framework.agent.identity import resolve_identity
         for m in teammates:
-            print(f"      {_cyan(m['agent_id'])} ({m['role']}) — {m['status']}")
+            _ident = resolve_identity(m.get('agent_id', m.get('role', '')))
+            print(f"      {_ident.emoji} {_cyan(m['agent_id'])} ({m['role']}) — {m['status']}")
     else:
         print(f"    活跃成员: 0 (使用 team(action='assign') 分配任务)")
     if status.get("pending_plans"):
@@ -1231,9 +1239,11 @@ async def _cmd_team_focus(
         if not teammates:
             print(f"  {_yellow('无可聚焦的 teammate')}")
             return
+        from agent_framework.agent.identity import resolve_identity
         print(f"  可聚焦的 teammates:")
         for m in teammates:
-            print(f"    {_cyan(m.agent_id)} ({m.role}) — {m.status.value}")
+            _ident = resolve_identity(m.agent_id)
+            print(f"    {_ident.emoji} {_cyan(m.agent_id)} ({m.role}) — {m.status.value}")
         print(f"  使用: /team-focus <agent_id>")
         state.teammate_focus.set_agents([m.agent_id for m in teammates])
         return
@@ -1764,7 +1774,10 @@ async def _execute_with_progressive(
 
         elif event.type == StreamEventType.TOOL_CALL_START:
             tool_name = event.data.get("tool_name", "?")
-            print(f"\n  {_dim('[tool]')} {_cyan(tool_name)}", end="", flush=True)
+            # Use tool display spec for emoji and title (OC-style)
+            from agent_framework.tools.display import resolve_tool_display
+            _td = resolve_tool_display(tool_name)
+            print(f"\n  {_dim('[tool]')} {_td.emoji} {_cyan(_td.title or tool_name)}", end="", flush=True)
 
         elif event.type == StreamEventType.TOOL_CALL_DONE:
             tool_call_id = str(event.data.get("tool_call_id", ""))
@@ -1774,6 +1787,12 @@ async def _execute_with_progressive(
                 success = event.data.get("success", False)
                 marker = _green(" [ok]") if success else _red(" [fail]")
                 print(marker, flush=True)
+
+        elif event.type == StreamEventType.THINKING_DELTA:
+            print(_dim(event.data.get("text", "")), end="", flush=True)
+
+        elif event.type == StreamEventType.THINKING_END:
+            print(_dim(" [end thinking]"), flush=True)
 
         elif event.type == StreamEventType.ITERATION_START:
             idx = event.data.get("iteration_index", 0)
@@ -1992,10 +2011,12 @@ async def run_classic_repl(fw: AgentFramework, mock_model: InteractiveMockModel 
     # Terminal only displays; all business logic (notification turns) is in framework core.
     _team_display_task = None
 
+    _display_interval = fw.config.team.display_poll_interval_s if hasattr(fw, "config") else 2.0
+
     async def _display_team_output():
         """Display team results: auto-summaries from dispatcher + raw notifications as fallback."""
         while True:
-            await asyncio.sleep(2)
+            await asyncio.sleep(_display_interval)
             try:
                 # Display auto-generated summaries from background notification turns
                 summaries = fw.drain_team_summaries()
@@ -2113,9 +2134,16 @@ def format_missing_textual_message() -> str:
 
 
 def build_framework_from_args(args: argparse.Namespace) -> tuple[AgentFramework, InteractiveMockModel | None]:
-    return build_framework(
+    fw, mock = build_framework(
         config_path=args.config,
         use_mock=should_use_mock(args),
         auto_approve=args.auto_approve,
         model_override=args.model,
     )
+    # Apply CLI overrides to team config
+    if getattr(args, "no_qa_limit", False):
+        fw.config.team.max_qa_rounds = 0  # 0 = unlimited
+    team_iters = getattr(args, "team_iterations", 0)
+    if team_iters > 0:
+        fw.config.team.teammate_max_iterations = team_iters
+    return fw, mock

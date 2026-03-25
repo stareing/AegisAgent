@@ -208,6 +208,54 @@ class MemoryManagerProtocol(Protocol):
 
 
 # ---------------------------------------------------------------------------
+# Context Source Provider (CE-003)
+# ---------------------------------------------------------------------------
+@runtime_checkable
+class ContextSourceProviderProtocol(Protocol):
+    """Protocol for collecting and formatting context sources."""
+
+    def collect_system_core(
+        self, agent: Any, runtime_info: dict[str, str],
+    ) -> list[Message]: ...
+
+    def collect_saved_memory_block(
+        self, memories: list[Any],
+    ) -> list[Message]: ...
+
+    def collect_session_groups(
+        self, session_state: Any,
+    ) -> list[Any]: ...
+
+
+# ---------------------------------------------------------------------------
+# Context Builder (CE-001)
+# ---------------------------------------------------------------------------
+@runtime_checkable
+class ContextBuilderProtocol(Protocol):
+    """Protocol for assembling context within token budget."""
+
+    def calculate_tokens(self, messages: list[Message]) -> int: ...
+
+    def set_token_budget(
+        self, max_tokens: int, reserve_for_output: int,
+    ) -> None: ...
+
+
+# ---------------------------------------------------------------------------
+# Context Compressor (CE-002)
+# ---------------------------------------------------------------------------
+@runtime_checkable
+class ContextCompressorProtocol(Protocol):
+    """Protocol for compressing session history when over budget."""
+
+    async def compress_groups_async(
+        self, groups: list[Any], target_tokens: int, model_adapter: Any,
+    ) -> list[Any]: ...
+
+    def reset(self) -> None: ...
+
+
+# ---------------------------------------------------------------------------
 # Context Engineer
 # ---------------------------------------------------------------------------
 @runtime_checkable

@@ -1,20 +1,40 @@
 from __future__ import annotations
 
-from agent_framework.models.agent import CapabilityPolicy
+from agent_framework.models.agent import (
+    ApprovalMode,
+    CapabilityPolicy,
+    PLAN_MODE_ALLOWED_CATEGORIES,
+    PLAN_MODE_ALLOWED_TOOLS,
+    PLAN_MODE_BLOCKED_TOOLS,
+)
 from agent_framework.models.tool import ToolEntry
 
 
 def apply_capability_policy(
-    tools: list[ToolEntry], policy: CapabilityPolicy
+    tools: list[ToolEntry],
+    policy: CapabilityPolicy,
+    approval_mode: ApprovalMode | None = None,
 ) -> list[ToolEntry]:
     """Filter tools according to the capability policy.
 
     Priority (section 10.4):
-    1. CapabilityPolicy defines the capability ceiling
-    2. ScopedToolRegistry defines current visible set
-    3. on_tool_call_requested() is final runtime interceptor
+    1. ApprovalMode PLAN — restricts to read-only tools
+    2. CapabilityPolicy defines the capability ceiling
+    3. ScopedToolRegistry defines current visible set
+    4. on_tool_call_requested() is final runtime interceptor
     """
     result = list(tools)
+
+    # PLAN mode: restrict to read-only observation tools
+    if approval_mode == ApprovalMode.PLAN:
+        result = [
+            t for t in result
+            if (
+                t.meta.name in PLAN_MODE_ALLOWED_TOOLS
+                or t.meta.category in PLAN_MODE_ALLOWED_CATEGORIES
+            )
+            and t.meta.name not in PLAN_MODE_BLOCKED_TOOLS
+        ]
 
     # Filter by allowed categories
     if policy.allowed_tool_categories is not None:

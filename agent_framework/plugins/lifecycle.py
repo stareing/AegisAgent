@@ -125,6 +125,12 @@ class PluginLifecycleManager:
             receipt = self._registrar.apply(plugin)
 
             self._plugins.set_status(plugin_id, PluginStatus.ENABLED)
+            # Update OC-compatible PluginRecord with registration details
+            self._plugins.update_record(
+                plugin_id,
+                tool_names=receipt.tool_names,
+                hook_names=receipt.hook_ids,
+            )
             logger.info(
                 "plugin.enabled",
                 plugin_id=plugin_id,
@@ -138,10 +144,14 @@ class PluginLifecycleManager:
             partial = getattr(e, "partial_receipt", receipt)
             self._registrar.rollback(partial)
             self._plugins.set_status(plugin_id, PluginStatus.FAILED)
+            # Track error in PluginRecord for observability
+            error_msg = str(e)
+            self._plugins.update_record(plugin_id, error=error_msg)
+            self._plugins.add_diagnostic(plugin_id, "error", f"enable failed: {error_msg}")
             logger.error(
                 "plugin.enable_failed",
                 plugin_id=plugin_id,
-                error=str(e),
+                error=error_msg,
             )
             raise PluginLifecycleError(
                 f"Failed to enable plugin '{plugin_id}': {e}",

@@ -487,7 +487,7 @@ class TestArchitectureGuards:
 
     def test_all_deniable_points_are_gate_hooks(self) -> None:
         """DENY should only be available at gate hooks (pre-execution or completion gates)."""
-        _GATE_PATTERNS = ("pre", "task_completed")
+        _GATE_PATTERNS = ("pre", "task_completed", "spawning", "resolve", "input")
         for hp in DENIABLE_HOOK_POINTS:
             assert any(p in hp.value for p in _GATE_PATTERNS), (
                 f"{hp.value} is deniable but not a gate hook"

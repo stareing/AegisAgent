@@ -22,6 +22,18 @@ class ModelConfig(BaseModel):
         default_factory=list,
         description="Fallback model configs tried in order when primary fails. Each dict has same fields as ModelConfig.",
     )
+    # Circuit breaker (OC-style model failover)
+    circuit_breaker_enabled: bool = True
+    cooldown_tiers_seconds: list[int] = Field(
+        default_factory=lambda: [60, 300, 1500, 3600],
+        description="Exponential cooldown tiers in seconds per consecutive failure",
+    )
+    probe_transient_failures: bool = True
+    # Auth profile rotation (multiple API keys per provider)
+    auth_profiles: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="List of auth profiles: [{profile_id, api_key, api_base?}]",
+    )
 
 
 class ContextConfig(BaseModel):
@@ -36,8 +48,22 @@ class ContextConfig(BaseModel):
     max_context_tokens: int = 8192
     reserve_for_output: int = 1024
     compress_threshold_ratio: float = 0.85
-    default_compression_strategy: str = "LLM_SUMMARIZE"
+    default_compression_strategy: str = "SUMMARIZATION"
     spawn_seed_ratio: float = 0.3
+    # Pluggable context components (importlib dotted path, CE-009)
+    source_provider_class: str = ""
+    compressor_class: str = ""
+    builder_class: str = ""
+    # Adaptive compaction (OC-style)
+    adaptive_compaction: bool = True
+    compaction_base_ratio: float = 0.4
+    compaction_safety_margin: float = 1.2
+    identifier_preservation: bool = True
+    # Provider context window override (0 = auto-detect from adapter)
+    provider_context_window_override: int = 0
+    # Bootstrap budget limits
+    bootstrap_max_chars_per_file: int = 50_000
+    bootstrap_max_total_chars: int = 200_000
 
 
 class MemoryConfig(BaseModel):
@@ -77,6 +103,22 @@ class ToolConfig(BaseModel):
     max_concurrent_tool_calls: int = 5
     allow_parallel_tool_calls: bool = True
     shell_enabled: bool = False  # High-risk: must be explicitly enabled
+    # Approval mode (Gemini-inspired): "DEFAULT" | "AUTO_EDIT" | "PLAN"
+    approval_mode: str = "DEFAULT"
+    # Sandbox config (OC-style container isolation)
+    sandbox_enabled: bool = False
+    sandbox_runtime: str = "docker"  # "docker" | "podman" | "none"
+    sandbox_image: str = "python:3.11-slim"
+    sandbox_memory_limit: str = "512m"
+    sandbox_pids_limit: int = 256
+    sandbox_network: str = "none"
+    sandbox_workspace_mount: str = "rw"  # "rw" | "ro" | "none"
+    # Multi-level sandbox auto-selection (risk-based)
+    sandbox_auto_select: bool = False  # Enable automatic risk-based sandbox selection
+    sandbox_min_risk_for_container: str = "MEDIUM"  # Minimum risk level for container sandbox
+    # Tool loop detection thresholds
+    loop_detection_threshold: int = 3
+    loop_detection_history_size: int = 30
 
 
 class TodoConfig(BaseModel):
@@ -144,6 +186,8 @@ class SubAgentConfig(BaseModel):
     execution_mode: str = "progressive"  # "parallel" | "progressive"
     default_collection_strategy: str = "HYBRID"  # "SEQUENTIAL" | "BATCH_ALL" | "HYBRID"
     collection_poll_interval_ms: int = 500
+    # Poll backoff
+    collection_poll_max_interval_ms: int = 10000
     live_agent_ttl_seconds: int = 300  # LONG_LIVED agent IDLE timeout before auto-cleanup
     max_live_agents_per_run: int = 3   # Max LONG_LIVED agents alive simultaneously
     # Dynamic pool auto-scaling (replaces fixed semaphore when enabled)
@@ -188,26 +232,98 @@ class TeammateConfig(BaseModel):
 
 
 class TeamConfig(BaseModel):
-    """Configuration for Agent Team collaboration."""
+    """Configuration for Agent Team collaboration.
+
+    All team runtime parameters are centralized here. No hardcoded
+    magic numbers in coordinator/terminal — everything reads from config.
+    """
     enabled: bool = False
     name: str = ""
-    claim_policy: str = "SELF_CLAIM_WITH_APPROVAL"
-    max_teammates: int = 5
-    shutdown_timeout_ms: int = 30000
-    plan_approval_required_risk_levels: list[str] = Field(default_factory=lambda: ["medium", "high"])
-    bus_backend: str = "memory"
-    bus_db_path: str = "data/agent_bus.db"
-    teammates: list[TeammateConfig] = Field(default_factory=list)
-    # Notification policy for auto-escalation to main model
+
+    # ── Teammate execution ──────────────────────────────────
+    teammate_max_iterations: int = 20   # Max iterations per sub-agent run
+    max_qa_rounds: int = 10             # Max Q&A cycles per task (0 = unlimited)
+    poll_interval_ms: int = 500         # Polling interval for result/answer/approval checks
+    continuation_context_size: int = 6  # How many recent history entries to pass in continuation
+
+    # ── Notification & display ──────────────────────────────
     team_auto_notify_enabled: bool = True
     team_auto_notify_batch_window_ms: int = 500
     team_auto_notify_max_batch_size: int = 10
+    display_poll_interval_s: float = 2.0  # Terminal background display loop interval
+    recent_completions_max: int = 20      # Max entries in recent completion history
+
+    # ── Display truncation (does NOT limit model inference) ──
+    display_summary_max_chars: int = 2000  # Max chars stored/shown for result summaries
+    display_task_preview_chars: int = 200  # Max chars for task descriptions in logs/status
+
+    # ── Bus backend ─────────────────────────────────────────
+    bus_backend: str = "memory"
+    bus_db_path: str = "data/agent_bus.db"
+
+    # ── Teammate definitions ────────────────────────────────
+    teammates: list[TeammateConfig] = Field(default_factory=list)
+
+
+class PolicyConfig(BaseModel):
+    """Declarative policy engine configuration.
+
+    Supports TOML file-based rules or inline rule definitions.
+    Rules control tool approval (ALLOW/DENY/ASK) with wildcards.
+    """
+
+    enabled: bool = False
+    policy_file: str = ""  # Path to TOML policy file
+    rules: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Inline policy rules (same schema as TOML [[rules]])",
+    )
+    enable_approval_memory: bool = True
+
+
+class PluginConfig(BaseModel):
+    """Plugin system configuration (OC-compatible)."""
+
+    plugin_dirs: list[str] = Field(
+        default_factory=list,
+        description="Directories to scan for plugins (supports plugin.json and __init__.py)",
+    )
+    enabled_plugins: list[str] = Field(
+        default_factory=list,
+        description="Plugin IDs to enable (overrides enabled_by_default=false)",
+    )
+    disabled_plugins: list[str] = Field(
+        default_factory=list,
+        description="Plugin IDs to disable (overrides enabled_by_default=true)",
+    )
+    plugin_configs: dict[str, dict] = Field(
+        default_factory=dict,
+        description="Per-plugin configuration: plugin_id -> config dict",
+    )
+    auto_discover: bool = True
+
+
+class OutputConfig(BaseModel):
+    """Output format configuration (Gemini-inspired).
+
+    Supports multiple output modes for different integration scenarios:
+    - text: Human-readable terminal output (default)
+    - json: Final result as JSON
+    - stream_json: JSONL streaming (each StreamEvent as one JSON line)
+    """
+
+    format: str = "text"  # "text" | "json" | "stream_json"
+    jsonl_output_file: str = ""  # Optional file path for JSONL output (empty = stdout)
+    include_thinking: bool = False  # Include thinking events in JSONL output
+    include_token_events: bool = True  # Include token events in JSONL output
 
 
 class LoggingConfig(BaseModel):
     log_dir: str = "logs"
     json_output: bool = True
     level: str = "INFO"
+    redaction_enabled: bool = True
+    extra_sensitive_patterns: list[str] = Field(default_factory=list)
 
 
 class TracingConfig(BaseModel):
@@ -217,6 +333,13 @@ class TracingConfig(BaseModel):
     exporter_type: str = "otlp"  # "otlp" | "console"
     otlp_endpoint: str = "http://localhost:4317"
     service_name: str = "aegis-agent"
+
+
+class AgentIdentityConfig(BaseModel):
+    """Agent identity configuration."""
+    name: str = ""
+    emoji: str = ""
+    avatar_path: str = ""
 
 
 class FrameworkConfig(BaseSettings):
@@ -258,8 +381,12 @@ class FrameworkConfig(BaseSettings):
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     a2a: A2AConfig = Field(default_factory=A2AConfig)
     team: TeamConfig = Field(default_factory=lambda: TeamConfig())
+    policy: PolicyConfig = Field(default_factory=PolicyConfig)
+    plugins: PluginConfig = Field(default_factory=PluginConfig)
+    output: OutputConfig = Field(default_factory=OutputConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     tracing: TracingConfig = Field(default_factory=TracingConfig)
+    identity: AgentIdentityConfig = Field(default_factory=AgentIdentityConfig)
 
     model_config = {"env_prefix": "AGENT_", "env_nested_delimiter": "__"}
 

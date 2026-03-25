@@ -12,8 +12,9 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
-from agent_framework.models.agent import (CapabilityPolicy, ContextPolicy,
-                                          EffectiveRunConfig, MemoryPolicy)
+from agent_framework.models.agent import (ApprovalMode, CapabilityPolicy,
+                                          ContextPolicy, EffectiveRunConfig,
+                                          MemoryPolicy)
 
 if TYPE_CHECKING:
     from agent_framework.agent.base_agent import BaseAgent
@@ -71,6 +72,18 @@ class RunPolicyResolver:
             if active_skill.temperature_override is not None:
                 temperature = active_skill.temperature_override
 
+        # Resolve approval mode from agent config (string → enum)
+        raw_approval = getattr(cfg, "approval_mode", "DEFAULT")
+        if isinstance(raw_approval, str):
+            try:
+                approval_mode = ApprovalMode(raw_approval.upper())
+            except ValueError:
+                approval_mode = ApprovalMode.DEFAULT
+        elif isinstance(raw_approval, ApprovalMode):
+            approval_mode = raw_approval
+        else:
+            approval_mode = ApprovalMode.DEFAULT
+
         return EffectiveRunConfig(
             model_name=model_name,
             temperature=temperature,
@@ -79,6 +92,7 @@ class RunPolicyResolver:
             max_concurrent_tool_calls=cfg.max_concurrent_tool_calls,
             allow_parallel_tool_calls=cfg.allow_parallel_tool_calls,
             progressive_tool_results=getattr(cfg, "progressive_tool_results", False),
+            approval_mode=approval_mode,
         )
 
     @staticmethod

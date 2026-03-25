@@ -16,7 +16,7 @@ from agent_framework.hooks.payloads import (artifact_produced_payload,
                                             tool_pre_use_payload)
 from agent_framework.infra.logger import get_logger
 from agent_framework.infra.telemetry import get_tracing_manager
-from agent_framework.models.agent import CapabilityPolicy
+from agent_framework.models.agent import ApprovalMode, CapabilityPolicy
 from agent_framework.models.hook import HookPoint
 from agent_framework.models.message import Message, ToolCallRequest
 from agent_framework.models.tool import (FieldError, ToolEntry,
@@ -94,6 +94,10 @@ class ToolExecutor:
         self._hook_dispatcher: HookDispatchService | None = (
             HookDispatchService(hook_executor) if hook_executor is not None else None
         )
+        # Approval mode — set by RunCoordinator each run
+        self._approval_mode: ApprovalMode = ApprovalMode.DEFAULT
+        # Container sandbox (lazy-init from config when first needed)
+        self._sandbox: Any = None
         # Set by RunCoordinator at run start — used for parent_run_id in spawn
         self._current_run_id: str = ""
         # Set by RunCoordinator each iteration — used for child context seed.
@@ -212,6 +216,32 @@ class ToolExecutor:
         # Capability policy enforcement
         if policy is not None and not self.is_tool_allowed(tool_name, policy):
             return self._permission_denied(tool_call_request, start)
+
+        # Declarative policy engine check (TOML-based rules)
+        policy_engine = getattr(self, "_policy_engine", None)
+        if policy_engine is not None:
+            from agent_framework.agent.policy_engine import PolicyApproval
+            decision = policy_engine.evaluate(
+                tool_name,
+                tool_call_request.arguments,
+                current_mode=self._approval_mode.value if self._approval_mode else None,
+            )
+            if decision.approval == PolicyApproval.DENY:
+                logger.info("tool.policy_denied", tool_name=tool_name, reason=decision.reason)
+                return self._permission_denied(tool_call_request, start)
+            if decision.approval == PolicyApproval.ASK and self._confirmation:
+                approved = await self._confirmation.request_confirmation(
+                    tool_name, tool_call_request.arguments,
+                    f"Policy requires approval: {decision.reason}",
+                )
+                if not approved:
+                    policy_engine.record_decision(
+                        tool_name, tool_call_request.arguments, PolicyApproval.DENY,
+                    )
+                    return self._permission_denied(tool_call_request, start)
+                policy_engine.record_decision(
+                    tool_name, tool_call_request.arguments, PolicyApproval.ALLOW,
+                )
 
         # Confirmation — decision is policy + tool metadata, handler only executes flow
         if self._should_confirm(entry) and self._confirmation:
@@ -516,6 +546,21 @@ class ToolExecutor:
 
         if entry.callable_ref is None:
             raise RuntimeError(f"No callable for tool {entry.meta.name}")
+
+        # Sandbox path validation for file-system tools
+        if entry.meta.category in ("filesystem", "shell") and self._sandbox is not None:
+            from agent_framework.tools.sandbox.path_security import (
+                SandboxPathError,
+                validate_sandbox_path,
+            )
+            for key in ("path", "file_path", "directory"):
+                path_arg = args.get(key)
+                if path_arg and isinstance(path_arg, str):
+                    try:
+                        validate_sandbox_path(path_arg, self._sandbox)
+                    except SandboxPathError:
+                        return f"Path '{path_arg}' is outside the sandbox boundary."
+
         if entry.meta.is_async:
             return await entry.callable_ref(**args)
         return await asyncio.to_thread(entry.callable_ref, **args)
@@ -735,6 +780,7 @@ class ToolExecutor:
         """Determine if tool execution requires user confirmation.
 
         Decision hierarchy:
+        0. AUTO_EDIT mode → never confirm (autonomous execution)
         1. CapabilityPolicy.force_confirm_categories → always confirm tools in these categories
         2. ToolMeta.require_confirm=True → tool-level declaration
         3. Default: no confirmation required
@@ -742,6 +788,10 @@ class ToolExecutor:
         The ConfirmationHandler only executes the confirmation flow.
         The decision of WHETHER to confirm lives here.
         """
+        # AUTO_EDIT mode bypasses all confirmation
+        if self._approval_mode == ApprovalMode.AUTO_EDIT:
+            return False
+
         # Tool-level declaration
         if entry.meta.require_confirm:
             return True

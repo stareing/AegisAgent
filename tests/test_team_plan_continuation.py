@@ -210,19 +210,12 @@ class TestWaitForApproval:
     async def test_returns_approval_when_available(self, team_setup):
         coordinator, _, _ = team_setup
 
-        # Pre-deliver approval
+        # Pre-deliver approval before calling wait (no timeout — would block forever)
         coordinator._pending_approvals["sub_coder"] = {"approved": True, "feedback": "OK"}
 
-        result = await coordinator._wait_for_approval("sub_coder", timeout_seconds=1)
+        result = await coordinator._wait_for_approval("sub_coder")
         assert result is not None
         assert result["approved"] is True
-
-    @pytest.mark.asyncio
-    async def test_returns_none_on_timeout(self, team_setup):
-        coordinator, _, _ = team_setup
-
-        result = await coordinator._wait_for_approval("sub_coder", timeout_seconds=0.5)
-        assert result is None
 
 
 class TestPolicyFromConfig:

@@ -1,6 +1,10 @@
 """Local debug entrypoint.
 
 Use ``python -m agent_framework.main`` during local development.
+python -m agent_framework.main --no-qa-limit          # Q&A 无限轮次
+python -m agent_framework.main --team-iterations 50    # teammate 每次 50 轮迭代
+python -m agent_framework.main --config config/doubao.local.json
+
 Production CLI usage should go through ``agent_framework.cli`` / ``agent-cli``.
 """
 

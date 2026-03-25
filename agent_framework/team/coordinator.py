@@ -77,13 +77,26 @@ class TeamCoordinator:
         # Session manager for long-lived teammate sessions (AT-008)
         from agent_framework.team.session_manager import TeamSessionManager
         self._session_manager = TeamSessionManager(self._team_id)
-        # Recent completion log — so status can show what finished even after IDLE
-        self._recent_completions: list[dict] = []
-        _MAX_RECENT = 20
+        # Recent completion log — deque avoids unbounded growth
+        from collections import deque
+        self._recent_completions: deque[dict] = deque(maxlen=20)
+        # Async lock protecting shared mutable dicts from concurrent access
+        import asyncio
+        self._state_lock = asyncio.Lock()
 
     @property
     def team_id(self) -> str:
         return self._team_id
+
+    def _safe_update_status(self, agent_id: str, new_status: Any) -> bool:
+        """Update member status with error logging instead of silent pass."""
+        try:
+            self._registry.update_status(agent_id, new_status)
+            return True
+        except Exception as exc:
+            logger.warning("team.status_update_failed",
+                           agent_id=agent_id, target=str(new_status), error=str(exc))
+            return False
 
     def register_role_definition(self, role_name: str, frontmatter: dict) -> None:
         """Register a TEAM.md role definition for tool whitelist enforcement."""
@@ -149,7 +162,7 @@ class TeamCoordinator:
                 task_input=task_input,
                 mode=SpawnMode.EPHEMERAL,
                 skill_id=skill_id,
-                max_iterations=20,
+                max_iterations=getattr(self, "_teammate_max_iterations", 20),
                 deadline_ms=0,  # No timeout for team tasks
             )
             # Spawn async — returns immediately, runs in background
@@ -219,16 +232,19 @@ class TeamCoordinator:
 
         current_spawn_id = spawn_id
         conversation_history: list[str] = [f"[Original Task] {task}"]
-        max_rounds = 10  # Max Q&A rounds before forcing completion
+        # Q&A round limit from config (0 = unlimited)
+        max_rounds = getattr(self, "_max_qa_rounds", 10)
 
         # Track run_id in session (AT-008)
         self._session_manager.update_session(agent_id, run_id=spawn_id)
 
-        for round_num in range(max_rounds):
+        round_num = 0
+        while max_rounds == 0 or round_num < max_rounds:
+            round_num += 1
             # Poll until current run completes
-            result = await self._poll_for_result(current_spawn_id, timeout_polls=600)
+            result = await self._poll_for_result(current_spawn_id)
 
-            if result is None:
+            if result is None:  # Should not happen (no timeout), but guard
                 # Timeout
                 logger.warning("team.teammate_timeout", agent_id=agent_id,
                                spawn_id=current_spawn_id, round=round_num)
@@ -245,7 +261,7 @@ class TeamCoordinator:
                 return
 
             summary = result.final_answer or result.error or ""
-            conversation_history.append(f"[Round {round_num + 1} output] {summary[:2000]}")
+            conversation_history.append(f"[Round {round_num + 1} output] {summary[:getattr(self, "_summary_max_chars", 2000)]}")
 
             # Check if this run asked a question or submitted a plan
             pending_question = self._check_pending_question(agent_id)
@@ -277,7 +293,7 @@ class TeamCoordinator:
                         pass
 
                 # Wait for answer (delivered via answer_question → _pending_answers)
-                answer = await self._wait_for_answer(agent_id, timeout_seconds=300)
+                answer = await self._wait_for_answer(agent_id)
 
                 if answer is not None:
                     conversation_history.append(f"[Answer to your question] {answer}")
@@ -327,7 +343,7 @@ class TeamCoordinator:
                         pass
 
                 # Wait for approval (delivered via approve/reject_plan → _pending_approvals)
-                approval = await self._wait_for_approval(agent_id, timeout_seconds=300)
+                approval = await self._wait_for_approval(agent_id)
 
                 if approval is not None:
                     approved = approval.get("approved", False)
@@ -373,16 +389,15 @@ class TeamCoordinator:
         except Exception:
             pass
 
-    async def _poll_for_result(self, spawn_id: str, timeout_polls: int = 600):
-        """Poll SubAgentRuntime until result is available or timeout."""
+    async def _poll_for_result(self, spawn_id: str):
+        """Poll SubAgentRuntime until result is available. No timeout — waits for real completion."""
         import asyncio
 
-        for _ in range(timeout_polls):
+        while True:
             result = await self._runtime.collect_result(spawn_id, wait=False)
             if result is not None:
                 return result
-            await asyncio.sleep(0.5)
-        return None
+            await asyncio.sleep(getattr(self, "_poll_interval_s", 0.5))
 
     def _check_pending_question(self, agent_id: str) -> dict | None:
         """Check if this agent has a pending QUESTION in the lead's inbox.
@@ -451,33 +466,29 @@ class TeamCoordinator:
 
         return None
 
-    async def _wait_for_approval(self, agent_id: str, timeout_seconds: int = 300) -> dict | None:
+    async def _wait_for_approval(self, agent_id: str) -> dict | None:
         """Wait for approval to be delivered via approve_plan/reject_plan.
 
-        approve_plan()/reject_plan() put the result into _pending_approvals[agent_id].
+        No timeout — waits until lead approves/rejects.
         """
         import asyncio
-        polls = int(timeout_seconds / 0.5)
-        for _ in range(polls):
+        while True:
             approval = self._pending_approvals.pop(agent_id, None)
             if approval is not None:
                 return approval
-            await asyncio.sleep(0.5)
-        return None
+            await asyncio.sleep(getattr(self, "_poll_interval_s", 0.5))
 
-    async def _wait_for_answer(self, agent_id: str, timeout_seconds: int = 300) -> str | None:
+    async def _wait_for_answer(self, agent_id: str) -> str | None:
         """Wait for an answer to be delivered to this teammate via answer_question().
 
-        answer_question() puts the answer text into _pending_answers[agent_id].
+        No timeout — waits until lead answers.
         """
         import asyncio
-        polls = int(timeout_seconds / 0.5)
-        for _ in range(polls):
+        while True:
             answer = self._pending_answers.pop(agent_id, None)
             if answer is not None:
                 return answer
-            await asyncio.sleep(0.5)
-        return None
+            await asyncio.sleep(getattr(self, "_poll_interval_s", 0.5))
 
     async def _spawn_continuation(
         self, agent_id: str, role: str, task: str,
@@ -511,7 +522,8 @@ class TeamCoordinator:
         if body:
             continuation_task += f"[ROLE INSTRUCTIONS]\n{body}\n\n"
         continuation_task += "[CONVERSATION HISTORY]\n"
-        continuation_task += "\n".join(conversation_history[-6:])  # Last 6 entries
+        ctx_size = getattr(self, "_continuation_context_size", 6)
+        continuation_task += "\n".join(conversation_history[-ctx_size:])
         continuation_task += (
             f"\n\n[CONTINUE] The lead answered your question: \"{answer}\"\n"
             f"Please continue working on the original task using this information. "
@@ -581,14 +593,14 @@ class TeamCoordinator:
             spawn_id=spawn_id,
             task_input=task_prompt,
             mode=SpawnMode.EPHEMERAL,
-            max_iterations=10,
-            deadline_ms=60_000,
+            max_iterations=20,
+            deadline_ms=0,  # No timeout — wait for real completion
         )
 
         try:
             actual_sid = await self._runtime.spawn_async(spec, None)
             self._session_manager.update_session(member.agent_id, run_id=actual_sid)
-            result = await self._poll_for_result(actual_sid, timeout_polls=120)
+            result = await self._poll_for_result(actual_sid)
             if result and result.final_answer:
                 return {
                     "ok": True,
@@ -622,9 +634,9 @@ class TeamCoordinator:
             event_type=MailEventType.PROGRESS_NOTICE,
             payload={
                 "status": status,
-                "summary": summary[:2000],
+                "summary": summary[:getattr(self, "_summary_max_chars", 2000)],
                 "role": role,
-                "task": task[:200],
+                "task": task[:getattr(self, "_task_preview_chars", 200)],
                 "spawn_id": spawn_id,
                 "iterations_used": result.iterations_used,
             },
@@ -647,20 +659,18 @@ class TeamCoordinator:
             "role": role,
             "agent_id": agent_id,
             "status": status,
-            "task": task[:100],
+            "task": task[:getattr(self, "_task_preview_chars", 200)],
             "summary": summary[:200],
             "timestamp": time.time(),
         })
-        # Keep only last N
-        if len(self._recent_completions) > 20:
-            self._recent_completions = self._recent_completions[-20:]
+        # deque(maxlen=20) auto-evicts oldest — no manual cap needed
 
         # Trigger framework-level notification callback
         if self._on_result_callback is not None:
             try:
                 await self._on_result_callback(
-                    role=role, status=status, summary=summary[:2000],
-                    agent_id=agent_id, task=task[:200], spawn_id=spawn_id,
+                    role=role, status=status, summary=summary[:getattr(self, "_summary_max_chars", 2000)],
+                    agent_id=agent_id, task=task[:getattr(self, "_task_preview_chars", 200)], spawn_id=spawn_id,
                 )
             except Exception as cb_err:
                 logger.warning("team.result_callback_failed", error=str(cb_err))
@@ -873,7 +883,7 @@ class TeamCoordinator:
             return {
                 "assigned": False,
                 "agent_id": agent_id,
-                "task": task_description[:100],
+                "task": task_description[:getattr(self, "_task_preview_chars", 200)],
                 "error": error,
             }
 
@@ -906,7 +916,7 @@ class TeamCoordinator:
             "assigned": True,
             "agent_id": member.agent_id,
             "role": role,
-            "task": task_description[:100],
+            "task": task_description[:getattr(self, "_task_preview_chars", 200)],
             "executing": self._runtime is not None,
             "note": "Task running in background. Results will be delivered automatically via notification.",
         }
@@ -967,7 +977,7 @@ class TeamCoordinator:
                 task_input=team_task,
                 mode=SpawnMode.EPHEMERAL,
                 tool_name_whitelist=role_def.get("allowed-tools"),
-                max_iterations=20,
+                max_iterations=getattr(self, "_teammate_max_iterations", 20),
                 deadline_ms=0,  # No timeout for team tasks
             )
             try:
@@ -1017,7 +1027,7 @@ class TeamCoordinator:
 
             logger.info("team.assign.spawned", role=role,
                          spawn_id=spawn_id, actual_sid=actual_sid,
-                         task=task_description[:80])
+                         task=task_description[:getattr(self, "_task_preview_chars", 200)])
 
         # NOTE: TASK_ASSIGNMENT MailEvent is already sent by the sync wrapper
         # assign_task() — do not send a second one here.
@@ -1026,7 +1036,7 @@ class TeamCoordinator:
             "assigned": True,
             "agent_id": member.agent_id if member else agent_id,
             "role": role,
-            "task": task_description[:100],
+            "task": task_description[:getattr(self, "_task_preview_chars", 200)],
             "executing": self._runtime is not None,
         }
 
@@ -1373,10 +1383,10 @@ class TeamCoordinator:
         """
         members = self._registry.list_members()
         member_list = []
+        all_members = []
+        active_roles: set[str] = set()
         for m in members:
             is_self = m.agent_id == caller_id
-            if is_self and not show_self:
-                continue
             entry = {
                 "agent_id": m.agent_id,
                 "role": m.role,
@@ -1384,22 +1394,14 @@ class TeamCoordinator:
             }
             if is_self:
                 entry["is_you"] = True
-            member_list.append(entry)
-        # Full list with is_you marker (always includes self)
-        all_members = []
-        for m in members:
-            entry = {
-                "agent_id": m.agent_id,
-                "role": m.role,
-                "status": m.status.value,
-            }
-            if m.agent_id == caller_id:
-                entry["is_you"] = True
             all_members.append(entry)
+            if not (is_self and not show_self):
+                member_list.append(entry)
+            if m.role != "lead":
+                active_roles.add(m.role)
 
-        # Available roles from TEAM.md definitions (can be spawned)
+        # Available roles from TEAM.md definitions
         available_roles = []
-        active_roles = {m.role for m in members if m.role != "lead"}
         for role_name, role_def in self._role_definitions.items():
             available_roles.append({
                 "role": role_name,
@@ -1430,5 +1432,5 @@ class TeamCoordinator:
             "pending_shutdowns": len(self._shutdowns.list_pending()),
             "task_board": self._task_board.task_count() if self._task_board else {},
             "active_sessions": len(self._session_manager.list_sessions()),
-            "recent_completions": self._recent_completions[-5:],
+            "recent_completions": list(self._recent_completions)[-5:],
         }

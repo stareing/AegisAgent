@@ -1,8 +1,16 @@
-"""PluginLoader — discovers and loads plugins from directories or entries."""
+"""PluginLoader — discovers and loads plugins from directories or entries.
+
+Supports three discovery methods:
+1. Module-based: import a module that exposes a PluginProtocol
+2. Directory-based: scan directories for plugin packages with __init__.py
+3. Manifest-based: scan directories for plugin.json files (OC-compatible)
+"""
 
 from __future__ import annotations
 
 import importlib
+import json
+from functools import lru_cache
 from pathlib import Path
 
 from agent_framework.infra.logger import get_logger
@@ -13,13 +21,44 @@ from agent_framework.plugins.registry import PluginRegistry
 
 logger = get_logger(__name__)
 
+# OC-compatible manifest file names (checked in priority order)
+MANIFEST_FILE_NAMES: tuple[str, ...] = ("plugin.json", "plugin.toml")
+
+# LRU cache size for manifest loading
+_MANIFEST_CACHE_SIZE = 128
+
+
+@lru_cache(maxsize=_MANIFEST_CACHE_SIZE)
+def _load_manifest_from_json(manifest_path: str) -> PluginManifest:
+    """Parse a plugin.json file into a PluginManifest (cached)."""
+    path = Path(manifest_path)
+    with open(path) as f:
+        data = json.load(f)
+
+    # OC-compatibility: map OC field names to framework field names
+    if "id" in data and "plugin_id" not in data:
+        data["plugin_id"] = data.pop("id")
+    if "configSchema" in data and "config_schema" not in data:
+        data["config_schema"] = data.pop("configSchema")
+    if "enabledByDefault" in data and "enabled_by_default" not in data:
+        data["enabled_by_default"] = data.pop("enabledByDefault")
+    if "uiHints" in data and "ui_hints" not in data:
+        data["ui_hints"] = data.pop("uiHints")
+    if "minHostVersion" in data and "min_host_version" not in data:
+        data["min_host_version"] = data.pop("minHostVersion")
+
+    # Provide defaults for required fields missing in OC manifests
+    data.setdefault("name", data.get("plugin_id", "unknown"))
+    data.setdefault("version", "0.0.0")
+
+    return PluginManifest(**data)
+
 
 class PluginLoader:
     """Discovers and loads plugins into the registry.
 
-    Supports two discovery methods:
-    1. Module-based: import a module that exposes a PluginProtocol
-    2. Directory-based: scan directories for plugin packages (future)
+    Supports module-based, directory-based, and manifest-based discovery.
+    Failed discoveries log warnings but never crash the loader.
     """
 
     def __init__(self, registry: PluginRegistry) -> None:
@@ -72,10 +111,28 @@ class PluginLoader:
         logger.info("plugin.loaded", plugin_id=plugin.manifest.plugin_id)
         return plugin.manifest
 
-    def discover_directory(self, plugin_dir: str) -> list[PluginManifest]:
-        """Scan a directory for plugin packages (each with plugin.toml or __init__.py).
+    def load_from_manifest(self, manifest_path: str | Path) -> PluginManifest:
+        """Load plugin metadata from a plugin.json manifest file (OC-compatible).
 
-        Returns manifests of discovered plugins. Does NOT load them.
+        This loads ONLY the manifest. The plugin module is loaded separately
+        when the entry_module field is set and the plugin is enabled.
+        """
+        manifest = _load_manifest_from_json(str(manifest_path))
+        logger.info(
+            "plugin.manifest_discovered",
+            plugin_id=manifest.plugin_id,
+            path=str(manifest_path),
+        )
+        return manifest
+
+    def discover_directory(self, plugin_dir: str) -> list[PluginManifest]:
+        """Scan a directory for plugin packages.
+
+        Checks each subdirectory for:
+        1. plugin.json (OC-compatible manifest — preferred)
+        2. __init__.py (Python module-based plugin)
+
+        Returns manifests of discovered plugins.
         """
         discovered: list[PluginManifest] = []
         path = Path(plugin_dir)
@@ -86,10 +143,31 @@ class PluginLoader:
         for child in sorted(path.iterdir()):
             if not child.is_dir():
                 continue
+
+            # Try manifest-based discovery first (OC-compatible)
+            manifest_found = False
+            for manifest_name in MANIFEST_FILE_NAMES:
+                manifest_file = child / manifest_name
+                if manifest_file.exists() and manifest_name.endswith(".json"):
+                    try:
+                        manifest = self.load_from_manifest(manifest_file)
+                        discovered.append(manifest)
+                        manifest_found = True
+                        break
+                    except Exception as e:
+                        logger.warning(
+                            "plugin.manifest_parse_failed",
+                            path=str(manifest_file),
+                            error=str(e),
+                        )
+
+            if manifest_found:
+                continue
+
+            # Fallback: Python module-based discovery
             init_file = child / "__init__.py"
             if not init_file.exists():
                 continue
-            # Try to discover manifest from the package
             module_name = child.name
             try:
                 manifest = self.load_from_module(f"{plugin_dir}.{module_name}")
@@ -102,3 +180,8 @@ class PluginLoader:
                 )
 
         return discovered
+
+    @staticmethod
+    def clear_manifest_cache() -> None:
+        """Clear the LRU cache for manifest loading (useful in tests)."""
+        _load_manifest_from_json.cache_clear()
