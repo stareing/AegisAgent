@@ -177,31 +177,54 @@ class ContextEngineer:
             )
 
         # ══════════════════════════════════════════════════════════
-        # IMMUTABLE SYSTEM PROMPT GUARANTEE
+        # KV CACHE-OPTIMAL MESSAGE ORDERING
         #
-        # messages[0] (system message) is the frozen prefix — it MUST
-        # NOT be mutated after construction. It only changes when:
-        #   - tools/MCP/skills change → system_core hash changes → new prefix
-        #   - skill activated/deactivated → skill_addon changes → new prefix
+        # LLM KV cache is prefix-matched: if the first K tokens are
+        # identical to the previous call, those K tokens are reused.
+        # Any change at position P invalidates ALL cache from P onward.
         #
-        # Everything else (dynamic state, session context, memories,
-        # hooks) goes into a SEPARATE context injection message to
-        # preserve the prefix identity for provider-side KV cache reuse.
+        # Optimal ordering for maximum cache reuse:
+        #
+        #   messages[0]     = system (frozen prefix)     — IMMUTABLE
+        #   messages[1..N]  = session history             — STABLE (old turns never change)
+        #   messages[N+1]   = context injection           — CHANGES per iteration
+        #
+        # Between iteration i and i+1, only NEW messages are appended
+        # to session history. The frozen prefix + all prior history
+        # tokens form an identical prefix → KV cache fully reused.
+        #
+        # The injection message (dynamic state, memories, hooks) goes
+        # LAST so its per-iteration changes never invalidate prior cache.
+        #
+        # Frozen prefix rotation triggers (exhaustive):
+        #   ✓ tools/MCP added/removed     → system_core hash changes
+        #   ✓ skill activated/deactivated  → skill_addon hash changes
+        #   ✓ approval_mode changed        → system_core hash changes
+        #   ✗ iteration progress           — does NOT rotate
+        #   ✗ memory changes               — does NOT rotate
+        #   ✗ todo state                   — does NOT rotate
         # ══════════════════════════════════════════════════════════
-        messages = list(prefix.messages)  # frozen prefix first — IMMUTABLE
 
-        # Build context injection block (variable per-iteration content)
-        # This is a separate system message that carries all non-frozen data.
+        # 1. Frozen prefix — IMMUTABLE, only rotates on hash change
+        messages = list(prefix.messages)
+
+        # 2. Session history — STABLE (prior turns are append-only, never mutated)
+        for group in session_groups:
+            messages.extend(group.messages)
+
+        # 3. Context injection — LAST position, changes per iteration
+        #    Placed after session history so it never invalidates KV cache
+        #    for the prefix + prior turns.
         injection_parts: list[str] = []
-
-        if dynamic_state:
-            injection_parts.append(dynamic_state)
 
         if session_context:
             injection_parts.append(session_context)
 
         if memory_block:
             injection_parts.append(memory_block)
+
+        if dynamic_state:
+            injection_parts.append(dynamic_state)
 
         if _hook_extra_instructions:
             injection_parts.append(
@@ -210,18 +233,18 @@ class ContextEngineer:
 
         if injection_parts:
             messages.append(Message(
-                role="system",
-                content="\n\n".join(injection_parts),
+                role="user",
+                content="<context-update>\n"
+                + "\n\n".join(injection_parts)
+                + "\n</context-update>",
             ))
-
-        # Append session history (includes user task as first message)
-        for group in session_groups:
-            messages.extend(group.messages)
 
         total_tokens = self._builder.calculate_tokens(messages)
 
-        actual_session_msgs = [m for m in messages if m.role not in ("system",)]
-        groups_trimmed = max(0, original_session_msgs_count - len(actual_session_msgs))
+        # Count session messages (excluding frozen prefix and trailing injection)
+        injection_count = 1 if injection_parts else 0
+        actual_session_msgs_count = len(messages) - len(prefix.messages) - injection_count
+        groups_trimmed = max(0, original_session_msgs_count - actual_session_msgs_count)
 
         self._last_stats = ContextStats(
             system_tokens=system_tokens,
