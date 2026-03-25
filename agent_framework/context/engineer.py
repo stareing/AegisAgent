@@ -126,12 +126,6 @@ class ContextEngineer:
                           and not self._prefix_mgr.should_rotate(system_core, skill_addon)))
         system_tokens = prefix.token_estimate
 
-        # --- Dynamic state (per-iteration, outside frozen prefix) ---
-        # current_iteration, spawned_subagents, todo_summary change each
-        # iteration. These are NOT part of system_core so the prefix hash
-        # stays stable and the cache is actually reused.
-        dynamic_state = self._source.collect_dynamic_state(runtime_info)
-
         # --- Session context (Gemini-style environment awareness) ---
         # Appended to system message so LLM knows date, platform, git branch.
         # Only injected on first iteration to avoid token waste.
@@ -222,9 +216,6 @@ class ContextEngineer:
 
         if memory_block:
             injection_parts.append(memory_block)
-
-        if dynamic_state:
-            injection_parts.append(dynamic_state)
 
         if _hook_extra_instructions:
             injection_parts.append(

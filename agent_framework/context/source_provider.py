@@ -34,9 +34,8 @@ class ContextSourceProvider:
     - Missing metadata → degrade to "not safely trimmable", NOT rebuild.
     """
 
-    # Keys whose values change every iteration — excluded from frozen prefix
-    # to enable hash-based cache reuse across iterations.
-    _DYNAMIC_RUNTIME_KEYS: frozenset[str] = frozenset({
+    # Keys excluded from system_core (per-iteration volatile, not injected)
+    _EXCLUDED_RUNTIME_KEYS: frozenset[str] = frozenset({
         "current_iteration",
         "spawned_subagents",
         "todo_summary",
@@ -113,7 +112,7 @@ class ContextSourceProvider:
             # Other keys that are not dynamic/env/cap/meta/todo
             all_known = (
                 self._ENV_KEYS | self._STATIC_CAP_KEYS
-                | self._DYNAMIC_RUNTIME_KEYS | self._META_KEYS
+                | self._EXCLUDED_RUNTIME_KEYS | self._META_KEYS
             )
             other_lines = [
                 f"  <{k}>{_xml_escape(str(v))}</{k}>"
@@ -155,38 +154,6 @@ class ContextSourceProvider:
             parts.append(self._format_tool_catalog(tool_entries))
 
         return "\n\n".join(parts)
-
-    def collect_dynamic_state(
-        self,
-        runtime_info: dict | None = None,
-    ) -> str | None:
-        """Build per-iteration dynamic state block (NOT part of frozen prefix).
-
-        Contains values that change every iteration:
-        - current_iteration / spawned_subagents (progress tracking)
-        - todo_summary / todo_reminder (task state)
-
-        Appended to the system message AFTER the frozen prefix by
-        ContextEngineer, so the LLM sees live progress without
-        invalidating the prefix cache.
-        """
-        if not runtime_info:
-            return None
-
-        dynamic_lines = []
-        for k in sorted(self._DYNAMIC_RUNTIME_KEYS):
-            v = runtime_info.get(k)
-            if v is not None:
-                dynamic_lines.append(f"  <{k}>{_xml_escape(str(v))}</{k}>")
-
-        if not dynamic_lines:
-            return None
-
-        return (
-            "<run-progress>\n"
-            + "\n".join(dynamic_lines)
-            + "\n</run-progress>"
-        )
 
     @staticmethod
     def _format_tool_catalog(tool_entries: list) -> str:
