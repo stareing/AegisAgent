@@ -3,7 +3,7 @@ name = "agent-framework-sdk"
 version = "0.1.0"
 description = "Agent Framework SDK — clean public API for embedding AI agents"
 requires-python = ">=3.11"
-license = {file = "../LICENSE"}
+license = "MIT"
 readme = "README.md"
 keywords = ["ai", "agent", "sdk", "llm", "framework"]
 classifiers = [
