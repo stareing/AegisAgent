@@ -53,6 +53,14 @@ class ContextSourceProvider:
         </available-tools>
         """
         parts = [f"<system-identity>\n{agent_config.system_prompt}\n</system-identity>"]
+
+        # Plan mode addon — injected when approval_mode is PLAN
+        if runtime_info and runtime_info.get("approval_mode") == "PLAN":
+            from agent_framework.agent.prompt_templates import PLAN_MODE_ADDON
+            parts.append(
+                f"<plan-mode-active>\n{PLAN_MODE_ADDON}\n</plan-mode-active>"
+            )
+
         if runtime_info:
             # Split into environment vs capabilities
             env_keys = {"operating_system", "working_directory"}
@@ -337,6 +345,64 @@ class ContextSourceProvider:
             lines.append(f"    {_xml_escape(desc['description'])}")
             lines.append("  </skill>")
         lines.append("</available-skills>")
+        return "\n".join(lines)
+
+    def collect_session_context(
+        self,
+        runtime_info: dict | None = None,
+    ) -> str | None:
+        """Build Gemini-style session context block (environment info).
+
+        Injected as part of the system message to provide the LLM with
+        awareness of its execution environment. Contains date, platform,
+        workspace, and git status if available.
+        """
+        import datetime
+        import os
+        import platform
+
+        lines = ["<session-context>"]
+
+        # Date
+        now = datetime.datetime.now()
+        date_str = now.strftime("%A, %B %d, %Y")
+        lines.append(f"  <date>{_xml_escape(date_str)}</date>")
+
+        # Platform
+        os_name = {"Darwin": "macOS", "Windows": "Windows", "Linux": "Linux"}.get(
+            platform.system(), platform.system()
+        )
+        lines.append(f"  <platform>{_xml_escape(os_name)}</platform>")
+
+        # Working directory
+        cwd = os.getcwd()
+        lines.append(f"  <working_directory>{_xml_escape(cwd)}</working_directory>")
+
+        # Git info (best-effort)
+        try:
+            import subprocess
+            git_branch = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True, text=True, timeout=3, cwd=cwd,
+            )
+            if git_branch.returncode == 0:
+                branch = git_branch.stdout.strip()
+                lines.append(f"  <git_branch>{_xml_escape(branch)}</git_branch>")
+
+                # Recent commits (last 3)
+                git_log = subprocess.run(
+                    ["git", "log", "--oneline", "-3"],
+                    capture_output=True, text=True, timeout=3, cwd=cwd,
+                )
+                if git_log.returncode == 0 and git_log.stdout.strip():
+                    lines.append("  <recent_commits>")
+                    for commit_line in git_log.stdout.strip().split("\n")[:3]:
+                        lines.append(f"    <commit>{_xml_escape(commit_line)}</commit>")
+                    lines.append("  </recent_commits>")
+        except Exception:
+            pass
+
+        lines.append("</session-context>")
         return "\n".join(lines)
 
     def collect_current_input(self, task_or_prompt: str) -> Message:

@@ -126,6 +126,13 @@ class ContextEngineer:
                           and not self._prefix_mgr.should_rotate(system_core, skill_addon)))
         system_tokens = prefix.token_estimate
 
+        # --- Session context (Gemini-style environment awareness) ---
+        # Appended to system message so LLM knows date, platform, git branch.
+        # Only injected on first iteration to avoid token waste.
+        session_context = None
+        if agent_state.iteration_count == 0:
+            session_context = self._source.collect_session_context(runtime_info)
+
         # --- Suffix: memories + session ---
         # Task is already in SessionState as the first user message (written by
         # RunCoordinator at run start).  Do NOT re-inject as current_input —
@@ -165,6 +172,11 @@ class ContextEngineer:
 
         # Build final context: prefix.messages + session history
         messages = list(prefix.messages)  # frozen prefix first
+
+        # Append session context (date, platform, git branch) to system message
+        if session_context:
+            sys_content = messages[0].content or ""
+            messages[0] = Message(role="system", content=f"{sys_content}\n\n{session_context}")
 
         # Append memory block to system message if present
         if memory_block:
