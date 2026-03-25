@@ -1295,6 +1295,342 @@ class AgentSDK:
         return child
 
     # ==================================================================
+    # Graph Engine (LangGraph-compatible)
+    # ==================================================================
+
+    def create_graph(self, state_schema: type) -> Any:
+        """Create a new StateGraph builder with the given state schema.
+
+        The state schema should be a TypedDict with optional Annotated
+        reducers for merge semantics (e.g. list append).
+
+        Usage::
+
+            import operator
+            from typing import Annotated
+            from typing_extensions import TypedDict
+
+            class State(TypedDict):
+                messages: Annotated[list[str], operator.add]
+                count: int
+
+            graph = sdk.create_graph(State)
+            graph.add_node("greet", lambda s: {"messages": ["Hi!"], "count": s["count"]+1})
+            graph.add_edge("__start__", "greet")
+            graph.add_edge("greet", "__end__")
+            app = sdk.compile_graph(graph)
+            result = await sdk.invoke_graph(app, {"messages": [], "count": 0})
+
+        Returns:
+            A StateGraph builder instance.
+        """
+        from agent_framework.graph import StateGraph
+        return StateGraph(state_schema)
+
+    def compile_graph(
+        self,
+        graph: Any,
+        *,
+        checkpointer: Any = None,
+        interrupt_before: list[str] | None = None,
+        interrupt_after: list[str] | None = None,
+    ) -> Any:
+        """Compile a StateGraph into an executable CompiledGraph.
+
+        Args:
+            graph: A StateGraph builder instance.
+            checkpointer: Optional persistence backend for graph state.
+                Use ``sdk.create_memory_saver()`` for in-memory checkpointing.
+            interrupt_before: Node names to pause before (for HITL).
+            interrupt_after: Node names to pause after.
+
+        Returns:
+            A CompiledGraph that can be invoked or streamed.
+        """
+        return graph.compile(
+            checkpointer=checkpointer,
+            interrupt_before=interrupt_before,
+            interrupt_after=interrupt_after,
+        )
+
+    async def invoke_graph(
+        self,
+        compiled_graph: Any,
+        input_state: dict[str, Any],
+        *,
+        thread_id: str = "",
+        recursion_limit: int | None = None,
+    ) -> dict[str, Any]:
+        """Run a compiled graph to completion.
+
+        Args:
+            compiled_graph: A CompiledGraph instance.
+            input_state: Initial state dict matching the graph's schema.
+            thread_id: Optional thread ID for checkpointing.
+            recursion_limit: Max node executions (default from graph).
+
+        Returns:
+            Final state dict after graph execution.
+        """
+        kwargs: dict[str, Any] = {}
+        if thread_id:
+            kwargs["config"] = {"configurable": {"thread_id": thread_id}}
+        if recursion_limit is not None:
+            kwargs["recursion_limit"] = recursion_limit
+        return await compiled_graph.invoke(input_state, **kwargs)
+
+    async def stream_graph(
+        self,
+        compiled_graph: Any,
+        input_state: dict[str, Any],
+        *,
+        thread_id: str = "",
+        stream_mode: str = "values",
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Stream graph execution events.
+
+        Args:
+            compiled_graph: A CompiledGraph instance.
+            input_state: Initial state dict.
+            thread_id: Optional thread ID for checkpointing.
+            stream_mode: "values" (full state), "updates" (deltas), or "debug".
+
+        Yields:
+            Dicts with "node" and "data" keys per executed node.
+        """
+        from agent_framework.graph import StreamMode
+        mode_map = {
+            "values": StreamMode.VALUES,
+            "updates": StreamMode.UPDATES,
+            "debug": StreamMode.DEBUG,
+        }
+        mode = mode_map.get(stream_mode, StreamMode.VALUES)
+
+        kwargs: dict[str, Any] = {"stream_mode": mode}
+        if thread_id:
+            kwargs["config"] = {"configurable": {"thread_id": thread_id}}
+
+        async for event in compiled_graph.stream(input_state, **kwargs):
+            yield {"node": event.node, "data": event.data}
+
+    def create_agent_node(
+        self,
+        *,
+        task_key: str = "task",
+        output_key: str = "result",
+        user_id: str | None = None,
+    ) -> Callable:
+        """Create a graph node that runs a full agent execution.
+
+        The node reads ``state[task_key]`` as the task, runs the agent,
+        and writes the final answer to ``state[output_key]``.
+
+        Usage::
+
+            graph.add_node("researcher", sdk.create_agent_node(task_key="query"))
+        """
+        self._ensure_setup()
+        from agent_framework.graph.nodes import agent_node
+        return agent_node(self._framework, task_key=task_key,
+                          output_key=output_key, user_id=user_id)
+
+    @staticmethod
+    def create_tool_node(
+        fn: Callable,
+        *,
+        input_key: str | None = None,
+        output_key: str | None = None,
+    ) -> Callable:
+        """Wrap a function as a graph node.
+
+        If *input_key* is set, passes ``state[input_key]`` as the argument.
+        If *output_key* is set, wraps the return value as ``{output_key: result}``.
+        """
+        from agent_framework.graph.nodes import tool_node
+        return tool_node(fn, input_key=input_key, output_key=output_key)
+
+    @staticmethod
+    def create_memory_saver() -> Any:
+        """Create an in-memory checkpointer for graph state persistence.
+
+        Returns an InMemorySaver compatible with compile_graph(checkpointer=...).
+        """
+        from agent_framework.graph import InMemorySaver
+        return InMemorySaver()
+
+    @property
+    def graph_constants(self) -> dict[str, str]:
+        """Graph sentinel constants: START and END node names."""
+        from agent_framework.graph import START, END
+        return {"START": START, "END": END}
+
+    # ==================================================================
+    # Multi-Instance Isolation
+    # ==================================================================
+
+    @classmethod
+    def create_isolated(
+        cls,
+        config: SDKConfig | None = None,
+        *,
+        workspace_dir: str | None = None,
+        memory_db_path: str | None = None,
+        auto_setup: bool = True,
+    ) -> AgentSDK:
+        """Create a fully isolated SDK instance with its own state.
+
+        Each isolated instance has:
+        - Its own memory store (separate SQLite DB)
+        - Its own working directory
+        - Its own tool registry (no shared global state)
+        - Its own event subscriptions
+        - Its own policy rules
+
+        Use this when running multiple agents concurrently that must
+        NOT share memory, tools, or conversation context.
+
+        Args:
+            config: SDK configuration (optional, uses defaults).
+            workspace_dir: Override working directory for this instance.
+            memory_db_path: Override memory DB path for isolation.
+            auto_setup: If True, initialize immediately.
+
+        Usage::
+
+            # Two agents with completely separate state
+            agent_a = AgentSDK.create_isolated(
+                SDKConfig(model_name="gpt-4"),
+                memory_db_path="data/agent_a.db",
+            )
+            agent_b = AgentSDK.create_isolated(
+                SDKConfig(model_name="claude-sonnet-4-20250514"),
+                memory_db_path="data/agent_b.db",
+            )
+            # They share NOTHING — separate memory, tools, context
+            result_a = await agent_a.run("Task A")
+            result_b = await agent_b.run("Task B")
+        """
+        import os
+        import uuid
+
+        effective_config = config or SDKConfig()
+
+        # Override memory path for isolation
+        if memory_db_path:
+            effective_config = effective_config.model_copy(
+                update={"memory_db_path": memory_db_path}
+            )
+        elif effective_config.memory_db_path == "data/memories.db":
+            # Auto-generate unique DB path to prevent sharing
+            instance_id = uuid.uuid4().hex[:8]
+            effective_config = effective_config.model_copy(
+                update={"memory_db_path": f"data/memories_{instance_id}.db"}
+            )
+
+        instance = cls(config=effective_config)
+
+        # Set workspace directory if provided
+        if workspace_dir:
+            instance._workspace_dir = workspace_dir
+
+        if auto_setup:
+            # Change working directory temporarily for setup if specified
+            if workspace_dir:
+                original_cwd = os.getcwd()
+                try:
+                    os.makedirs(workspace_dir, exist_ok=True)
+                    os.chdir(workspace_dir)
+                    instance.setup()
+                finally:
+                    os.chdir(original_cwd)
+            else:
+                instance.setup()
+
+        return instance
+
+    async def run_isolated(
+        self,
+        task: str,
+        *,
+        config_overrides: dict[str, Any] | None = None,
+        user_id: str | None = None,
+        timeout_ms: int | None = None,
+    ) -> SDKRunResult:
+        """Run a task in a forked, isolated child instance.
+
+        Creates a temporary child SDK, runs the task, collects the result,
+        and cleans up. The parent SDK state is completely unaffected.
+
+        Useful for parallel execution of independent tasks.
+
+        Args:
+            task: The task to execute.
+            config_overrides: Optional config changes for this run.
+            user_id: User ID for memory scoping.
+            timeout_ms: Timeout in milliseconds.
+
+        Returns:
+            SDKRunResult from the isolated execution.
+        """
+        child = self.fork(config_overrides)
+        try:
+            return await child.run(task, user_id=user_id, timeout_ms=timeout_ms)
+        finally:
+            await child.shutdown()
+
+    async def run_parallel(
+        self,
+        tasks: list[str | dict[str, Any]],
+        *,
+        max_concurrent: int = 3,
+        user_id: str | None = None,
+        timeout_ms: int | None = None,
+    ) -> list[SDKRunResult]:
+        """Run multiple tasks in parallel using isolated child instances.
+
+        Each task gets its own forked SDK instance with independent state.
+        Results are returned in the same order as the input tasks.
+
+        Args:
+            tasks: List of task strings, or dicts with "task" and optional
+                "config_overrides" keys.
+            max_concurrent: Maximum concurrent executions.
+            user_id: Shared user ID for all tasks.
+            timeout_ms: Per-task timeout.
+
+        Usage::
+
+            results = await sdk.run_parallel([
+                "Analyze auth module",
+                "Analyze payment module",
+                {"task": "Analyze API layer", "config_overrides": {"max_iterations": 30}},
+            ])
+            for r in results:
+                print(r.final_answer)
+        """
+        import asyncio as _aio
+
+        sem = _aio.Semaphore(max_concurrent)
+
+        async def _run_one(task_spec: str | dict[str, Any]) -> SDKRunResult:
+            if isinstance(task_spec, str):
+                task_str = task_spec
+                overrides = None
+            else:
+                task_str = task_spec["task"]
+                overrides = task_spec.get("config_overrides")
+
+            async with sem:
+                return await self.run_isolated(
+                    task_str,
+                    config_overrides=overrides,
+                    user_id=user_id,
+                    timeout_ms=timeout_ms,
+                )
+
+        return list(await _aio.gather(*[_run_one(t) for t in tasks]))
+
+    # ==================================================================
     # Cleanup
     # ==================================================================
 

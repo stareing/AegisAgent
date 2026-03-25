@@ -243,3 +243,20 @@ class SDKEventSubscription(BaseModel):
     subscription_id: str = Field(default_factory=lambda: uuid.uuid4().hex[:12])
     event_type: str = ""
     active: bool = True
+
+
+class SDKGraphEvent(BaseModel):
+    """Event from graph stream execution."""
+
+    node: str = ""
+    data: dict[str, Any] = Field(default_factory=dict)
+    stream_mode: str = "values"
+
+
+class SDKIsolatedRunResult(BaseModel):
+    """Result from an isolated parallel run."""
+
+    results: list[SDKRunResult] = Field(default_factory=list)
+    total_tasks: int = 0
+    succeeded: int = 0
+    failed: int = 0
