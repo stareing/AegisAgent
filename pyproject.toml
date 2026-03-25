@@ -35,7 +35,7 @@ mcp = [
     "mcp>=1.0",
 ]
 a2a = [
-    "a2a-python>=0.2.8,<1.0",
+    "a2a-sdk>=0.2.8,<1.0",
 ]
 otel = [
     "opentelemetry-api>=1.20.0",
@@ -49,7 +49,7 @@ all = [
     "google-genai>=1.0",
     "tiktoken>=0.5",
     "mcp>=1.0",
-    "a2a-python>=0.2.8,<1.0",
+    "a2a-sdk>=0.2.8,<1.0",
 ]
 
 [project.scripts]
