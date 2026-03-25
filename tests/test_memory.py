@@ -653,11 +653,19 @@ class TestSQLiteConcurrency:
         with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
             db_path = tmp.name
 
+        # Enable WAL mode for better concurrent access on slow CI disks
+        import sqlite3
+        init_conn = sqlite3.connect(db_path)
+        init_conn.execute("PRAGMA journal_mode=WAL")
+        init_conn.close()
+
         errors: list[Exception] = []
 
         def worker(thread_id: int) -> None:
             try:
                 store = SQLiteMemoryStore(db_path=db_path)
+                # Set busy timeout to handle lock contention on slow CI
+                store._conn.execute("PRAGMA busy_timeout=5000")
                 for i in range(self.ITERATIONS):
                     rec = _make_record(
                         memory_id=f"t{thread_id}_i{i}",

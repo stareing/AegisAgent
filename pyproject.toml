@@ -64,6 +64,12 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 include = ["agent_framework*"]
 
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+filterwarnings = [
+    "ignore::pytest.PytestUnraisableExceptionWarning",
+]
+
 # ── SDK standalone marker ──────────────────────────────────
 # The SDK is usable as a sub-package: from agent_framework.sdk import AgentSDK
 # For standalone distribution, build with: python -m build sdk/
