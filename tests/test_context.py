@@ -485,9 +485,12 @@ class TestContextEngineer:
             "task": "test",
         }
         messages = await engineer.prepare_context_for_llm(state, materials)
-        system_content = messages[0].content
-        assert "saved-memories" in system_content
-        assert "Pref" in system_content
+        # Memories are in a separate injection message (not frozen prefix)
+        # to preserve system prompt immutability for KV cache reuse.
+        all_system = [m for m in messages if m.role == "system"]
+        all_content = "\n".join(m.content or "" for m in all_system)
+        assert "saved-memories" in all_content
+        assert "Pref" in all_content
 
     @pytest.mark.asyncio
     async def test_set_skill_context(self):

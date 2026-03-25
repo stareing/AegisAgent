@@ -126,6 +126,12 @@ class ContextEngineer:
                           and not self._prefix_mgr.should_rotate(system_core, skill_addon)))
         system_tokens = prefix.token_estimate
 
+        # --- Dynamic state (per-iteration, outside frozen prefix) ---
+        # current_iteration, spawned_subagents, todo_summary change each
+        # iteration. These are NOT part of system_core so the prefix hash
+        # stays stable and the cache is actually reused.
+        dynamic_state = self._source.collect_dynamic_state(runtime_info)
+
         # --- Session context (Gemini-style environment awareness) ---
         # Appended to system message so LLM knows date, platform, git branch.
         # Only injected on first iteration to avoid token waste.
@@ -170,26 +176,43 @@ class ContextEngineer:
                 model_adapter=model_adapter,
             )
 
-        # Build final context: prefix.messages + session history
-        messages = list(prefix.messages)  # frozen prefix first
+        # ══════════════════════════════════════════════════════════
+        # IMMUTABLE SYSTEM PROMPT GUARANTEE
+        #
+        # messages[0] (system message) is the frozen prefix — it MUST
+        # NOT be mutated after construction. It only changes when:
+        #   - tools/MCP/skills change → system_core hash changes → new prefix
+        #   - skill activated/deactivated → skill_addon changes → new prefix
+        #
+        # Everything else (dynamic state, session context, memories,
+        # hooks) goes into a SEPARATE context injection message to
+        # preserve the prefix identity for provider-side KV cache reuse.
+        # ══════════════════════════════════════════════════════════
+        messages = list(prefix.messages)  # frozen prefix first — IMMUTABLE
 
-        # Append session context (date, platform, git branch) to system message
+        # Build context injection block (variable per-iteration content)
+        # This is a separate system message that carries all non-frozen data.
+        injection_parts: list[str] = []
+
+        if dynamic_state:
+            injection_parts.append(dynamic_state)
+
         if session_context:
-            sys_content = messages[0].content or ""
-            messages[0] = Message(role="system", content=f"{sys_content}\n\n{session_context}")
+            injection_parts.append(session_context)
 
-        # Append memory block to system message if present
         if memory_block:
-            sys_content = messages[0].content or ""
-            messages[0] = Message(role="system", content=f"{sys_content}\n\n{memory_block}")
+            injection_parts.append(memory_block)
 
-        # Append hook-injected extra instructions if present
         if _hook_extra_instructions:
-            sys_content = messages[0].content or ""
-            messages[0] = Message(
-                role="system",
-                content=f"{sys_content}\n\n<hook-instructions>{_hook_extra_instructions}</hook-instructions>",
+            injection_parts.append(
+                f"<hook-instructions>{_hook_extra_instructions}</hook-instructions>"
             )
+
+        if injection_parts:
+            messages.append(Message(
+                role="system",
+                content="\n\n".join(injection_parts),
+            ))
 
         # Append session history (includes user task as first message)
         for group in session_groups:

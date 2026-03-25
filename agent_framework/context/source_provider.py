@@ -34,23 +34,61 @@ class ContextSourceProvider:
     - Missing metadata → degrade to "not safely trimmable", NOT rebuild.
     """
 
+    # Keys whose values change every iteration — excluded from frozen prefix
+    # to enable hash-based cache reuse across iterations.
+    _DYNAMIC_RUNTIME_KEYS: frozenset[str] = frozenset({
+        "current_iteration",
+        "spawned_subagents",
+        "todo_summary",
+        "todo_reminder",
+    })
+
+    # Keys that form the static environment context (stable within a run)
+    _ENV_KEYS: frozenset[str] = frozenset({
+        "operating_system",
+        "working_directory",
+    })
+
+    # Keys that form static capability declaration
+    _STATIC_CAP_KEYS: frozenset[str] = frozenset({
+        "can_spawn_subagents",
+        "parallel_tool_calls",
+        "max_iterations",
+        "max_concurrent_subagents",
+        "max_subagents_per_run",
+        "approval_mode",
+    })
+
+    # Meta keys handled specially (not rendered as generic XML)
+    _META_KEYS: frozenset[str] = frozenset({
+        "investigation_mode",
+        "investigation_expectation",
+        "plan_mode_notice",
+    })
+
     def collect_system_core(
         self,
         agent_config: AgentConfig,
         runtime_info: dict | None = None,
         tool_entries: list | None = None,
     ) -> str:
-        """Build the core system prompt with XML structure.
+        """Build the STATIC core system prompt (frozen prefix candidate).
+
+        Only includes values that do NOT change between iterations within
+        a run. This enables PromptPrefixManager to cache and reuse the
+        prefix across iterations via hash comparison.
+
+        Dynamic per-iteration values (current_iteration, spawned_subagents,
+        todo_summary, todo_reminder) are emitted by collect_dynamic_state()
+        and appended to the system message OUTSIDE the frozen prefix.
 
         Output format:
         <system-identity>...</system-identity>
+        <plan-mode-active>...</plan-mode-active>       (if PLAN mode)
         <runtime-environment>...</runtime-environment>
-        <agent-capabilities>...</agent-capabilities>
-        <available-tools>
-          <local-tools>...</local-tools>
-          <mcp-tools>...</mcp-tools>
-          <a2a-tools>...</a2a-tools>
-        </available-tools>
+        <agent-capabilities>...</agent-capabilities>    (static only)
+        <investigation-protocol>...</investigation-protocol>  (if applicable)
+        <available-tools>...</available-tools>
         """
         parts = [f"<system-identity>\n{agent_config.system_prompt}\n</system-identity>"]
 
@@ -62,28 +100,25 @@ class ContextSourceProvider:
             )
 
         if runtime_info:
-            # Split into environment vs capabilities
-            env_keys = {"operating_system", "working_directory"}
-            cap_keys = {
-                "can_spawn_subagents", "parallel_tool_calls",
-                "max_iterations", "max_concurrent_subagents", "max_subagents_per_run",
-                "current_iteration", "spawned_subagents",
-            }
-            meta_keys = {"investigation_mode", "investigation_expectation"}
-            todo_keys = {"todo_summary", "todo_reminder"}
-
             env_lines = [
                 f"  <{k}>{_xml_escape(str(v))}</{k}>"
-                for k, v in runtime_info.items() if k in env_keys
+                for k, v in runtime_info.items()
+                if k in self._ENV_KEYS
             ]
-            cap_lines = [
+            static_cap_lines = [
                 f"  <{k}>{_xml_escape(str(v))}</{k}>"
-                for k, v in runtime_info.items() if k in cap_keys
+                for k, v in runtime_info.items()
+                if k in self._STATIC_CAP_KEYS
             ]
+            # Other keys that are not dynamic/env/cap/meta/todo
+            all_known = (
+                self._ENV_KEYS | self._STATIC_CAP_KEYS
+                | self._DYNAMIC_RUNTIME_KEYS | self._META_KEYS
+            )
             other_lines = [
                 f"  <{k}>{_xml_escape(str(v))}</{k}>"
                 for k, v in runtime_info.items()
-                if k not in env_keys and k not in cap_keys and k not in meta_keys and k not in todo_keys
+                if k not in all_known
             ]
 
             if env_lines or other_lines:
@@ -92,12 +127,14 @@ class ContextSourceProvider:
                     + "\n".join(env_lines + other_lines)
                     + "\n</runtime-environment>"
                 )
-            if cap_lines:
+            if static_cap_lines:
                 parts.append(
                     "<agent-capabilities>\n"
-                    + "\n".join(cap_lines)
+                    + "\n".join(static_cap_lines)
                     + "\n</agent-capabilities>"
                 )
+
+            # Investigation protocol (stable within a run)
             if runtime_info.get("investigation_mode") == "codebase_analysis":
                 expectation = _xml_escape(str(runtime_info.get("investigation_expectation", "")))
                 parts.append(
@@ -112,23 +149,44 @@ class ContextSourceProvider:
                     "  </rules>\n"
                     "</investigation-protocol>"
                 )
-            # Todo state block (rendered via runtime_info, not user messages)
-            todo_summary = runtime_info.get("todo_summary")
-            todo_reminder = runtime_info.get("todo_reminder")
-            if todo_summary or todo_reminder:
-                todo_lines = ["<todo-state>"]
-                if todo_summary:
-                    todo_lines.append(f"  <summary>{_xml_escape(todo_summary)}</summary>")
-                if todo_reminder:
-                    todo_lines.append(f"  <reminder>{_xml_escape(todo_reminder)}</reminder>")
-                todo_lines.append("</todo-state>")
-                parts.append("\n".join(todo_lines))
 
         # Tool catalog with source-based XML grouping
         if tool_entries:
             parts.append(self._format_tool_catalog(tool_entries))
 
         return "\n\n".join(parts)
+
+    def collect_dynamic_state(
+        self,
+        runtime_info: dict | None = None,
+    ) -> str | None:
+        """Build per-iteration dynamic state block (NOT part of frozen prefix).
+
+        Contains values that change every iteration:
+        - current_iteration / spawned_subagents (progress tracking)
+        - todo_summary / todo_reminder (task state)
+
+        Appended to the system message AFTER the frozen prefix by
+        ContextEngineer, so the LLM sees live progress without
+        invalidating the prefix cache.
+        """
+        if not runtime_info:
+            return None
+
+        dynamic_lines = []
+        for k in sorted(self._DYNAMIC_RUNTIME_KEYS):
+            v = runtime_info.get(k)
+            if v is not None:
+                dynamic_lines.append(f"  <{k}>{_xml_escape(str(v))}</{k}>")
+
+        if not dynamic_lines:
+            return None
+
+        return (
+            "<run-progress>\n"
+            + "\n".join(dynamic_lines)
+            + "\n</run-progress>"
+        )
 
     @staticmethod
     def _format_tool_catalog(tool_entries: list) -> str:
