@@ -14,12 +14,13 @@ jobs:
   # ── Step 1: Run tests before releasing ────────────────────
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -e ".[dev]"
+      - run: pip install -e ".[dev,openai,anthropic]"
       - run: python -m pytest tests/ -q --tb=short
 
   # ── Step 2: Build packages ────────────────────────────────
