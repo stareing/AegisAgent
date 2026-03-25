@@ -9,6 +9,59 @@ from agent_framework.models.subagent import Artifact
 from agent_framework.models.tool import ToolExecutionMeta, ToolResult
 
 
+class ApprovalMode(str, Enum):
+    """Controls tool execution approval behavior (Gemini-inspired Plan Mode).
+
+    DEFAULT    — tools requiring confirmation prompt the user.
+    AUTO_EDIT  — all tools execute without confirmation (autonomous mode).
+    PLAN       — read-only mode: only observation tools (grep, glob, read_file)
+                 are allowed. Write/execute tools are blocked to prevent
+                 accidental changes during architecture planning.
+    """
+
+    DEFAULT = "DEFAULT"
+    AUTO_EDIT = "AUTO_EDIT"
+    PLAN = "PLAN"
+
+
+# Tool categories allowed in PLAN mode (read-only observation).
+# All other categories are blocked to prevent accidental mutations.
+PLAN_MODE_ALLOWED_CATEGORIES: frozenset[str] = frozenset({
+    "filesystem_read",
+    "search",
+    "memory",
+    "memory_admin",
+    "observation",
+    "info",
+})
+
+# Tool names explicitly allowed in PLAN mode even if their category
+# doesn't match PLAN_MODE_ALLOWED_CATEGORIES.
+PLAN_MODE_ALLOWED_TOOLS: frozenset[str] = frozenset({
+    "read_file",
+    "glob_files",
+    "grep_search",
+    "list_directory",
+    "task_list",
+    "task_get",
+    "list_memories",
+    "invoke_skill",
+})
+
+# Tool names explicitly blocked in PLAN mode regardless of category.
+PLAN_MODE_BLOCKED_TOOLS: frozenset[str] = frozenset({
+    "write_file",
+    "edit_file",
+    "bash_exec",
+    "run_command",
+    "spawn_agent",
+    "team",
+    "mail",
+    "task_create",
+    "task_update",
+})
+
+
 class AgentStatus(str, Enum):
     IDLE = "IDLE"
     RUNNING = "RUNNING"
@@ -384,3 +437,4 @@ class EffectiveRunConfig(BaseModel):
     subagent_token_budget: int = 4096
     allow_parallel_tool_calls: bool = True
     progressive_tool_results: bool = True
+    approval_mode: ApprovalMode = ApprovalMode.DEFAULT

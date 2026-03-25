@@ -209,6 +209,27 @@ class AgentFramework:
             hitl_handler=self._hitl_handler,
         )
 
+        # Declarative policy engine (TOML-based)
+        self._policy_engine = None
+        policy_cfg = self.config.policy
+        if policy_cfg.enabled:
+            from agent_framework.agent.policy_engine import DeclarativePolicyEngine
+            if policy_cfg.policy_file:
+                self._policy_engine = DeclarativePolicyEngine.from_toml(
+                    policy_cfg.policy_file
+                )
+            elif policy_cfg.rules:
+                self._policy_engine = DeclarativePolicyEngine.from_dicts(
+                    policy_cfg.rules
+                )
+            else:
+                self._policy_engine = DeclarativePolicyEngine()
+            logger.info(
+                "policy_engine.initialized",
+                rule_count=self._policy_engine.rule_count,
+                source="toml" if policy_cfg.policy_file else "inline",
+            )
+
         # Tool executor
         tool_executor = ToolExecutor(
             registry=self._registry,
@@ -221,6 +242,10 @@ class AgentFramework:
             collection_poll_interval_ms=self.config.subagent.collection_poll_interval_ms,
             hook_executor=self._hook_executor,
         )
+
+        # Bind policy engine to tool executor
+        if self._policy_engine is not None:
+            tool_executor._policy_engine = self._policy_engine
 
         # Resolve provider-specific context window
         from agent_framework.context.token_budgets import resolve_context_window

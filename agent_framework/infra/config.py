@@ -103,6 +103,8 @@ class ToolConfig(BaseModel):
     max_concurrent_tool_calls: int = 5
     allow_parallel_tool_calls: bool = True
     shell_enabled: bool = False  # High-risk: must be explicitly enabled
+    # Approval mode (Gemini-inspired): "DEFAULT" | "AUTO_EDIT" | "PLAN"
+    approval_mode: str = "DEFAULT"
     # Sandbox config (OC-style container isolation)
     sandbox_enabled: bool = False
     sandbox_runtime: str = "docker"  # "docker" | "podman" | "none"
@@ -111,6 +113,9 @@ class ToolConfig(BaseModel):
     sandbox_pids_limit: int = 256
     sandbox_network: str = "none"
     sandbox_workspace_mount: str = "rw"  # "rw" | "ro" | "none"
+    # Multi-level sandbox auto-selection (risk-based)
+    sandbox_auto_select: bool = False  # Enable automatic risk-based sandbox selection
+    sandbox_min_risk_for_container: str = "MEDIUM"  # Minimum risk level for container sandbox
     # Tool loop detection thresholds
     loop_detection_threshold: int = 3
     loop_detection_history_size: int = 30
@@ -260,6 +265,22 @@ class TeamConfig(BaseModel):
     teammates: list[TeammateConfig] = Field(default_factory=list)
 
 
+class PolicyConfig(BaseModel):
+    """Declarative policy engine configuration.
+
+    Supports TOML file-based rules or inline rule definitions.
+    Rules control tool approval (ALLOW/DENY/ASK) with wildcards.
+    """
+
+    enabled: bool = False
+    policy_file: str = ""  # Path to TOML policy file
+    rules: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Inline policy rules (same schema as TOML [[rules]])",
+    )
+    enable_approval_memory: bool = True
+
+
 class PluginConfig(BaseModel):
     """Plugin system configuration (OC-compatible)."""
 
@@ -280,6 +301,21 @@ class PluginConfig(BaseModel):
         description="Per-plugin configuration: plugin_id -> config dict",
     )
     auto_discover: bool = True
+
+
+class OutputConfig(BaseModel):
+    """Output format configuration (Gemini-inspired).
+
+    Supports multiple output modes for different integration scenarios:
+    - text: Human-readable terminal output (default)
+    - json: Final result as JSON
+    - stream_json: JSONL streaming (each StreamEvent as one JSON line)
+    """
+
+    format: str = "text"  # "text" | "json" | "stream_json"
+    jsonl_output_file: str = ""  # Optional file path for JSONL output (empty = stdout)
+    include_thinking: bool = False  # Include thinking events in JSONL output
+    include_token_events: bool = True  # Include token events in JSONL output
 
 
 class LoggingConfig(BaseModel):
@@ -345,7 +381,9 @@ class FrameworkConfig(BaseSettings):
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     a2a: A2AConfig = Field(default_factory=A2AConfig)
     team: TeamConfig = Field(default_factory=lambda: TeamConfig())
+    policy: PolicyConfig = Field(default_factory=PolicyConfig)
     plugins: PluginConfig = Field(default_factory=PluginConfig)
+    output: OutputConfig = Field(default_factory=OutputConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     tracing: TracingConfig = Field(default_factory=TracingConfig)
     identity: AgentIdentityConfig = Field(default_factory=AgentIdentityConfig)

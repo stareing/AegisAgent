@@ -20,7 +20,8 @@ from agent_framework.hooks.payloads import (artifact_finalize_payload,
 from agent_framework.infra.logger import get_logger
 from agent_framework.infra.telemetry import get_tracing_manager
 from agent_framework.models.agent import (AgentRunResult, AgentState,
-                                          AgentStatus, EffectiveRunConfig,
+                                          AgentStatus, ApprovalMode,
+                                          EffectiveRunConfig,
                                           IterationResult, Skill, StopDecision,
                                           StopReason, StopSignal)
 from agent_framework.models.context import LLMRequest
@@ -161,6 +162,21 @@ class RunCoordinator:
             deps.tool_executor._progressive_mode = getattr(
                 agent.agent_config, "progressive_tool_results", False
             )
+
+        # Resolve and bind approval mode for this run
+        from agent_framework.infra.config import FrameworkConfig
+        raw_approval = getattr(agent.agent_config, "approval_mode", "DEFAULT")
+        if isinstance(raw_approval, str):
+            try:
+                run_approval_mode = ApprovalMode(raw_approval.upper())
+            except ValueError:
+                run_approval_mode = ApprovalMode.DEFAULT
+        elif isinstance(raw_approval, ApprovalMode):
+            run_approval_mode = raw_approval
+        else:
+            run_approval_mode = ApprovalMode.DEFAULT
+        if hasattr(deps.tool_executor, "_approval_mode"):
+            deps.tool_executor._approval_mode = run_approval_mode
 
         _run_span = _tm.start_span("agent.run", attributes={
             "run_id": run_id,
@@ -1120,6 +1136,15 @@ class RunCoordinator:
                 if effective_config.max_iterations <= 0
                 else str(effective_config.max_iterations)
             )
+            # Approval mode awareness — LLM should adapt its behavior
+            mode = effective_config.approval_mode
+            info["approval_mode"] = mode.value
+            if mode == ApprovalMode.PLAN:
+                info["plan_mode_notice"] = (
+                    "You are in PLAN mode (read-only). Only observation tools "
+                    "(read_file, glob_files, grep_search, list_directory) are available. "
+                    "Write and execute tools are disabled. Focus on analysis and planning."
+                )
 
         if agent:
             can_spawn = agent.agent_config.allow_spawn_children
@@ -1268,6 +1293,7 @@ class RunCoordinator:
             allowed_tools = apply_capability_policy(
                 deps.tool_registry.list_tools(),
                 capability_policy,
+                approval_mode=effective_config.approval_mode,
             )
             self._cached_tools_schema = deps.tool_registry.export_schemas(
                 whitelist=[t.meta.name for t in allowed_tools]
