@@ -1,0 +1,168 @@
+name: Release
+
+# Triggered by creating a git tag: git tag v0.1.0 && git push origin v0.1.0
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write      # GitHub Release assets
+  id-token: write      # PyPI Trusted Publisher (OIDC)
+
+jobs:
+  # ── Step 1: Run tests before releasing ────────────────────
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev,all]"
+      - run: python -m pytest tests/ -q --tb=short
+
+  # ── Step 2: Build packages ────────────────────────────────
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: pip install build twine
+
+      # Build main package: agent-framework
+      - name: Build agent-framework
+        run: python -m build
+
+      # Build SDK package: agent-framework-sdk
+      - name: Build agent-framework-sdk
+        run: |
+          cd sdk
+          python -m build
+
+      - name: Verify packages
+        run: |
+          echo "=== Main package ==="
+          twine check dist/*
+          echo "=== SDK package ==="
+          twine check sdk/dist/*
+
+      # Upload artifacts for downstream jobs
+      - name: Upload main package
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-main
+          path: dist/
+
+      - name: Upload SDK package
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-sdk
+          path: sdk/dist/
+
+  # ── Step 3: Create GitHub Release ─────────────────────────
+  github-release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download main package
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-main
+          path: dist/
+
+      - name: Download SDK package
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-sdk
+          path: sdk-dist/
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          # Extract commits since last tag
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [ -n "$PREV_TAG" ]; then
+            COMMITS=$(git log "${PREV_TAG}..HEAD" --oneline --no-merges)
+          else
+            COMMITS=$(git log --oneline -20 --no-merges)
+          fi
+          # Write release body
+          cat > release_notes.md << 'NOTES_EOF'
+          ## Installation
+
+          ```bash
+          # Full framework
+          pip install agent-framework
+
+          # With specific provider
+          pip install agent-framework[anthropic]
+          pip install agent-framework[openai]
+          pip install agent-framework[all]
+
+          # SDK only
+          pip install agent-framework-sdk
+          ```
+
+          ## Changelog
+          NOTES_EOF
+          echo "$COMMITS" | sed 's/^/- /' >> release_notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.notes.outputs.tag }}
+          body_path: release_notes.md
+          files: |
+            dist/*
+            sdk-dist/*
+          draft: false
+          prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
+
+  # ── Step 4: Publish to PyPI ───────────────────────────────
+  # Uses Trusted Publisher (OIDC) — no API token needed.
+  # Configure at: https://pypi.org/manage/project/agent-framework/settings/publishing/
+  pypi-publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi  # GitHub Environment with PyPI OIDC trust
+    steps:
+      - name: Download main package
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-main
+          path: dist/
+
+      - name: Publish agent-framework to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          # For testing: uncomment to publish to TestPyPI first
+          # repository-url: https://test.pypi.org/legacy/
+
+  pypi-publish-sdk:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    steps:
+      - name: Download SDK package
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-sdk
+          path: dist/
+
+      - name: Publish agent-framework-sdk to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
