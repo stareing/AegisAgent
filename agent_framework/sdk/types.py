@@ -7,6 +7,8 @@ exposed to SDK consumers.
 
 from __future__ import annotations
 
+import asyncio
+import uuid
 from enum import Enum
 from typing import Any, Callable
 
@@ -169,3 +171,75 @@ class SDKTeamNotification(BaseModel):
     task: str = ""
     agent_id: str = ""
     notification_type: str = ""
+
+
+# ======================================================================
+# New types for extended SDK capabilities
+# ======================================================================
+
+
+class SDKCancelToken:
+    """Cancellation token for controlling running agent tasks.
+
+    Not a pydantic BaseModel because it wraps a mutable asyncio.Event.
+    Thread-safe: asyncio.Event.set() is safe to call from any thread.
+    """
+
+    def __init__(self) -> None:
+        self._event = asyncio.Event()
+
+    def cancel(self) -> None:
+        """Signal cancellation. The running task will stop at the next
+        iteration boundary."""
+        self._event.set()
+
+    @property
+    def is_cancelled(self) -> bool:
+        """Whether cancellation has been requested."""
+        return self._event.is_set()
+
+    @property
+    def event(self) -> asyncio.Event:
+        """The underlying asyncio.Event (internal use by SDK)."""
+        return self._event
+
+
+class SDKContextStats(BaseModel):
+    """Context engineering statistics from the last run."""
+
+    system_tokens: int = 0
+    memory_tokens: int = 0
+    session_tokens: int = 0
+    total_tokens: int = 0
+    groups_trimmed: int = 0
+    prefix_reused: bool = False
+
+
+class SDKCheckpoint(BaseModel):
+    """Checkpoint metadata visible to SDK consumers."""
+
+    checkpoint_id: str = ""
+    created_at: str = ""
+    description: str = ""
+    git_commit_hash: str | None = None
+    has_conversation: bool = False
+    has_tool_call: bool = False
+
+
+class SDKCommandResult(BaseModel):
+    """Result of executing a slash command via the SDK."""
+
+    type: str = "message"
+    content: str = ""
+    message_type: str = "info"
+    tool_name: str | None = None
+    tool_args: dict[str, Any] = Field(default_factory=dict)
+    prompt: str | None = None
+
+
+class SDKEventSubscription(BaseModel):
+    """Metadata for an event subscription."""
+
+    subscription_id: str = Field(default_factory=lambda: uuid.uuid4().hex[:12])
+    event_type: str = ""
+    active: bool = True

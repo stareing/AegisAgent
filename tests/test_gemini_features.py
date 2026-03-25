@@ -379,7 +379,9 @@ class TestSDK:
 
         expected = {
             "AgentSDK", "SDKConfig",
-            "SDKAgentInfo", "SDKHookInfo", "SDKMCPServerInfo",
+            "SDKAgentInfo", "SDKCancelToken", "SDKCheckpoint",
+            "SDKCommandResult", "SDKContextStats", "SDKEventSubscription",
+            "SDKHookInfo", "SDKMCPServerInfo",
             "SDKMemoryEntry", "SDKModelInfo", "SDKPluginInfo",
             "SDKRunResult", "SDKSkillInfo", "SDKStreamEvent",
             "SDKStreamEventType", "SDKTeamNotification",
@@ -392,10 +394,14 @@ class TestSDK:
             AgentSDK, SDKConfig, SDKRunResult, SDKStreamEvent,
             SDKToolInfo, SDKSkillInfo, SDKPluginInfo, SDKHookInfo,
             SDKModelInfo, SDKMCPServerInfo, SDKTeamNotification,
+            SDKCancelToken, SDKContextStats, SDKCheckpoint,
+            SDKCommandResult, SDKEventSubscription,
         )
         for cls in [AgentSDK, SDKConfig, SDKRunResult, SDKStreamEvent,
                      SDKToolInfo, SDKSkillInfo, SDKPluginInfo, SDKHookInfo,
-                     SDKModelInfo, SDKMCPServerInfo, SDKTeamNotification]:
+                     SDKModelInfo, SDKMCPServerInfo, SDKTeamNotification,
+                     SDKCancelToken, SDKContextStats, SDKCheckpoint,
+                     SDKCommandResult, SDKEventSubscription]:
             assert cls is not None
 
     # ── Config Tests ─────────────────────────────────────────────
@@ -739,6 +745,143 @@ class TestSDK:
         assert len(sdk_result.artifacts) == 1
         assert sdk_result.artifacts[0]["name"] == "file.py"
         assert sdk_result.progressive_responses == ["Step 1"]
+
+
+    # ── Deep SDK Integration Tests ─────────────────────────────
+
+    def test_sdk_cancel_token(self):
+        from agent_framework.sdk.types import SDKCancelToken
+
+        token = SDKCancelToken()
+        assert not token.is_cancelled
+        token.cancel()
+        assert token.is_cancelled
+        assert token.event.is_set()
+
+    def test_sdk_context_stats(self):
+        from agent_framework.sdk.types import SDKContextStats
+
+        stats = SDKContextStats(
+            system_tokens=200, memory_tokens=50,
+            session_tokens=300, total_tokens=550,
+            groups_trimmed=2, prefix_reused=True,
+        )
+        assert stats.total_tokens == 550
+        assert stats.prefix_reused
+
+    def test_sdk_checkpoint(self):
+        from agent_framework.sdk.types import SDKCheckpoint
+
+        cp = SDKCheckpoint(
+            checkpoint_id="cp_001",
+            created_at="2026-03-25T10:00:00Z",
+            description="before refactor",
+            git_commit_hash="abc123",
+            has_conversation=True,
+            has_tool_call=True,
+        )
+        assert cp.git_commit_hash == "abc123"
+        assert cp.has_conversation
+
+    def test_sdk_command_result(self):
+        from agent_framework.sdk.types import SDKCommandResult
+
+        # Message result
+        r1 = SDKCommandResult(type="message", content="OK", message_type="info")
+        assert r1.type == "message"
+
+        # Tool result
+        r2 = SDKCommandResult(type="tool", tool_name="read_file", tool_args={"path": "x.py"})
+        assert r2.tool_name == "read_file"
+
+        # Prompt result
+        r3 = SDKCommandResult(type="prompt", prompt="Analyze project")
+        assert r3.prompt is not None
+
+    def test_sdk_event_subscription(self):
+        from agent_framework.sdk.types import SDKEventSubscription
+
+        sub = SDKEventSubscription(event_type="tool_done")
+        assert len(sub.subscription_id) == 12
+        assert sub.active
+
+    def test_sdk_event_callbacks(self):
+        from agent_framework.sdk import AgentSDK, SDKConfig
+
+        sdk = AgentSDK(SDKConfig())
+        events_received = []
+
+        sub_id = sdk.on_event("tool_start", lambda data: events_received.append(data))
+        assert sub_id
+
+        # Fire event
+        sdk._fire_event("tool_start", {"key": "value"})
+        assert len(events_received) == 1
+        assert events_received[0]["key"] == "value"
+
+        # Unsubscribe
+        sdk.off_event(sub_id)
+        sdk._fire_event("tool_start", {"key": "value2"})
+        assert len(events_received) == 1  # No new events
+
+    def test_sdk_set_approval_mode(self):
+        from agent_framework.sdk import AgentSDK, SDKConfig
+
+        sdk = AgentSDK(SDKConfig())
+        sdk.set_approval_mode("PLAN")
+        assert sdk._config.approval_mode == "PLAN"
+
+        sdk.set_approval_mode("AUTO_EDIT")
+        assert sdk._config.approval_mode == "AUTO_EDIT"
+
+    def test_sdk_set_approval_mode_invalid(self):
+        from agent_framework.sdk import AgentSDK, SDKConfig
+
+        sdk = AgentSDK(SDKConfig())
+        try:
+            sdk.set_approval_mode("INVALID")
+            assert False, "Should have raised ValueError"
+        except ValueError:
+            pass
+
+    def test_sdk_fork(self):
+        from agent_framework.sdk import AgentSDK, SDKConfig
+
+        parent = AgentSDK(SDKConfig(model_name="gpt-4", temperature=0.5))
+
+        @parent.tool(name="my_tool", description="test")
+        def my_tool() -> str:
+            return "ok"
+
+        child = parent.fork({"model_name": "claude-sonnet-4-20250514", "temperature": 0.8})
+        assert child.config.model_name == "claude-sonnet-4-20250514"
+        assert child.config.temperature == 0.8
+        # Parent unchanged
+        assert parent.config.model_name == "gpt-4"
+        assert parent.config.temperature == 0.5
+        # Custom tools copied
+        assert len(child._custom_tools) == 1
+
+    def test_sdk_policy_rules(self):
+        from agent_framework.sdk import AgentSDK, SDKConfig
+
+        sdk = AgentSDK(SDKConfig())
+        assert len(sdk.list_policy_rules()) == 0
+
+        sdk.add_policy_rule({"type": "tool_deny", "tool": "bash_exec", "approval": "ASK"})
+        sdk.add_policy_rule({"type": "tool_allow", "tool": "mcp_*", "approval": "ALLOW"})
+        assert len(sdk.list_policy_rules()) == 2
+
+        sdk.clear_policy_rules()
+        assert len(sdk.list_policy_rules()) == 0
+
+    def test_sdk_create_cancel_token_static(self):
+        from agent_framework.sdk import AgentSDK
+
+        token = AgentSDK.create_cancel_token()
+        assert not token.is_cancelled
+        token.cancel()
+        assert token.is_cancelled
 
 
 # =====================================================================

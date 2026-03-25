@@ -25,6 +25,23 @@ Usage:
     def fetch_weather(city: str) -> str:
         return f"Weather in {city}: sunny, 22°C"
 
+    # Cancellation
+    token = sdk.create_cancel_token()
+    task = asyncio.create_task(sdk.run("long task", cancel_token=token))
+    token.cancel()  # stop the run
+
+    # Event callbacks
+    sub_id = sdk.on_event("tool_start", lambda data: print(data))
+    sdk.off_event(sub_id)
+
+    # Checkpoints
+    cp_id = await sdk.save_checkpoint("before refactor")
+    await sdk.restore_checkpoint(cp_id)
+
+    # Fork
+    child = sdk.fork({"model_name": "gpt-4"})
+    result = await child.run("Solve problem")
+
     # Async context manager
     async with AgentSDK(config) as sdk:
         result = await sdk.run("Hello")
@@ -41,6 +58,11 @@ from agent_framework.sdk.client import AgentSDK
 from agent_framework.sdk.config import SDKConfig
 from agent_framework.sdk.types import (
     SDKAgentInfo,
+    SDKCancelToken,
+    SDKCheckpoint,
+    SDKCommandResult,
+    SDKContextStats,
+    SDKEventSubscription,
     SDKHookInfo,
     SDKMCPServerInfo,
     SDKMemoryEntry,
@@ -59,6 +81,11 @@ __all__ = [
     "AgentSDK",
     "SDKConfig",
     "SDKAgentInfo",
+    "SDKCancelToken",
+    "SDKCheckpoint",
+    "SDKCommandResult",
+    "SDKContextStats",
+    "SDKEventSubscription",
     "SDKHookInfo",
     "SDKMCPServerInfo",
     "SDKMemoryEntry",
