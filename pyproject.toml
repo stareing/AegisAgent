@@ -55,6 +55,7 @@ all = [
 [project.scripts]
 agent-cli = "agent_framework.cli:main"
 agent-interactive = "agent_framework.main:main"
+agent-ide = "agent_framework.ide.server:main"
 
 [build-system]
 requires = ["setuptools>=68.0"]
@@ -62,3 +63,8 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["agent_framework*"]
+
+# ── SDK standalone marker ──────────────────────────────────
+# The SDK is usable as a sub-package: from agent_framework.sdk import AgentSDK
+# For standalone distribution, build with: python -m build sdk/
+# See sdk/pyproject.toml for the lightweight SDK-only package.
