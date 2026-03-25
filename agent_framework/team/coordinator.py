@@ -261,7 +261,8 @@ class TeamCoordinator:
                 return
 
             summary = result.final_answer or result.error or ""
-            conversation_history.append(f"[Round {round_num + 1} output] {summary[:getattr(self, "_summary_max_chars", 2000)]}")
+            max_chars = getattr(self, "_summary_max_chars", 2000)
+            conversation_history.append(f"[Round {round_num + 1} output] {summary[:max_chars]}")
 
             # Check if this run asked a question or submitted a plan
             pending_question = self._check_pending_question(agent_id)

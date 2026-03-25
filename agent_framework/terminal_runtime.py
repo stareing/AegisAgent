@@ -1346,7 +1346,8 @@ async def _cmd_team_tasks(
     result = coord.list_tasks()
     tasks = result.get("tasks", [])
     if not tasks:
-        print(f"  {_dim('任务面板为空。使用 team(action=\"create_task\") 创建任务。')}")
+        hint = '任务面板为空。使用 team(action="create_task") 创建任务。'
+        print(f"  {_dim(hint)}")
         return
     print(f"\n  {_bold(_yellow('共享任务面板'))} ({result['total']} tasks, {result['claimable']} claimable)")
     for t in tasks:
