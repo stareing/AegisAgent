@@ -1631,6 +1631,281 @@ class AgentSDK:
         return list(await _aio.gather(*[_run_one(t) for t in tasks]))
 
     # ==================================================================
+    # Direct Tool Execution
+    # ==================================================================
+
+    async def execute_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Execute a registered tool directly (bypass LLM).
+
+        Useful for programmatic tool invocation from external systems,
+        testing, or pipelines that don't need LLM decision-making.
+
+        Args:
+            tool_name: Name of the registered tool.
+            arguments: Tool arguments dict.
+
+        Returns:
+            Dict with 'success', 'output', and optional 'error'.
+        """
+        self._ensure_setup()
+        from agent_framework.models.message import ToolCallRequest
+
+        req = ToolCallRequest(
+            id=f"sdk_exec_{tool_name}",
+            function_name=tool_name,
+            arguments=arguments or {},
+        )
+        result, meta = await self._framework._deps.tool_executor.execute(req)
+        return {
+            "success": result.success,
+            "output": result.output,
+            "error": result.error.model_dump() if result.error else None,
+            "execution_time_ms": meta.execution_time_ms,
+            "source": meta.source,
+        }
+
+    def export_tool_schemas(
+        self, whitelist: list[str] | None = None
+    ) -> list[dict[str, Any]]:
+        """Export tool JSON schemas for external systems (OpenAI function format).
+
+        Useful for feeding tool definitions to external LLMs, documentation
+        generators, or API clients.
+
+        Args:
+            whitelist: Only export schemas for these tool names (None=all).
+
+        Returns:
+            List of OpenAI-compatible function schema dicts.
+        """
+        self._ensure_setup()
+        if self._framework._registry is None:
+            return []
+        return self._framework._registry.export_schemas(whitelist=whitelist)
+
+    # ==================================================================
+    # Conversation History
+    # ==================================================================
+
+    def get_history(self) -> list[dict[str, str]]:
+        """Get current conversation history as portable dicts.
+
+        Returns list of {"role": "user"|"assistant"|"tool", "content": "..."}.
+        Empty list if no conversation active.
+        """
+        self._ensure_setup()
+        # Access the coordinator's last session state if available
+        coordinator = getattr(self._framework, "_coordinator", None)
+        if coordinator is None:
+            return []
+        state_ctrl = getattr(coordinator, "_state_ctrl", None)
+        if state_ctrl is None:
+            return []
+        # Check for cached session messages on the tool executor
+        executor = getattr(self._framework._deps, "tool_executor", None)
+        if executor and hasattr(executor, "_current_session_messages"):
+            msgs = executor._current_session_messages
+            return [{"role": m.role, "content": m.content or ""} for m in msgs]
+        return []
+
+    def export_history(self) -> str:
+        """Export conversation history as JSON string.
+
+        Portable format that can be saved to file and imported later.
+        """
+        import json
+        return json.dumps(self.get_history(), ensure_ascii=False, indent=2)
+
+    def import_history(self, history_json: str) -> int:
+        """Import conversation history from JSON string.
+
+        Returns number of messages imported.
+        """
+        import json
+        messages = json.loads(history_json)
+        if not isinstance(messages, list):
+            raise ValueError("History must be a JSON array of message objects")
+        # Store for next run() call via conversation_history parameter
+        self._imported_history = messages
+        return len(messages)
+
+    # ==================================================================
+    # Command Risk Assessment (Sandbox)
+    # ==================================================================
+
+    @staticmethod
+    def assess_command_risk(command: str) -> dict[str, Any]:
+        """Assess the risk level of a shell command.
+
+        Returns risk level, score, and matched patterns.
+        Useful for pre-screening commands before execution.
+
+        Args:
+            command: Shell command to assess.
+
+        Returns:
+            Dict with 'level' (SAFE/LOW/MEDIUM/HIGH/CRITICAL),
+            'score' (int), 'reasons' (list[str]).
+        """
+        from agent_framework.tools.sandbox.risk_scorer import score_command_risk
+        assessment = score_command_risk(command)
+        return {
+            "level": assessment.level.name,
+            "score": assessment.score,
+            "reasons": assessment.reasons,
+            "matched_patterns": assessment.matched_patterns,
+        }
+
+    @staticmethod
+    def select_sandbox(
+        command: str,
+        available_runtimes: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Select appropriate sandbox strategy for a command.
+
+        Args:
+            command: Shell command to assess.
+            available_runtimes: Available container runtimes (e.g. ["docker"]).
+
+        Returns:
+            Dict with risk assessment and selected strategy.
+        """
+        from agent_framework.tools.sandbox.risk_scorer import select_sandbox_strategy
+        assessment, strategy = select_sandbox_strategy(
+            command, available_runtimes=available_runtimes,
+        )
+        return {
+            "risk": {
+                "level": assessment.level.name,
+                "score": assessment.score,
+                "reasons": assessment.reasons,
+            },
+            "strategy": {
+                "name": strategy.name,
+                "require_confirmation": strategy.require_confirmation,
+                "container_read_only": strategy.container_read_only,
+                "container_network": strategy.container_network,
+            },
+        }
+
+    # ==================================================================
+    # IDE MCP Server
+    # ==================================================================
+
+    def create_ide_server(
+        self,
+        workspace_dir: str | None = None,
+    ) -> Any:
+        """Create an MCP IDE server exposing this SDK's capabilities.
+
+        The server can be connected to VS Code, JetBrains, or any
+        MCP-compatible IDE client.
+
+        Args:
+            workspace_dir: Workspace directory for file operations.
+
+        Returns:
+            MCPIDEServer instance with run_stdio() method.
+        """
+        from agent_framework.ide.server import MCPIDEServer
+        return MCPIDEServer(
+            config_path=None,
+            workspace_dir=workspace_dir,
+        )
+
+    # ==================================================================
+    # Missing entry.py Methods
+    # ==================================================================
+
+    def peek_team_notifications(self) -> list[dict[str, Any]]:
+        """Peek at pending team notifications without consuming them."""
+        self._ensure_setup()
+        return self._framework.peek_team_notifications()
+
+    def setup_run_dispatcher(
+        self,
+        history_getter: Callable | None = None,
+        max_notification_retries: int = 2,
+    ) -> None:
+        """Initialize background notification dispatcher.
+
+        Enables automatic team notification processing without manual polling.
+
+        Args:
+            history_getter: Callable returning conversation history as list[Message].
+            max_notification_retries: Retry count for failed notification turns.
+        """
+        self._ensure_setup()
+        self._framework.setup_run_dispatcher(
+            history_getter=history_getter,
+            max_notification_retries=max_notification_retries,
+        )
+
+    def list_plugin_agent_templates(self) -> dict[str, list]:
+        """Return {plugin_id: [agent_templates]} for all enabled plugins."""
+        self._ensure_setup()
+        return self._framework.list_plugin_agent_templates()
+
+    def get_plugin_agent_templates(self, plugin_id: str) -> list:
+        """Return agent templates from a specific plugin."""
+        self._ensure_setup()
+        return self._framework.get_plugin_agent_templates(plugin_id)
+
+    async def list_mcp_resource_templates(self, server_id: str) -> list:
+        """List resource templates from an MCP server."""
+        self._ensure_setup()
+        return await self._framework.list_mcp_resource_templates(server_id)
+
+    # ==================================================================
+    # Health Check
+    # ==================================================================
+
+    def health_check(self) -> dict[str, Any]:
+        """Check SDK readiness and component health.
+
+        Returns a dict with status of each subsystem.
+        Useful for monitoring, readiness probes, and diagnostics.
+        """
+        status: dict[str, Any] = {
+            "status": "ready" if self._setup_done else "not_initialized",
+            "setup_done": self._setup_done,
+        }
+        if not self._setup_done:
+            return status
+
+        fw = self._framework
+        status["model"] = {
+            "adapter_type": self._config.model_adapter_type,
+            "model_name": self._config.model_name,
+            "adapter_ready": fw._deps is not None and fw._deps.model_adapter is not None,
+        }
+        status["tools"] = {
+            "count": len(fw._registry.list_tools()) if fw._registry else 0,
+        }
+        status["memory"] = {
+            "enabled": self._config.memory_enabled,
+            "store_ready": fw._memory_store is not None,
+        }
+        status["plugins"] = {
+            "count": len(fw._plugin_registry_obj.list_enabled())
+            if getattr(fw, "_plugin_registry_obj", None) else 0,
+        }
+        status["mcp"] = {
+            "connected": fw._mcp_manager is not None,
+        }
+        status["custom_tools"] = len(self._custom_tools)
+        status["event_subscriptions"] = sum(
+            len(cbs) for cbs in self._event_callbacks.values()
+        )
+        status["policy_rules"] = len(self._policy_rules)
+
+        return status
+
+    # ==================================================================
     # Cleanup
     # ==================================================================
 
