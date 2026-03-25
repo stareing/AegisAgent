@@ -381,7 +381,10 @@ class TestWebFetch:
         assert "Hello World" in result["content"]
 
     def test_http_error(self) -> None:
-        from agent_framework.tools.builtin.web import web_fetch
+        from agent_framework.tools.builtin.web import web_fetch, _response_cache
+
+        # Clear cache from prior tests to avoid stale hits
+        _response_cache.clear()
 
         with patch("agent_framework.tools.builtin.web.urlopen") as mock_open:
             from urllib.error import HTTPError

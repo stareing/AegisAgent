@@ -5,7 +5,8 @@ into a GlobalToolCatalog in one shot.
 
 Tool categories (aligned with system tools spec):
 - filesystem: read_file, write_file, edit_file, list_directory, file_exists,
-              glob_files, grep_search, notebook_edit
+              read_many_files, glob_files, grep_search, notebook_edit
+- interaction: ask_user
 - system: bash_exec, bash_output, bash_stop, task_stop, kill_shell, run_command, get_env
 - network: web_fetch, web_search
 - delegation: spawn_agent, check_spawn_result, send_message, close_agent
@@ -81,6 +82,8 @@ def register_all_builtins(
     from agent_framework.tools.builtin.filesystem import (
         read_file,
         write_file,
+        read_many_files,
+        ask_user,
         list_directory,
         # file_exists,  # redundant: bash "test -f" or list_directory
     )
@@ -106,11 +109,13 @@ def register_all_builtins(
 
     builtins = [
         # Filesystem (read)
-        read_file, list_directory,
+        read_file, read_many_files, list_directory,
         # Filesystem (write)
         write_file, edit_file,
         # Filesystem (search)
         grep_search, glob_files,
+        # Interaction
+        ask_user,
         # Network
         web_fetch,
         # Control (task graph)
