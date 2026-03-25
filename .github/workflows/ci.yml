@@ -46,3 +46,4 @@ jobs:
           assert len(methods) >= 89, f'Expected >=89 methods, got {len(methods)}'
           print('SDK integrity check passed')
           "
+
