@@ -2,149 +2,177 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import Any
 
+from agent_framework.infra.frontmatter import (
+    FRONTMATTER_RE,
+    mini_yaml_parse,
+    parse_frontmatter_file,
+)
 from agent_framework.infra.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Minimal YAML-subset parser — avoids pyyaml dependency.
-# Handles: scalars, lists (- item), booleans, nulls.
-_FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+# Re-export for backward compatibility
+_FRONTMATTER_RE = FRONTMATTER_RE
+_mini_yaml_parse = mini_yaml_parse
+
+# Mapping from frontmatter keys to parsed dict keys for v4.0 fields.
+# Keeps the mapping in one place — callers (skill_router) map these
+# to Skill model fields.
+_V4_FRONTMATTER_MAP: dict[str, str] = {
+    "execution-mode": "execution_mode",
+    "effort": "effort_level",
+    "hooks": "hooks",
+    "paths": "paths",
+    "arguments": "arguments",
+    "context": "context",
+    "agent": "agent_ref",
+    "shell": "shell",
+    "version": "version",
+}
 
 
-def _mini_yaml_parse(text: str) -> dict[str, Any]:
-    """Parse a tiny YAML subset used in frontmatter."""
-    result: dict[str, Any] = {}
-    current_key: str | None = None
-    current_list: list[str] | None = None
-
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-
-        # List item under current key
-        if stripped.startswith("- ") and current_key is not None:
-            if current_list is None:
-                current_list = []
-                result[current_key] = current_list
-            current_list.append(stripped[2:].strip().strip('"').strip("'"))
-            continue
-
-        # Key: value
-        if ":" in stripped:
-            # Flush previous list
-            current_list = None
-            key, _, val = stripped.partition(":")
-            key = key.strip()
-            val = val.strip()
-            current_key = key
-
-            if not val:
-                # Could be start of a list or empty
-                continue
-
-            # Parse value
-            val_stripped = val.strip('"').strip("'")
-            if val_stripped.lower() in ("true", "yes"):
-                result[key] = True
-            elif val_stripped.lower() in ("false", "no"):
-                result[key] = False
-            elif val_stripped.lower() in ("null", "none", "~"):
-                result[key] = None
-            else:
-                result[key] = val_stripped
-
-    return result
+def _enrich_parsed(parsed: dict[str, Any]) -> dict[str, Any]:
+    """Extract v4.0 frontmatter fields into top-level parsed keys."""
+    fm = parsed["frontmatter"]
+    for fm_key, parsed_key in _V4_FRONTMATTER_MAP.items():
+        if fm_key in fm:
+            parsed[parsed_key] = fm[fm_key]
+    return parsed
 
 
 def parse_skill_md(path: Path) -> dict[str, Any] | None:
     """Parse a SKILL.md file into frontmatter dict + body string.
 
     Returns {"frontmatter": dict, "body": str, "path": Path} or None on failure.
+    Enriches result with v4.0 frontmatter fields when present.
     """
-    try:
-        text = path.read_text(encoding="utf-8")
-    except Exception as e:
-        logger.warning("skill.parse_failed", path=str(path), error=str(e))
+    result = parse_frontmatter_file(path)
+    if result is None:
+        logger.warning("skill.parse_failed", path=str(path))
         return None
+    return _enrich_parsed(result)
 
-    match = _FRONTMATTER_RE.match(text)
-    if not match:
-        # No frontmatter — treat entire file as body, derive name from directory
-        return {
-            "frontmatter": {},
-            "body": text.strip(),
-            "path": path,
-        }
 
-    raw_front = match.group(1)
-    body = text[match.end():].strip()
-    frontmatter = _mini_yaml_parse(raw_front)
+def _scan_directory(base_dir: Path) -> list[dict[str, Any]]:
+    """Scan a single directory for SKILL.md files (both layouts).
 
-    return {
-        "frontmatter": frontmatter,
-        "body": body,
-        "path": path,
-    }
+    Returns parsed entries with skill_id set but NO dedup applied.
+    """
+    entries: list[dict[str, Any]] = []
+
+    if not base_dir.is_dir():
+        return entries
+
+    # Pattern 1: skills/<name>/SKILL.md
+    for child in sorted(base_dir.iterdir()):
+        if child.is_dir():
+            skill_file = child / "SKILL.md"
+            if skill_file.is_file():
+                parsed = parse_skill_md(skill_file)
+                if parsed:
+                    skill_id = parsed["frontmatter"].get("name", child.name)
+                    parsed["skill_id"] = skill_id
+                    entries.append(parsed)
+
+    # Pattern 2: skills/<name>.md (flat files, not SKILL.md itself)
+    for md_file in sorted(base_dir.glob("*.md")):
+        if md_file.name == "SKILL.md":
+            parsed = parse_skill_md(md_file)
+            if parsed:
+                skill_id = parsed["frontmatter"].get("name", base_dir.name)
+                parsed["skill_id"] = skill_id
+                entries.append(parsed)
+            continue
+        if md_file.stem.startswith("."):
+            continue
+        parsed = parse_skill_md(md_file)
+        if parsed:
+            skill_id = parsed["frontmatter"].get("name", md_file.stem)
+            parsed["skill_id"] = skill_id
+            entries.append(parsed)
+
+    return entries
+
+
+def discover_skills_with_priority(
+    sources: list[tuple[Path, str, int]],
+) -> list[dict[str, Any]]:
+    """Scan multiple source directories with priority-based dedup.
+
+    Args:
+        sources: List of (directory, source_label, priority) tuples.
+                 Higher priority wins when the same skill_id appears
+                 in multiple sources. Ties are won by the later entry.
+
+    Dedup strategy:
+    - Uses ``Path.resolve()`` on each SKILL.md to detect symlink
+      duplicates (same physical file in different directories).
+    - For the same skill_id from different physical files, higher
+      priority overrides lower priority.
+
+    Returns:
+        Parsed skill dicts sorted by skill_id. Each dict includes
+        ``source_label`` and ``priority`` fields.
+    """
+    # skill_id → (parsed_dict, priority)
+    best: dict[str, tuple[dict[str, Any], int]] = {}
+    # Track resolved paths to skip symlink duplicates within a run
+    seen_realpaths: set[str] = set()
+
+    for directory, source_label, priority in sources:
+        entries = _scan_directory(directory)
+        for parsed in entries:
+            realpath = str(Path(parsed["path"]).resolve())
+            if realpath in seen_realpaths:
+                logger.debug(
+                    "skill.symlink_dedup",
+                    path=str(parsed["path"]),
+                    realpath=realpath,
+                )
+                continue
+            seen_realpaths.add(realpath)
+
+            parsed["source_label"] = source_label
+            parsed["priority"] = priority
+
+            skill_id = parsed["skill_id"]
+            existing = best.get(skill_id)
+            if existing is None or priority >= existing[1]:
+                if existing is not None:
+                    logger.info(
+                        "skill.priority_override",
+                        skill_id=skill_id,
+                        old_source=existing[0].get("source_label"),
+                        old_priority=existing[1],
+                        new_source=source_label,
+                        new_priority=priority,
+                    )
+                best[skill_id] = (parsed, priority)
+
+    result = [entry for entry, _ in best.values()]
+    result.sort(key=lambda e: e["skill_id"])
+
+    all_dirs = [str(d) for d, _, _ in sources]
+    logger.info("skill.discovery_complete", count=len(result), dirs=all_dirs)
+    return result
 
 
 def discover_skills(directories: list[Path]) -> list[dict[str, Any]]:
-    """Scan directories for SKILL.md files.
+    """Scan directories for SKILL.md files (backward-compatible).
 
     Supports two layouts:
       skills/<name>/SKILL.md   (directory per skill)
       skills/<name>.md          (flat file, name from filename)
+
+    Delegates to ``discover_skills_with_priority`` internally.
+    All directories receive the same priority (0) and source label
+    "legacy", preserving first-come-first-serve dedup semantics.
     """
-    found: list[dict[str, Any]] = []
-    seen_ids: set[str] = set()
-
-    for base_dir in directories:
-        if not base_dir.is_dir():
-            continue
-
-        # Pattern 1: skills/<name>/SKILL.md
-        for child in sorted(base_dir.iterdir()):
-            if child.is_dir():
-                skill_file = child / "SKILL.md"
-                if skill_file.is_file():
-                    parsed = parse_skill_md(skill_file)
-                    if parsed:
-                        # Default skill_id from directory name
-                        skill_id = parsed["frontmatter"].get("name", child.name)
-                        if skill_id not in seen_ids:
-                            parsed["skill_id"] = skill_id
-                            found.append(parsed)
-                            seen_ids.add(skill_id)
-
-        # Pattern 2: skills/<name>.md (flat files, not SKILL.md itself)
-        for md_file in sorted(base_dir.glob("*.md")):
-            if md_file.name == "SKILL.md":
-                # Root SKILL.md — parse as unnamed skill
-                parsed = parse_skill_md(md_file)
-                if parsed:
-                    skill_id = parsed["frontmatter"].get("name", base_dir.name)
-                    if skill_id not in seen_ids:
-                        parsed["skill_id"] = skill_id
-                        found.append(parsed)
-                        seen_ids.add(skill_id)
-                continue
-            if md_file.stem.startswith("."):
-                continue
-            parsed = parse_skill_md(md_file)
-            if parsed:
-                skill_id = parsed["frontmatter"].get("name", md_file.stem)
-                if skill_id not in seen_ids:
-                    parsed["skill_id"] = skill_id
-                    found.append(parsed)
-                    seen_ids.add(skill_id)
-
-    logger.info("skill.discovery_complete", count=len(found),
-                dirs=[str(d) for d in directories])
-    return found
+    sources = [(d, "legacy", 0) for d in directories]
+    return discover_skills_with_priority(sources)
 
 
 def load_skill_body(skill_path: str | Path) -> str:

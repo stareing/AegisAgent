@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from enum import Enum
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -46,6 +47,10 @@ PLAN_MODE_ALLOWED_TOOLS: frozenset[str] = frozenset({
     "task_get",
     "list_memories",
     "invoke_skill",
+    # Plan mode management tools (v4.0)
+    "enter_plan_mode",
+    "exit_plan_mode",
+    "write_plan",
 })
 
 # Tool names explicitly blocked in PLAN mode regardless of category.
@@ -258,6 +263,12 @@ class AgentState(BaseModel):
     # Updated by RunStateController.apply_iteration_result() when spawn_count increases.
     last_spawn_iteration_index: int = -1
     iteration_history: list[IterationResult] = Field(default_factory=list)
+    # Plan mode lifecycle state (v4.0)
+    plan_mode_state: PlanModeState | None = None
+    # Background progress summary (v4.0) — updated by ProgressSummarizer
+    progress_summary: str = ""
+    # Recently accessed files (v4.0) — updated by ToolExecutor for post-compact restore
+    recently_accessed_files: list[str] = Field(default_factory=list)
 
 
 class AgentRunResult(BaseModel):
@@ -323,6 +334,8 @@ class AgentConfig(BaseModel):
     max_concurrent_tool_calls: int = 5
     allow_parallel_tool_calls: bool = True
     progressive_tool_results: bool = True
+    # Reference to an AgentDefinition by definition_id (v4.0)
+    definition_ref: str | None = None
 
 
 class CapabilityPolicy(BaseModel):
@@ -373,6 +386,14 @@ class Skill(BaseModel):
     disable_model_invocation: bool = False
     user_invocable: bool = True
     argument_hint: str = ""
+    # --- Enhanced frontmatter fields (v4.0) ---
+    execution_mode: str = "inline"  # inline | fork
+    effort_level: str | None = None  # quick | moderate | extensive
+    hooks: dict[str, str] = Field(default_factory=dict)
+    paths: list[str] = Field(default_factory=list)
+    arguments: list[dict] = Field(default_factory=list)
+    skill_source: str = "project"  # builtin | user | project | policy | mcp
+    priority: int = 0  # higher priority overrides lower on dedup
 
 
 # ---------------------------------------------------------------------------
@@ -438,3 +459,53 @@ class EffectiveRunConfig(BaseModel):
     allow_parallel_tool_calls: bool = True
     progressive_tool_results: bool = True
     approval_mode: ApprovalMode = ApprovalMode.DEFAULT
+
+
+# ---------------------------------------------------------------------------
+# Agent Definition — markdown-based agent type definitions (v4.0)
+# ---------------------------------------------------------------------------
+
+class AgentDefinition(BaseModel):
+    """Markdown-based agent type definition with YAML frontmatter.
+
+    Loaded from multiple sources (builtin → user → project → policy).
+    Later sources override earlier ones with the same definition_id.
+
+    Immutability contract: frozen after loading — no runtime mutation.
+    """
+
+    model_config = {"frozen": True}
+
+    definition_id: str
+    name: str = ""
+    description: str = ""
+    agent_type: str = "general"
+    source: Literal["builtin", "user", "project", "policy"] = "project"
+    source_path: str | None = None
+    # Tool control: None = all tools available
+    tools: list[str] | None = None
+    disallowed_tools: list[str] = Field(default_factory=list)
+    # Permission mode applied when this agent type is active
+    permission_mode: str = "default"
+    # Model override (None = inherit from parent/config)
+    model: str | None = None
+    # MCP servers to connect for this agent type
+    mcp_servers: dict[str, dict] = Field(default_factory=dict)
+    # Body: the markdown system instructions
+    system_instructions: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Plan Mode State (v4.0)
+# ---------------------------------------------------------------------------
+
+class PlanModeState(BaseModel):
+    """Tracks plan mode lifecycle within a run.
+
+    Managed by PlanModeController, stored in AgentState.
+    """
+
+    active: bool = False
+    pre_plan_approval_mode: ApprovalMode = ApprovalMode.DEFAULT
+    plan_file_path: str | None = None
+    plan_slug: str = ""

@@ -22,7 +22,8 @@ from agent_framework.infra.telemetry import get_tracing_manager
 from agent_framework.models.agent import (AgentRunResult, AgentState,
                                           AgentStatus, ApprovalMode,
                                           EffectiveRunConfig,
-                                          IterationResult, Skill, StopDecision,
+                                          IterationResult, PlanModeState,
+                                          Skill, StopDecision,
                                           StopReason, StopSignal)
 from agent_framework.models.context import LLMRequest
 from agent_framework.models.hook import HookPoint
@@ -113,6 +114,15 @@ class RunCoordinator:
         self._notification_channel = RuntimeNotificationChannel(
             bg_notifier=self._bg_notifier,
         )
+
+        # v4.0 runtime references (injected by entry.py)
+        self._plan_mode_controller: Any = None
+        self._worktree_manager: Any = None
+        self._auto_dream: Any = None
+        self._model_adapter_for_summarizer: Any = None
+        self._agent_definitions: dict = {}
+        self._current_agent_state: Any = None  # live ref for plan mode tools
+        self._progress_summarizer: Any = None
 
     def _build_user_message(
         self,
@@ -267,6 +277,21 @@ class RunCoordinator:
             deps.context_engineer.apply_context_policy(policy_bundle.context_policy)
 
             await agent.on_before_run(task, agent_state)
+
+            # v4.0: Expose live agent_state for plan mode tools
+            self._current_agent_state = agent_state
+
+            # v4.0: Start progress summarizer (background 30s summaries)
+            if self._model_adapter_for_summarizer is not None:
+                try:
+                    from agent_framework.agent.progress_summarizer import ProgressSummarizer
+                    self._progress_summarizer = ProgressSummarizer(
+                        model_adapter=self._model_adapter_for_summarizer,
+                    )
+                    await self._progress_summarizer.start(agent_state)
+                except Exception as ps_err:
+                    logger.warning("progress_summarizer.start_failed", error=str(ps_err))
+                    self._progress_summarizer = None
 
             # RUN_START hook
             _hook_exec = deps.hook_executor
@@ -486,6 +511,24 @@ class RunCoordinator:
                 )
             return self._handle_run_error(agent, e, agent_state)
         finally:
+            # v4.0: Stop progress summarizer
+            if self._progress_summarizer is not None:
+                try:
+                    await self._progress_summarizer.stop()
+                except Exception:
+                    pass
+                self._progress_summarizer = None
+
+            # v4.0: Clear live agent state ref
+            self._current_agent_state = None
+
+            # v4.0: Notify auto_dream of session end
+            if self._auto_dream is not None:
+                try:
+                    self._auto_dream.record_session_end()
+                except Exception:
+                    pass
+
             if session_started:
                 try:
                     # v2.6.3 §41: end_run_session() always in finally
@@ -865,6 +908,46 @@ class RunCoordinator:
             self._state_ctrl.deactivate_skill(agent_state)
             deps.context_engineer.set_skill_context(None)
             _run_span.end()
+
+    # ------------------------------------------------------------------
+    # v4.0 Plan Mode helpers (called by control_tools callbacks)
+    # ------------------------------------------------------------------
+
+    def _enter_plan_mode(self):
+        """Called by enter_plan_mode tool via callback."""
+        from agent_framework.models.agent import PlanModeState
+        agent_state = self._current_agent_state
+        if agent_state is None or self._plan_mode_controller is None:
+            return None
+        # Determine current approval mode
+        current_mode = ApprovalMode.DEFAULT
+        if hasattr(self, "_current_effective_config"):
+            current_mode = getattr(self._current_effective_config, "approval_mode", ApprovalMode.DEFAULT)
+        plan_state = self._plan_mode_controller.enter_plan(
+            current_mode,
+            task=agent_state.task,
+        )
+        agent_state.plan_mode_state = plan_state
+        # Invalidate tool cache so PLAN mode filtering takes effect
+        self._cached_tools_schema = None
+        return plan_state
+
+    def _exit_plan_mode(self, plan: str = ""):
+        """Called by exit_plan_mode tool via callback."""
+        agent_state = self._current_agent_state
+        if agent_state is None or self._plan_mode_controller is None:
+            return None
+        plan_state = agent_state.plan_mode_state
+        if plan_state is None or not plan_state.active:
+            return None
+        # Write plan content if provided
+        if plan and plan_state.plan_file_path:
+            self._plan_mode_controller.write_plan(plan_state, plan)
+        restored_mode = self._plan_mode_controller.exit_plan(plan_state)
+        agent_state.plan_mode_state = PlanModeState(active=False)
+        # Invalidate tool cache to restore full tool access
+        self._cached_tools_schema = None
+        return restored_mode
 
     def _detect_and_activate_skill(
         self,
@@ -1290,10 +1373,16 @@ class RunCoordinator:
         # VISIBILITY filtering only — security is ToolExecutor.is_tool_allowed().
         if self._cached_tools_schema is None:
             capability_policy = agent.get_capability_policy()
+            # v4.0: Resolve agent definition for per-agent tool filtering
+            _agent_def = None
+            _def_ref = getattr(agent.agent_config, "definition_ref", None)
+            if _def_ref and self._agent_definitions:
+                _agent_def = self._agent_definitions.get(_def_ref)
             allowed_tools = apply_capability_policy(
                 deps.tool_registry.list_tools(),
                 capability_policy,
                 approval_mode=effective_config.approval_mode,
+                agent_definition=_agent_def,
             )
             self._cached_tools_schema = deps.tool_registry.export_schemas(
                 whitelist=[t.meta.name for t in allowed_tools]

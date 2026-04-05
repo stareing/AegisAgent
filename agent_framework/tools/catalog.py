@@ -45,7 +45,14 @@ class GlobalToolCatalog:
         return self._tools.pop(name, None) is not None
 
     def get(self, name: str) -> ToolEntry | None:
-        return self._tools.get(name)
+        entry = self._tools.get(name)
+        if entry is not None:
+            return entry
+        # Fallback: search by alias across all entries
+        for tool_entry in self._tools.values():
+            if name in tool_entry.meta.aliases:
+                return tool_entry
+        return None
 
     def list_all(self) -> list[ToolEntry]:
         return list(self._tools.values())

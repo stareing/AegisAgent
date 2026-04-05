@@ -112,6 +112,7 @@ class ContextCompressor:
         self,
         token_counter: Callable[[list[Message]], int] | None = None,
         strategy: str = "SUMMARIZATION",
+        tool_registry: Any = None,
     ) -> None:
         from agent_framework.context.strategies import CompressionStrategy
         self._token_counter = token_counter or self._rough_count
@@ -119,6 +120,11 @@ class ContextCompressor:
         # Persistent frozen summary — survives across rounds within a run
         self._frozen_summary: SummaryBlock | None = None
         self._frozen_summary_group_count: int = 0
+        # v4.2: Template-based tool result summarization during SNIP
+        self._summary_renderer: Any = None
+        if tool_registry is not None:
+            from agent_framework.context.tool_use_summary import ToolUseSummaryRenderer
+            self._summary_renderer = ToolUseSummaryRenderer(tool_registry)
 
     async def compress_groups_async(
         self,
@@ -146,6 +152,12 @@ class ContextCompressor:
 
         if self._strategy == CompressionStrategy.NONE:
             return groups
+
+        if self._strategy == CompressionStrategy.SNIP:
+            return self._snip_tool_outputs(groups, target_tokens)
+
+        if self._strategy == CompressionStrategy.PARTIAL:
+            return self._partial_compress(groups, target_tokens)
 
         if self._strategy == CompressionStrategy.TRUNCATION:
             return self._truncate_groups(groups, target_tokens)
@@ -404,6 +416,78 @@ class ContextCompressor:
         return [summary_group] + recent_groups
 
     # ------------------------------------------------------------------
+    # SNIP — tool output truncation
+    # ------------------------------------------------------------------
+
+    # Thresholds for SNIP strategy
+    _SNIP_MIN_LENGTH = 500
+    _SNIP_HEAD_CHARS = 200
+    _SNIP_TAIL_CHARS = 100
+
+    def _snip_tool_outputs(
+        self,
+        groups: list[ToolTransactionGroup],
+        target_tokens: int,
+    ) -> list[ToolTransactionGroup]:
+        """Replace long tool-result content with template summary or head+tail.
+
+        v4.2 enhanced strategy:
+        1. If ToolUseSummaryRenderer is available and tool has a template,
+           replace content with rendered summary (e.g. "[Tool summary: Read /path]")
+        2. Otherwise fall back to head(200)+tail(100) truncation
+
+        Rules:
+        - Only snips messages with role="tool" (tool_result)
+        - Never modifies user or assistant messages
+        """
+        result_groups: list[ToolTransactionGroup] = []
+        for group in groups:
+            new_messages: list[Message] = []
+            modified = False
+            # Pre-extract tool_call args from assistant message for template rendering
+            tool_call_args: dict[str, dict] = {}
+            if self._summary_renderer is not None:
+                for m in group.messages:
+                    if m.role == "assistant" and m.tool_calls:
+                        for tc in m.tool_calls:
+                            tool_call_args[tc.id] = tc.arguments
+
+            for msg in group.messages:
+                if msg.role == "tool" and msg.content and len(msg.content) > self._SNIP_MIN_LENGTH:
+                    # Try template-based summary first
+                    summary = None
+                    if self._summary_renderer is not None and msg.name and msg.tool_call_id:
+                        args = tool_call_args.get(msg.tool_call_id, {})
+                        summary = self._summary_renderer.render(msg.name, args)
+
+                    if summary is not None:
+                        snipped_content = f"[Tool summary: {summary}]"
+                    else:
+                        # Fallback: head+tail truncation
+                        original_len = len(msg.content)
+                        snipped_content = (
+                            msg.content[:self._SNIP_HEAD_CHARS]
+                            + f"\n\n[content snipped: {original_len} chars]\n\n"
+                            + msg.content[-self._SNIP_TAIL_CHARS:]
+                        )
+                    new_messages.append(msg.model_copy(update={"content": snipped_content}))
+                    modified = True
+                else:
+                    new_messages.append(msg)
+            if modified:
+                new_token_est = self._token_counter(new_messages)
+                result_groups.append(ToolTransactionGroup(
+                    group_id=group.group_id,
+                    group_type=group.group_type,
+                    messages=new_messages,
+                    token_estimate=new_token_est,
+                    protected=group.protected,
+                ))
+            else:
+                result_groups.append(group)
+        return result_groups
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
@@ -439,6 +523,106 @@ class ContextCompressor:
                 parts.append(f"{msg.role}:{text[:100]}")
         content = "|".join(parts)
         return hashlib.sha256(content.encode()).hexdigest()[:16]
+
+    # ------------------------------------------------------------------
+    # v4.3: PARTIAL — compress middle, preserve cached prefix + recent tail
+    # ------------------------------------------------------------------
+
+    def _partial_compress(
+        self,
+        groups: list[ToolTransactionGroup],
+        target_tokens: int,
+        preserved_count: int = 0,
+    ) -> list[ToolTransactionGroup]:
+        """Compress middle groups while preserving head (cached) and tail (recent).
+
+        Strategy:
+        1. Head groups (0..preserved_count) are kept as-is (in provider cache)
+        2. Tail groups (last _PROTECTED_RECENT_GROUPS) are kept as-is
+        3. Middle groups get SNIP treatment first, then TRUNCATION if needed
+
+        This maximizes KV cache reuse: the head is identical to the
+        provider's cached prefix, so no cache invalidation occurs.
+        """
+        total = len(groups)
+        if total <= _PROTECTED_RECENT_GROUPS:
+            return groups
+
+        # Determine boundaries
+        head_end = max(preserved_count, self._frozen_summary_group_count)
+        tail_start = max(head_end, total - _PROTECTED_RECENT_GROUPS)
+
+        head = groups[:head_end]
+        middle = groups[head_end:tail_start]
+        tail = groups[tail_start:]
+
+        if not middle:
+            return groups
+
+        # First: SNIP the middle
+        snipped = self._snip_tool_outputs(middle, target_tokens)
+
+        # Check if within budget now
+        all_groups = head + snipped + tail
+        current = sum(g.token_estimate or self._count_group(g) for g in all_groups)
+        if current <= target_tokens:
+            return all_groups
+
+        # Still over: truncate oldest middle groups
+        while snipped and current > target_tokens:
+            removed = snipped.pop(0)
+            current -= removed.token_estimate or self._count_group(removed)
+
+        return head + snipped + tail
+
+    # ------------------------------------------------------------------
+    # v4.3: Image stripping — remove multimodal content before compaction
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def strip_images(
+        groups: list[ToolTransactionGroup],
+    ) -> list[ToolTransactionGroup]:
+        """Remove image/audio content parts, replacing with text markers.
+
+        Called before LLM-based compaction to prevent prompt-too-long errors
+        and reduce unnecessary token consumption. Images are not needed for
+        generating conversation summaries.
+        """
+        result: list[ToolTransactionGroup] = []
+        for group in groups:
+            new_messages: list[Message] = []
+            modified = False
+            for msg in group.messages:
+                if msg.content_parts and msg.has_multimodal:
+                    stripped_parts = []
+                    for p in msg.content_parts:
+                        if p.type in ("image_url", "image_base64"):
+                            stripped_parts.append(
+                                ContentPart(type="text", text="[image removed for compaction]")
+                            )
+                            modified = True
+                        elif p.type == "audio":
+                            stripped_parts.append(
+                                ContentPart(type="text", text="[audio removed for compaction]")
+                            )
+                            modified = True
+                        else:
+                            stripped_parts.append(p)
+                    new_messages.append(msg.model_copy(update={"content_parts": stripped_parts}))
+                else:
+                    new_messages.append(msg)
+            if modified:
+                result.append(ToolTransactionGroup(
+                    group_id=group.group_id,
+                    group_type=group.group_type,
+                    messages=new_messages,
+                    token_estimate=0,
+                    protected=group.protected,
+                ))
+            else:
+                result.append(group)
+        return result
 
     def reset(self) -> None:
         """Reset frozen summary — called at run start."""

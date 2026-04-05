@@ -111,6 +111,10 @@ class ToolExecutor:
         self._collection_poll_interval_ms: int = collection_poll_interval_ms
         # Lead collector for multi-agent result collection strategies
         self._lead_collector: Any = None  # LeadCollector, created on first async spawn
+        # v4.0: Track recently accessed files for post-compact restoration
+        self._track_recently_accessed: bool = False
+        self._recently_accessed_files: list[str] = []
+        self._agent_state_ref: Any = None  # set by coordinator
         # Queue for real-time sub-agent stream events (TOKEN, TOOL_CALL, etc.)
         # Filled by SubAgentRuntime._stream_sink, drained by batch_execute_progressive.
         # Bounded to _STREAM_QUEUE_MAX_SIZE to prevent unbounded memory growth;
@@ -300,7 +304,22 @@ class ToolExecutor:
             try:
                 output = await self._route_execution(entry, validated)
                 output = self._sanitize_output(output, tool_name)
+                # Per-tool max_result_chars truncation (v4.1)
+                max_chars = entry.meta.max_result_chars
+                if isinstance(output, str) and len(output) > max_chars:
+                    output = output[:max_chars] + f"\n... [truncated, {len(output)} total chars]"
                 _tool_span.set_attribute("success", True)
+                # v4.0: Track recently accessed files for post-compact restore
+                if self._track_recently_accessed and tool_name in (
+                    "read_file", "write_file", "edit_file", "edit_code",
+                ):
+                    file_path = validated.get("path") or validated.get("file_path") or ""
+                    if file_path:
+                        if file_path not in self._recently_accessed_files:
+                            self._recently_accessed_files.append(file_path)
+                        # Keep only last 10 files
+                        if len(self._recently_accessed_files) > 10:
+                            self._recently_accessed_files = self._recently_accessed_files[-10:]
                 result = ToolResult(
                     tool_call_id=tool_call_request.id,
                     tool_name=tool_name,
@@ -344,15 +363,21 @@ class ToolExecutor:
     async def batch_execute(
         self, tool_call_requests: list[ToolCallRequest], policy: CapabilityPolicy | None = None
     ) -> list[tuple[ToolResult, ToolExecutionMeta]]:
-        """Execute multiple tool calls concurrently with bounded parallelism.
+        """Execute multiple tool calls with partition-based concurrency.
 
         Order guarantee:
         - Results are returned in the SAME ORDER as input tool_call_requests.
         - The i-th result corresponds to the i-th request, regardless of
           which tool finishes first.
-        - This is enforced by asyncio.gather() which preserves positional order.
+        - This is enforced by processing batches sequentially and using
+          asyncio.gather() within concurrent batches (positional order).
         - Downstream code (session projection, debug, tests) relies on this
           stability — do NOT change to completion-order collection.
+
+        Partitioning:
+        - Consecutive concurrent_safe tools run in parallel (bounded by semaphore).
+        - Consecutive non_concurrent tools run serially, one at a time.
+        - Batches themselves are processed sequentially to preserve ordering.
 
         Side-effect commit boundary (v2.6.4 §43):
         - Concurrent execution only covers the COMPUTATION phase.
@@ -363,13 +388,25 @@ class ToolExecutor:
         - Tool threads MUST NOT write SessionState, register artifacts,
           or submit audit records directly.
         """
+        from agent_framework.tools.concurrency import ConcurrencyPartitioner
+
+        batches = ConcurrencyPartitioner.partition(tool_call_requests, self._registry)
         sem = asyncio.Semaphore(self._max_concurrent)
 
         async def _run(req: ToolCallRequest) -> tuple[ToolResult, ToolExecutionMeta]:
             async with sem:
                 return await self.execute(req, policy=policy)
 
-        return await asyncio.gather(*[_run(r) for r in tool_call_requests])
+        results: list[tuple[ToolResult, ToolExecutionMeta]] = []
+        for batch in batches:
+            if batch.concurrent:
+                batch_results = await asyncio.gather(*[_run(r) for r in batch.requests])
+                results.extend(batch_results)
+            else:
+                for req in batch.requests:
+                    results.append(await self.execute(req, policy=policy))
+
+        return results
 
     async def batch_execute_progressive(
         self, tool_call_requests: list[ToolCallRequest], policy: CapabilityPolicy | None = None
@@ -606,6 +643,8 @@ class ToolExecutor:
             return await self._subagent_close(args)
         if entry.meta.name == "resume_checkpoint":
             return await self._subagent_resume_checkpoint(args)
+        if entry.meta.name == "list_team_members":
+            return await self._subagent_list_team_members(args)
         return await self._subagent_spawn(args)
 
     # ── Sub-agent operations ─────────────────────────────────
@@ -636,6 +675,11 @@ class ToolExecutor:
         """Resume a sub-agent from a saved checkpoint."""
         from agent_framework.tools.builtin.spawn_agent import execute_resume_checkpoint
         return await execute_resume_checkpoint(self, args)
+
+    async def _subagent_list_team_members(self, args: dict) -> dict:
+        """List members of a named team."""
+        from agent_framework.tools.builtin.spawn_agent import execute_list_team_members
+        return await execute_list_team_members(self, args)
 
     def _ensure_lead_collector(self, strategy_str: str) -> None:
         """Create LeadCollector on first async spawn if not exists.
@@ -808,4 +852,5 @@ class ToolExecutor:
         return ToolExecutionMeta(
             execution_time_ms=int((time.monotonic() - start) * 1000),
             source=entry.meta.source,
+            activity_description=entry.meta.activity_description,
         )

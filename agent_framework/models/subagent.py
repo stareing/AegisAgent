@@ -23,7 +23,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from agent_framework.models.message import Message, TokenUsage
+from agent_framework.models.message import Message, TokenUsage, ToolCallRequest
 
 # ---------------------------------------------------------------------------
 # Core Enums
@@ -372,6 +372,75 @@ class SubAgentConfigOverride(BaseModel):
     system_prompt_addon: str | None = None
 
 
+class ForkContext(BaseModel):
+    """Context for FORK spawn mode — enables prompt cache sharing.
+
+    Fork children receive byte-identical API prefixes for cache hits.
+    Only the per_child_directive differs between siblings.
+    """
+
+    model_config = {"frozen": True}
+    parent_tool_calls: list[ToolCallRequest] = Field(default_factory=list)
+    per_child_directive: str = ""
+    worktree_cwd: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Agent Progress Tracker (v4.2)
+# ---------------------------------------------------------------------------
+
+class AgentProgressTracker(BaseModel):
+    """Real-time progress for a running sub-agent.
+
+    Mutable — updated in-place during execution by SubAgentRuntime.
+    Only written from one coroutine (the stream consumer), safe under GIL.
+    """
+
+    tool_use_count: int = 0
+    latest_input_tokens: int = 0
+    cumulative_output_tokens: int = 0
+    recent_activities: list[str] = Field(default_factory=list)
+    auto_backgrounded: bool = False
+    started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    def record_tool_use(self, tool_name: str) -> None:
+        """Record a tool invocation."""
+        self.tool_use_count += 1
+        self.recent_activities = (self.recent_activities + [tool_name])[-10:]
+
+    def record_tokens(self, output_tokens: int) -> None:
+        """Record output token production."""
+        self.cumulative_output_tokens += output_tokens
+
+
+# ---------------------------------------------------------------------------
+# Team Context (v4.2)
+# ---------------------------------------------------------------------------
+
+class TeamContext(BaseModel):
+    """Team membership context for coordinated agent groups.
+
+    Agents with the same team_name are grouped and can discover each other.
+    The leader is the first agent spawned with a given team_name.
+    """
+
+    model_config = {"frozen": True}
+    team_name: str
+    leader_spawn_id: str
+    member_spawn_ids: list[str] = Field(default_factory=list)
+    shared_cwd: str | None = None
+
+
+# Tools that workers in coordinator mode cannot use (v4.2)
+WORKER_BLOCKED_TOOLS: frozenset[str] = frozenset({
+    "spawn_agent",
+    "check_spawn_result",
+    "close_agent",
+    "send_message",
+    "list_team_members",
+})
+
+
 # ---------------------------------------------------------------------------
 # SubAgentSpec — with split delegation dimensions (§3)
 # ---------------------------------------------------------------------------
@@ -397,6 +466,10 @@ class SubAgentSpec(BaseModel):
     max_iterations: int = 10
     deadline_ms: int = 60000
     allow_spawn_children: bool = False
+    fork_context: ForkContext | None = None
+    # v4.2: Team grouping + worker mode
+    team_name: str | None = None
+    is_worker: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -441,6 +514,8 @@ class SubAgentHandle(BaseModel):
     waiting_reason: str | None = None
     resume_token: str | None = None
     capabilities: DelegationCapabilities = Field(default_factory=DelegationCapabilities)
+    # v4.2: Real-time progress tracking
+    progress: AgentProgressTracker | None = None
 
     @model_validator(mode="after")
     def _validate_pause_reason_required(self) -> "SubAgentHandle":

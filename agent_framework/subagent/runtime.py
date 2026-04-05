@@ -9,13 +9,19 @@ from typing import TYPE_CHECKING, Any
 
 from agent_framework.infra.logger import get_logger
 from agent_framework.models.message import Message
-from agent_framework.models.subagent import (SpawnMode, SubAgentHandle,
+from agent_framework.models.subagent import (AgentProgressTracker,
+                                             SpawnMode, SubAgentHandle,
                                              SubAgentResult, SubAgentSpec,
                                              SubAgentStatus,
                                              SubAgentSuspendInfo,
                                              SubAgentSuspendReason,
-                                             SubAgentTaskStatus)
+                                             SubAgentTaskStatus,
+                                             TeamContext)
 from agent_framework.subagent.factory import SubAgentFactory
+from agent_framework.subagent.fork import (
+    build_fork_child_messages,
+    is_in_fork_child,
+)
 from agent_framework.subagent.scheduler import SubAgentScheduler
 
 if TYPE_CHECKING:
@@ -100,6 +106,11 @@ class SubAgentRuntime:
         # Checkpoint store for suspend/resume persistence.
         # Set externally (entry.py) when persistent checkpointing is enabled.
         self._checkpoint_store: Any = None  # SQLiteCheckpointStore | None
+        # v4.2: Team grouping — agents sharing a team_name
+        self._teams: dict[str, TeamContext] = {}
+        # v4.2: Auto-background threshold (ms). If a child runs longer than this,
+        # mark it as auto-backgrounded in the progress tracker.
+        self._auto_background_ms: int = 120_000
 
     async def _run_child_stream_or_block(
         self,
@@ -115,15 +126,33 @@ class SubAgentRuntime:
         When _stream_sink is configured, iterates run_stream() and forwards
         all non-terminal events (TOKEN, TOOL_CALL_START, etc.) to the sink
         so they can be displayed in real-time. Returns the AgentRunResult.
+
+        v4.2: Also tracks progress (tool_use_count, tokens, recent_activities)
+        and auto-background detection.
         """
+        # v4.2: Initialize progress tracker on the handle
+        tracker = AgentProgressTracker()
+        active = getattr(self, "_active", {})
+        handle = active.get(spawn_id)
+        if handle is not None:
+            handle.progress = tracker
+
         if self._stream_sink is None:
-            return await coordinator.run(
+            start_time = time.monotonic()
+            result = await coordinator.run(
                 agent, deps, task,
                 initial_session_messages=initial_session_messages,
             )
+            # Check auto-background after blocking run
+            elapsed_ms = (time.monotonic() - start_time) * 1000
+            auto_bg_ms = getattr(self, "_auto_background_ms", 120_000)
+            if elapsed_ms > auto_bg_ms:
+                tracker.auto_backgrounded = True
+            return result
 
         from agent_framework.models.stream import StreamEventType
 
+        start_time = time.monotonic()
         run_result = None
         async for event in coordinator.run_stream(
             agent, deps, task,
@@ -143,6 +172,23 @@ class SubAgentRuntime:
                     usage=TokenUsage(),
                 )
             else:
+                # v4.2: Track progress from stream events
+                if event.type == StreamEventType.TOOL_CALL_START:
+                    tool_name = event.data.get("tool_name", "tool_call")
+                    tracker.record_tool_use(tool_name)
+                elif event.type == StreamEventType.TOKEN:
+                    token_count = event.data.get("token_count", 0)
+                    tracker.record_tokens(token_count)
+                # v4.2: Auto-background detection
+                elapsed_ms = (time.monotonic() - start_time) * 1000
+                auto_bg_ms = getattr(self, "_auto_background_ms", 120_000)
+                if not tracker.auto_backgrounded and elapsed_ms > auto_bg_ms:
+                    tracker.auto_backgrounded = True
+                    logger.info(
+                        "subagent.auto_backgrounded",
+                        spawn_id=spawn_id,
+                        elapsed_ms=int(elapsed_ms),
+                    )
                 self._stream_sink(spawn_id, event)
 
         if run_result is None:
@@ -194,6 +240,14 @@ class SubAgentRuntime:
 
         # Register in active_children (runtime is the truth source)
         self._active[spec.spawn_id] = handle
+
+        # v4.2: Register in team if team_name is set
+        if spec.team_name:
+            self._register_team_member(spec.team_name, spec.spawn_id, spec.parent_run_id)
+
+        # FORK mode: build fork-specific context and delegate to spawn_async
+        if spec.mode == SpawnMode.FORK:
+            return await self._spawn_fork(spec, parent_agent)
 
         # Create sub-agent and deps
         logger.info(
@@ -353,6 +407,119 @@ class SubAgentRuntime:
             long_lived_idle=is_long_lived and result.success,
         )
         return result
+
+    async def _spawn_fork(
+        self, spec: SubAgentSpec, parent_agent: Any
+    ) -> SubAgentResult:
+        """Spawn a fork child with parent context for prompt cache sharing.
+
+        Fork children:
+        - Inherit parent's last assistant message (with tool_calls)
+        - Receive byte-identical placeholder tool_results
+        - Get a unique per-child directive
+        - Always run asynchronously
+        - Cannot spawn further forks (anti-recursion)
+        """
+        # Anti-recursion guard
+        if spec.context_seed and is_in_fork_child(spec.context_seed):
+            return SubAgentResult(
+                spawn_id=spec.spawn_id,
+                success=False,
+                error="Fork children cannot spawn further forks (anti-recursion guard)",
+                final_status=SubAgentStatus.REJECTED,
+            )
+
+        # Get parent's last assistant message with tool_calls
+        parent_messages = spec.context_seed or []
+        parent_assistant_msg = None
+        for msg in reversed(parent_messages):
+            if msg.role == "assistant" and msg.tool_calls:
+                parent_assistant_msg = msg
+                break
+
+        # If no assistant message with tool_calls, build minimal context
+        if parent_assistant_msg is None:
+            spec.context_seed = [Message(role="user", content=spec.task_input)]
+        else:
+            fork_messages = build_fork_child_messages(
+                parent_assistant_msg, spec.task_input
+            )
+            # Prepend earlier history before the fork messages
+            history_before = []
+            for msg in parent_messages:
+                if msg is parent_assistant_msg:
+                    break
+                history_before.append(msg)
+            spec.context_seed = history_before + fork_messages
+
+        logger.info(
+            "subagent.fork.spawning",
+            spawn_id=spec.spawn_id,
+            directive_preview=spec.task_input[:100],
+            context_messages=len(spec.context_seed) if spec.context_seed else 0,
+        )
+
+        # Delegate to the standard spawn path (which handles scheduling, execution, etc.)
+        # Remove the FORK branch flag to avoid infinite recursion
+        # The context_seed is already set with fork messages
+        spec.mode = SpawnMode.EPHEMERAL  # Execute as ephemeral once context is built
+        return await self.spawn(spec, parent_agent)
+
+    # ------------------------------------------------------------------
+    # v4.2: Team management
+    # ------------------------------------------------------------------
+
+    def _register_team_member(
+        self, team_name: str, spawn_id: str, parent_run_id: str
+    ) -> None:
+        """Register an agent as a member of a named team."""
+        if team_name in self._teams:
+            # Add to existing team (TeamContext is frozen, rebuild)
+            old = self._teams[team_name]
+            self._teams[team_name] = TeamContext(
+                team_name=team_name,
+                leader_spawn_id=old.leader_spawn_id,
+                member_spawn_ids=list(old.member_spawn_ids) + [spawn_id],
+            )
+        else:
+            # First member becomes leader
+            self._teams[team_name] = TeamContext(
+                team_name=team_name,
+                leader_spawn_id=spawn_id,
+                member_spawn_ids=[spawn_id],
+            )
+        logger.info(
+            "subagent.team.registered",
+            team_name=team_name,
+            spawn_id=spawn_id,
+            team_size=len(self._teams[team_name].member_spawn_ids),
+        )
+
+    def get_team_members(self, team_name: str) -> list[dict]:
+        """Get all members of a named team with their status and progress."""
+        team = self._teams.get(team_name)
+        if team is None:
+            return []
+        members = []
+        for sid in team.member_spawn_ids:
+            handle = self._active.get(sid)
+            member_info: dict = {
+                "spawn_id": sid,
+                "is_leader": sid == team.leader_spawn_id,
+            }
+            if handle is not None:
+                member_info["status"] = handle.status.value if hasattr(handle.status, "value") else str(handle.status)
+                if handle.progress is not None:
+                    member_info["progress"] = {
+                        "tool_use_count": handle.progress.tool_use_count,
+                        "cumulative_output_tokens": handle.progress.cumulative_output_tokens,
+                        "recent_activities": handle.progress.recent_activities,
+                        "auto_backgrounded": handle.progress.auto_backgrounded,
+                    }
+            else:
+                member_info["status"] = "UNKNOWN"
+            members.append(member_info)
+        return members
 
     async def spawn_async(
         self, spec: SubAgentSpec, parent_agent: Any

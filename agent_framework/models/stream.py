@@ -50,6 +50,8 @@ class StreamEventType(str, Enum):
     # Backward-compatible aliases — existing consumers that check SUBAGENT_* still work
     SUBAGENT_START = "progressive_start"
     SUBAGENT_DONE = "progressive_done"
+    # Background progress summary (v4.0) — emitted by ProgressSummarizer
+    PROGRESS_SUMMARY = "progress_summary"
 
 
 class StreamEvent(BaseModel):

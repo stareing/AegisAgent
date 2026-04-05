@@ -456,6 +456,12 @@ def _parse_git_grep_context_output(
     require_confirm=False,
     tags=["system", "search", "read"],
     namespace=SYSTEM_NAMESPACE,
+    concurrency_class="concurrent_safe",
+    is_read_only=True,
+    search_hint="search file contents regex pattern grep ripgrep",
+    activity_description="Searching files",
+    prompt="Search for patterns in file contents using regex. Supports glob filtering and context lines.",
+    tool_use_summary_tpl="Searched {pattern} in {path}",
 )
 def grep_search(
     pattern: str,
@@ -655,6 +661,12 @@ def _python_grep_full(
     require_confirm=False,
     tags=["system", "search", "read"],
     namespace=SYSTEM_NAMESPACE,
+    concurrency_class="concurrent_safe",
+    is_read_only=True,
+    search_hint="find files by name pattern glob",
+    activity_description="Finding files",
+    prompt="Find files matching glob patterns. Returns paths sorted by modification time.",
+    tool_use_summary_tpl="Found files matching {pattern}",
 )
 def glob_files(
     pattern: str,

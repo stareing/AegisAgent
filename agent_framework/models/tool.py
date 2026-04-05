@@ -46,6 +46,15 @@ class ErrorCode(str, Enum):
     REMOTE_UNAVAILABLE = "REMOTE_UNAVAILABLE"
     DELEGATION_FAILED = "DELEGATION_FAILED"
 
+    # Worktree-specific (v4.0)
+    WORKTREE_FAILED = "WORKTREE_FAILED"
+
+    # Plan mode (v4.0)
+    PLAN_MODE_VIOLATION = "PLAN_MODE_VIOLATION"
+
+    # Tool search (v4.0)
+    DEFERRED_TOOL_NOT_FOUND = "DEFERRED_TOOL_NOT_FOUND"
+
 
 class ToolMeta(BaseModel):
     """Metadata describing a tool.
@@ -72,6 +81,21 @@ class ToolMeta(BaseModel):
     namespace: str | None = None
     mcp_server_id: str | None = None
     a2a_agent_url: str | None = None
+    # Tool search: deferred tools are not included in LLM tool list (v4.0)
+    should_defer: bool = False
+    # Concurrency: concurrent_safe tools can run in parallel (v4.0)
+    concurrency_class: str = "non_concurrent"  # concurrent_safe | non_concurrent
+
+    # --- Claude Code aligned fields (v4.1) ---
+    prompt: str = ""                     # System instruction (distinct from description capability summary)
+    aliases: list[str] = Field(default_factory=list)  # Backward-compatible name aliases
+    search_hint: str = ""               # ToolSearch keywords (3-10 words)
+    is_read_only: bool = False          # True for read-only tools
+    is_destructive: bool = False        # True for destructive operations (delete/overwrite)
+    always_load: bool = False           # Always include in tool list, never defer
+    max_result_chars: int = 250_000     # Max chars in tool result before truncation
+    activity_description: str = ""      # UI spinner text (e.g. "Reading file")
+    tool_use_summary_tpl: str = ""      # Template for context compaction summary
 
 
 class ToolEntry(BaseModel):
@@ -137,6 +161,7 @@ class ToolExecutionMeta(BaseModel):
     source: Literal["local", "mcp", "a2a", "subagent"] = "local"
     trace_ref: str | None = None
     retry_count: int = 0
+    activity_description: str = ""      # Copied from ToolMeta for UI consumption
 
 
 class RetrySafety(BaseModel):

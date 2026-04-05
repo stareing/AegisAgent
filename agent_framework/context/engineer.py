@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 
 from agent_framework.context.builder import ContextBuilder
 from agent_framework.context.compressor import ContextCompressor
+from agent_framework.context.post_compact_restorer import PostCompactRestorer
 from agent_framework.context.prefix_manager import PromptPrefixManager
 from agent_framework.context.source_provider import ContextSourceProvider
 from agent_framework.hooks.dispatcher import HookDispatchService
@@ -47,16 +48,24 @@ class ContextEngineer:
         builder: ContextBuilder | None = None,
         compressor: ContextCompressor | None = None,
         hook_executor: Any = None,
+        tool_registry: Any = None,
     ) -> None:
         self._source = source_provider or ContextSourceProvider()
         self._builder = builder or ContextBuilder()
         self._compressor = compressor or ContextCompressor()
         self._prefix_mgr = PromptPrefixManager()
+        self._post_compact_restorer = PostCompactRestorer()
         self._skill_prompt: str | None = None
         self._allow_compression = True
         self._force_include_memory = False
+        self._auto_compact_threshold: float = 0.7
         self._last_stats = ContextStats()
         self._hook_executor = hook_executor
+        # v4.2: Registry for template-based tool result summarization during SNIP
+        self._tool_registry = tool_registry
+        # v4.3: Time-based tool result clearing (lightest compaction stage)
+        from agent_framework.context.time_based_clearing import TimeBasedClearing
+        self._time_based_clearing = TimeBasedClearing()
         self._hook_dispatcher: HookDispatchService | None = (
             HookDispatchService(hook_executor) if hook_executor is not None else None
         )
@@ -103,27 +112,36 @@ class ContextEngineer:
 
         # Collect from each source
         tool_entries: list = context_materials.get("tool_entries", [])
-        system_core = self._source.collect_system_core(agent_config, runtime_info, tool_entries)
-        skill_addon = self._skill_prompt or self._source.collect_skill_addon(active_skill)
+        skill_addon_override = self._skill_prompt or self._source.collect_skill_addon(active_skill)
 
         # Inject skill catalog so LLM knows which skills are available
         skill_descriptions: list = context_materials.get("skill_descriptions", [])
         skill_catalog = self._source.collect_skill_catalog(skill_descriptions)
-        if skill_catalog and not skill_addon:
-            skill_addon = skill_catalog
-        elif skill_catalog and skill_addon:
-            skill_addon = f"{skill_addon}\n\n{skill_catalog}"
+        if skill_catalog and not skill_addon_override:
+            skill_addon_override = skill_catalog
+        elif skill_catalog and skill_addon_override:
+            skill_addon_override = f"{skill_addon_override}\n\n{skill_catalog}"
 
         # --- Frozen Prefix (§14.8) ---
-        # system_core + skill_addon form the prefix (identity-stable).
-        # If inputs haven't changed, reuse the cached prefix.
-        prefix = self._prefix_mgr.get_or_create(
-            system_core, skill_addon,
+        # v4.3: Use section-based prefix (per-section caching, volatile separation).
+        # build_prompt_sections produces independently-cached sections; only
+        # cached section hash changes trigger prefix rotation.
+        section_registry = self._source.build_prompt_sections(
+            agent_config, runtime_info, tool_entries, active_skill,
+        )
+        # Skill catalog is an extra section if present
+        if skill_addon_override:
+            from agent_framework.context.prompt_sections import prompt_section
+            section_registry.register(prompt_section(
+                "skill_catalog", lambda t=skill_addon_override: t,
+            ))
+        prefix = self._prefix_mgr.get_or_create_from_sections(
+            section_registry,
             token_counter=self._builder.calculate_tokens,
         )
         prefix_reused = (prefix.prefix_epoch > 1 or
                          (self._prefix_mgr.current_prefix is not None
-                          and not self._prefix_mgr.should_rotate(system_core, skill_addon)))
+                          and prefix.prefix_hash == self._prefix_mgr.current_prefix.prefix_hash))
         system_tokens = prefix.token_estimate
 
         # --- Session context (Gemini-style environment awareness) ---
@@ -161,6 +179,9 @@ class ContextEngineer:
         # In STATEFUL mode, compression would break delta indexing.
         is_stateful = context_materials.get("stateful_session", False)
         if not is_stateful and self._allow_compression:
+            # v4.3: Strip images before compression to prevent token bloat
+            from agent_framework.context.compressor import ContextCompressor as _CC
+            session_groups = _CC.strip_images(session_groups)
             fixed_tokens = system_tokens + memory_tokens
             target_session_tokens = max(0, budget - fixed_tokens)
             model_adapter = context_materials.get("model_adapter")
@@ -232,6 +253,87 @@ class ContextEngineer:
 
         total_tokens = self._builder.calculate_tokens(messages)
 
+        # --- Auto-compaction trigger ---
+        # If total tokens exceed auto_compact_threshold of budget and compression
+        # is allowed, run an additional SNIP pass on tool messages then restore
+        # recently-accessed files and active skill context.
+        if (
+            not is_stateful
+            and self._allow_compression
+            and budget > 0
+            and total_tokens > self._auto_compact_threshold * budget
+        ):
+            import logging as _logging
+            _auto_logger = _logging.getLogger(__name__)
+            _auto_logger.info(
+                "context.auto_compact_triggered tokens=%d threshold=%.0f%% budget=%d",
+                total_tokens,
+                self._auto_compact_threshold * 100,
+                budget,
+            )
+
+            target_session_tokens = max(0, budget - system_tokens - memory_tokens)
+            compact_groups = self._source.collect_session_groups(session_state)
+
+            # Staged auto-compaction (lightest → heaviest):
+            # Stage 1: Time-based clearing — free expired tool results
+            all_flat: list[Message] = []
+            for g in compact_groups:
+                all_flat.extend(g.messages)
+            if self._time_based_clearing.should_trigger(all_flat):
+                compact_groups = self._time_based_clearing.clear_old_tool_results(compact_groups)
+                _auto_logger.info("context.auto_compact.stage1_time_clearing")
+                stage1_tokens = sum(
+                    self._builder.calculate_tokens(g.messages) for g in compact_groups
+                )
+                if stage1_tokens <= target_session_tokens:
+                    _auto_logger.info("context.auto_compact.stage1_sufficient tokens=%d", stage1_tokens)
+                    compact_groups = compact_groups  # Already within budget
+                else:
+                    # Stage 2: SNIP — template-based tool result summarization
+                    from agent_framework.context.compressor import ContextCompressor
+                    snip_compressor = ContextCompressor(
+                        token_counter=self._builder.calculate_tokens,
+                        strategy="SNIP",
+                        tool_registry=self._tool_registry,
+                    )
+                    compact_groups = await snip_compressor.compress_groups_async(
+                        compact_groups, target_tokens=target_session_tokens,
+                    )
+            else:
+                # No time gap → go directly to SNIP
+                from agent_framework.context.compressor import ContextCompressor
+                snip_compressor = ContextCompressor(
+                    token_counter=self._builder.calculate_tokens,
+                    strategy="SNIP",
+                    tool_registry=self._tool_registry,
+                )
+                compact_groups = await snip_compressor.compress_groups_async(
+                    compact_groups, target_tokens=target_session_tokens,
+                )
+
+            # Rebuild messages with compacted groups
+            messages = list(prefix.messages)
+            for group in compact_groups:
+                messages.extend(group.messages)
+            if injection_parts:
+                messages.append(Message(
+                    role="user",
+                    content="<context-update>\n"
+                    + "\n\n".join(injection_parts)
+                    + "\n</context-update>",
+                ))
+            # Post-compact restoration
+            recently_accessed_files: list[str] = context_materials.get(
+                "recently_accessed_files", []
+            )
+            messages = self._post_compact_restorer.restore(
+                messages,
+                recently_accessed_files=recently_accessed_files,
+                active_skill=active_skill,
+            )
+            total_tokens = self._builder.calculate_tokens(messages)
+
         # Count session messages (excluding frozen prefix and trailing injection)
         injection_count = 1 if injection_parts else 0
         actual_session_msgs_count = len(messages) - len(prefix.messages) - injection_count
@@ -256,7 +358,45 @@ class ContextEngineer:
                 ),
             )
 
+        # v4.3: Mark cache breakpoints for provider-side KV cache optimization.
+        # Two breakpoints: (1) system prefix, (2) last session message before injection.
+        # Adapters that support caching (Anthropic) will inject cache_control markers;
+        # others (OpenAI/Doubao) silently ignore the field.
+        messages = self._mark_cache_breakpoints(messages, bool(injection_parts))
+
         return messages
+
+    @staticmethod
+    def _mark_cache_breakpoints(
+        messages: list[Message], has_injection: bool
+    ) -> list[Message]:
+        """Mark cache breakpoints on messages for provider-side KV cache reuse.
+
+        Two breakpoints (Claude Code pattern):
+        1. System prefix (messages[0]) — frozen across turns, highest cache value
+        2. Last session message before injection — stable prefix grows each turn
+
+        Returns a new list with cache_control set on marked messages.
+        """
+        if not messages:
+            return messages
+
+        result = list(messages)
+        cache_hint = {"type": "ephemeral"}
+
+        # Breakpoint 1: System prefix (always slot 0)
+        if result[0].role == "system":
+            result[0] = result[0].model_copy(update={"cache_control": cache_hint})
+
+        # Breakpoint 2: Last message before injection (or absolute last)
+        # Injection is the trailing <context-update> user message
+        last_session_idx = len(result) - (1 if has_injection else 0) - 1
+        if last_session_idx > 0 and last_session_idx < len(result):
+            result[last_session_idx] = result[last_session_idx].model_copy(
+                update={"cache_control": cache_hint}
+            )
+
+        return result
 
     def apply_context_policy(self, policy: ContextPolicy) -> None:
         """Apply run-scoped context policy. Called by RunCoordinator.

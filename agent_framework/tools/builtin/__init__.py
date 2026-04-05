@@ -9,7 +9,7 @@ Tool categories (aligned with system tools spec):
 - interaction: ask_user
 - system: bash_exec, bash_output, bash_stop, task_stop, kill_shell, run_command, get_env
 - network: web_fetch, web_search
-- delegation: spawn_agent, check_spawn_result, send_message, close_agent
+- delegation: spawn_agent, check_spawn_result, send_message, close_agent, list_team_members
 - control: task_create, task_update, task_list, task_get, slash_command, exit_plan_mode
 - memory_admin: list_memories, forget_memory, clear_memories
 - reasoning: think
@@ -90,7 +90,7 @@ def register_all_builtins(
     # from agent_framework.tools.builtin.system import run_command, get_env
     #   run_command — redundant with bash_exec
     #   get_env — bash "echo $VAR" covers this
-    from agent_framework.tools.builtin.spawn_agent import spawn_agent, check_spawn_result, send_message, close_agent
+    from agent_framework.tools.builtin.spawn_agent import spawn_agent, check_spawn_result, send_message, close_agent, list_team_members
     from agent_framework.tools.builtin.team_tools import team, mail
     from agent_framework.tools.builtin.code_edit import edit_file  # notebook_edit: niche, use write_file
     from agent_framework.tools.builtin.search import grep_search, glob_files
@@ -123,7 +123,7 @@ def register_all_builtins(
         # Reasoning
         think,
         # Delegation
-        spawn_agent, check_spawn_result, send_message, close_agent,
+        spawn_agent, check_spawn_result, send_message, close_agent, list_team_members,
         # Team
         team, mail,
         # Skills
@@ -144,9 +144,25 @@ def register_all_builtins(
     if control_tools_enabled:
         from agent_framework.tools.builtin.control_tools import (
             # slash_command,  # integration-layer specific, not for agent
+            enter_plan_mode,
             exit_plan_mode,
+            write_plan,
         )
-        builtins.extend([exit_plan_mode])
+        builtins.extend([enter_plan_mode, exit_plan_mode, write_plan])
+
+    # Notebook editing (v4.0)
+    from agent_framework.tools.builtin.notebook import notebook_edit
+    builtins.append(notebook_edit)
+
+    # Cron scheduling tools (v4.0)
+    from agent_framework.tools.builtin.cron_tools import (
+        cron_create, cron_list, cron_delete,
+    )
+    builtins.extend([cron_create, cron_list, cron_delete])
+
+    # Tool search for deferred tools (v4.0)
+    from agent_framework.tools.builtin_tool_search import tool_search
+    builtins.append(tool_search)
 
     count = 0
     for func in builtins:

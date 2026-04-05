@@ -438,7 +438,7 @@ class TestRegistration:
         from agent_framework.tools.catalog import GlobalToolCatalog
         catalog = GlobalToolCatalog()
         count = register_all_builtins(catalog)
-        assert count >= 18  # core tools (no shell)
+        assert count >= 24  # core tools + v4.0 tools (no shell)
 
         # Shell tools should NOT be registered by default
         assert not self._has(catalog, "bash_exec")
@@ -447,7 +447,13 @@ class TestRegistration:
         assert not self._has(catalog, "run_command")
         assert not self._has(catalog, "get_env")
         assert not self._has(catalog, "file_exists")
-        assert not self._has(catalog, "notebook_edit")
+
+        # v4.0: notebook_edit, cron tools, tool_search, plan tools now registered
+        assert self._has(catalog, "notebook_edit")
+        assert self._has(catalog, "cron_create")
+        assert self._has(catalog, "tool_search")
+        assert self._has(catalog, "enter_plan_mode")
+        assert self._has(catalog, "write_plan")
 
         # Core tools should be registered
         assert self._has(catalog, "read_file")

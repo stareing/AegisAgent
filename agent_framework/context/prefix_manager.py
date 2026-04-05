@@ -19,10 +19,13 @@ NOT rotation triggers (suffix-only changes):
 from __future__ import annotations
 
 import hashlib
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from agent_framework.models.context import FrozenPromptPrefix
 from agent_framework.models.message import Message
+
+if TYPE_CHECKING:
+    from agent_framework.context.prompt_sections import PromptSectionRegistry
 
 
 class PromptPrefixManager:
@@ -72,6 +75,50 @@ class PromptPrefixManager:
             prefix_hash=current_hash,
             token_estimate=token_est,
             includes_skill_addon=skill_addon is not None,
+        )
+        return self._cached
+
+    def get_or_create_from_sections(
+        self,
+        section_registry: PromptSectionRegistry,
+        token_counter: Callable[[list[Message]], int] | None = None,
+    ) -> FrozenPromptPrefix:
+        """Build prefix from section registry. Only cached sections affect hash.
+
+        Cached sections form the stable prefix (hash-checked for reuse).
+        Volatile sections are appended after cached sections but do NOT
+        participate in the hash — so volatile changes alone never trigger
+        prefix rotation.
+
+        Keeps existing get_or_create() for backward compatibility.
+        """
+        cached_parts, volatile_parts = section_registry.resolve_all()
+        cached_hash = section_registry.compute_cached_hash()
+
+        if self._cached and self._cached.prefix_hash == cached_hash:
+            # Prefix still valid — but volatile parts may have changed
+            # Rebuild only if volatile parts exist
+            if not volatile_parts:
+                return self._cached
+
+        # Build new prefix: cached sections + volatile sections
+        all_parts = cached_parts + volatile_parts
+        system_text = "\n\n".join(all_parts)
+        system_msg = Message(role="system", content=system_text)
+
+        token_est = 0
+        if token_counter:
+            token_est = token_counter([system_msg])
+
+        self._epoch += 1
+        self._cached = FrozenPromptPrefix(
+            prefix_epoch=self._epoch,
+            messages=[system_msg],
+            prefix_hash=cached_hash,
+            token_estimate=token_est,
+            includes_skill_addon=any(
+                s.name == "skill" for s in section_registry._sections
+            ),
         )
         return self._cached
 

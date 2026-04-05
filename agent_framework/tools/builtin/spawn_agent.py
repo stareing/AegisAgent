@@ -34,6 +34,7 @@ logger = get_logger(__name__)
         "Spawn a sub-agent for a sub-task. "
         "mode='EPHEMERAL' (default): one-shot, destroyed after completion. "
         "mode='LONG_LIVED': agent stays alive — use send_message(spawn_id) for follow-ups. "
+        "mode='FORK': inherits parent context for prompt cache sharing, always async. "
         "wait=true (default): blocks until done. wait=false: returns spawn_id, collect later with check_spawn_result(batch_pull=true)."
     ),
     category="delegation",
@@ -41,6 +42,9 @@ logger = get_logger(__name__)
     tags=["system", "delegation", "subagent"],
     namespace=SYSTEM_NAMESPACE,
     source="subagent",
+    search_hint="spawn create sub agent worker",
+    activity_description="Spawning agent",
+    prompt="Spawn a sub-agent to handle a task autonomously. Sub-agents have restricted tool access.",
 )
 async def spawn_agent(
     task_input: str,
@@ -54,6 +58,7 @@ async def spawn_agent(
     wait: bool = True,
     collection_strategy: str = "HYBRID",
     label: str = "",
+    team_name: str | None = None,
 ) -> dict:
     """Spawn a sub-agent to handle a specific sub-task.
 
@@ -117,7 +122,12 @@ async def execute_spawn_agent(executor: ToolExecutor, args: dict) -> dict[str, A
         token_budget=int(args.get("token_budget", 4096)),
         max_iterations=int(args.get("max_iterations", 10)),
         deadline_ms=int(args.get("deadline_ms", 0)),
+        team_name=args.get("team_name"),
     )
+    # FORK mode: always async
+    if spec.mode == SpawnMode.FORK:
+        wait = False
+
     if spec.context_seed is None:
         builder = ContextBuilder()
         if context_mode == SpawnContextMode.MINIMAL:
@@ -192,6 +202,8 @@ async def execute_spawn_agent(executor: ToolExecutor, args: dict) -> dict[str, A
     tags=["system", "delegation", "subagent"],
     namespace=SYSTEM_NAMESPACE,
     source="subagent",
+    is_read_only=True,
+    search_hint="check agent result status",
 )
 async def check_spawn_result(
     spawn_id: str = "",
@@ -242,7 +254,19 @@ async def execute_check_spawn_result(executor: ToolExecutor, args: dict) -> dict
     wait = args.get("wait", True)
     result = await executor._delegation.collect_subagent_result(spawn_id, wait=wait)
     if result is None:
-        return {"spawn_id": spawn_id, "status": "RUNNING"}
+        # v4.2: Include progress info for running agents
+        running_info: dict = {"spawn_id": spawn_id, "status": "RUNNING"}
+        runtime = getattr(executor._delegation, "_sub_agent_runtime", None)
+        if runtime is not None:
+            handle = runtime._active.get(spawn_id)
+            if handle is not None and handle.progress is not None:
+                running_info["progress"] = {
+                    "tool_use_count": handle.progress.tool_use_count,
+                    "cumulative_output_tokens": handle.progress.cumulative_output_tokens,
+                    "recent_activities": handle.progress.recent_activities,
+                    "auto_backgrounded": handle.progress.auto_backgrounded,
+                }
+        return running_info
     return DelegationExecutor.summarize_result(result).model_dump()
 
 
@@ -258,6 +282,7 @@ async def execute_check_spawn_result(executor: ToolExecutor, args: dict) -> dict
     tags=["system", "delegation", "subagent"],
     namespace=SYSTEM_NAMESPACE,
     source="subagent",
+    search_hint="send message to agent communicate",
 )
 async def send_message(
     spawn_id: str,
@@ -303,6 +328,8 @@ async def execute_send_message(executor: ToolExecutor, args: dict) -> dict:
     tags=["system", "delegation", "subagent"],
     namespace=SYSTEM_NAMESPACE,
     source="subagent",
+    is_destructive=True,
+    search_hint="close stop agent",
 )
 async def close_agent(
     spawn_id: str,
@@ -417,3 +444,52 @@ def ensure_lead_collector(executor: ToolExecutor, strategy_str: str) -> None:
         strategy=strategy.value,
         poll_interval_ms=executor._collection_poll_interval_ms,
     )
+
+
+@tool(
+    name="list_team_members",
+    description=(
+        "List all agents in a named team with their current status and progress. "
+        "Use to discover teammates and coordinate work."
+    ),
+    category="delegation",
+    require_confirm=False,
+    tags=["system", "delegation", "subagent", "team"],
+    namespace=SYSTEM_NAMESPACE,
+    source="subagent",
+    is_read_only=True,
+    search_hint="list team members agents",
+)
+async def list_team_members(
+    team_name: str,
+) -> dict:
+    """List all agents in a named team.
+
+    Args:
+        team_name: The team name to query.
+
+    Returns:
+        Dict with team_name, members list (spawn_id, status, progress), and count.
+    """
+    raise RuntimeError(
+        "list_team_members should not be called directly. "
+        "It must be routed through the ToolExecutor."
+    )
+
+
+async def execute_list_team_members(executor: ToolExecutor, args: dict) -> dict:
+    """Execute list_team_members via ToolExecutor-owned dependencies/state."""
+    team_name = args.get("team_name", "")
+    if not team_name:
+        return {"error": "team_name is required"}
+
+    runtime = getattr(executor._delegation, "_sub_agent_runtime", None)
+    if runtime is None:
+        return {"error": "SubAgentRuntime not configured"}
+
+    members = runtime.get_team_members(team_name)
+    return {
+        "team_name": team_name,
+        "count": len(members),
+        "members": members,
+    }

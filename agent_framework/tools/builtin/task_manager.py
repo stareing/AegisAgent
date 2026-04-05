@@ -31,6 +31,7 @@ from agent_framework.tools.schemas.builtin_args import SYSTEM_NAMESPACE
     require_confirm=False,
     tags=["system", "control", "task"],
     namespace=SYSTEM_NAMESPACE,
+    search_hint="create task todo item",
 )
 def task_create(
     subject: str,
@@ -70,6 +71,7 @@ def task_create(
     require_confirm=False,
     tags=["system", "control", "task"],
     namespace=SYSTEM_NAMESPACE,
+    search_hint="update task status progress",
 )
 def task_update(
     task_id: int,
@@ -117,6 +119,8 @@ def task_update(
     require_confirm=False,
     tags=["system", "control", "task"],
     namespace=SYSTEM_NAMESPACE,
+    is_read_only=True,
+    search_hint="list tasks todo items",
 )
 def task_list() -> str:
     """List all tasks with summary.
@@ -136,6 +140,8 @@ def task_list() -> str:
     require_confirm=False,
     tags=["system", "control", "task"],
     namespace=SYSTEM_NAMESPACE,
+    is_read_only=True,
+    search_hint="get task details",
 )
 def task_get(task_id: int) -> str:
     """Get a single task.

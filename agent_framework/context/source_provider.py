@@ -10,6 +10,7 @@ from agent_framework.models.memory import MemoryRecord
 from agent_framework.models.message import Message
 
 if TYPE_CHECKING:
+    from agent_framework.context.prompt_sections import PromptSectionRegistry
     from agent_framework.models.agent import AgentConfig, Skill
     from agent_framework.models.session import SessionSnapshot, SessionState
 
@@ -192,6 +193,120 @@ class ContextSourceProvider:
             lines.append(f"  </{tag}>")
         lines.append("</available-tools>")
         return "\n".join(lines)
+
+    def build_prompt_sections(
+        self,
+        agent_config: AgentConfig,
+        runtime_info: dict | None = None,
+        tool_entries: list | None = None,
+        active_skill: Skill | None = None,
+    ) -> PromptSectionRegistry:
+        """Build system prompt as independently-cached sections.
+
+        Sections (ordered):
+        - identity: agent system prompt (cached)
+        - plan_mode: plan mode addon (cached)
+        - environment: OS, cwd (cached)
+        - capabilities: agent capabilities (cached)
+        - investigation: investigation protocol (cached)
+        - tools: available tools listing (cached)
+        - skill: active skill addon (cached)
+        - mcp_instructions: MCP server instructions (volatile)
+
+        Does NOT replace collect_system_core() — that method remains for
+        backward compatibility.
+        """
+        from agent_framework.context.prompt_sections import (
+            PromptSectionRegistry,
+            prompt_section,
+        )
+
+        registry = PromptSectionRegistry()
+
+        # Identity section
+        identity_text = f"<system-identity>\n{agent_config.system_prompt}\n</system-identity>"
+        registry.register(prompt_section(
+            "identity",
+            lambda t=identity_text: t,
+        ))
+
+        # Plan mode section
+        if runtime_info and runtime_info.get("approval_mode") == "PLAN":
+            from agent_framework.agent.prompt_templates import PLAN_MODE_ADDON
+            plan_text = f"<plan-mode-active>\n{PLAN_MODE_ADDON}\n</plan-mode-active>"
+            registry.register(prompt_section(
+                "plan_mode",
+                lambda t=plan_text: t,
+            ))
+
+        # Environment section (extract from existing logic)
+        if runtime_info:
+            all_known = (
+                self._ENV_KEYS | self._STATIC_CAP_KEYS
+                | self._EXCLUDED_RUNTIME_KEYS | self._META_KEYS
+            )
+            env_lines = [
+                f"  <{k}>{_xml_escape(str(v))}</{k}>"
+                for k, v in runtime_info.items()
+                if k in self._ENV_KEYS
+            ]
+            other_lines = [
+                f"  <{k}>{_xml_escape(str(v))}</{k}>"
+                for k, v in runtime_info.items()
+                if k not in all_known
+            ]
+            if env_lines or other_lines:
+                env_text = (
+                    "<runtime-environment>\n"
+                    + "\n".join(env_lines + other_lines)
+                    + "\n</runtime-environment>"
+                )
+                registry.register(prompt_section("environment", lambda t=env_text: t))
+
+        # Capabilities section
+        if runtime_info:
+            cap_lines = [
+                f"  <{k}>{_xml_escape(str(v))}</{k}>"
+                for k, v in runtime_info.items()
+                if k in self._STATIC_CAP_KEYS
+            ]
+            if cap_lines:
+                cap_text = (
+                    "<agent-capabilities>\n"
+                    + "\n".join(cap_lines)
+                    + "\n</agent-capabilities>"
+                )
+                registry.register(prompt_section("capabilities", lambda t=cap_text: t))
+
+        # Investigation protocol section
+        if runtime_info and runtime_info.get("investigation_mode") == "codebase_analysis":
+            expectation = _xml_escape(str(runtime_info.get("investigation_expectation", "")))
+            inv_text = (
+                "<investigation-protocol type=\"codebase-analysis\">\n"
+                "  <required>true</required>\n"
+                "  <rules>\n"
+                "    <rule>Start with code search / file discovery before summarizing architecture.</rule>\n"
+                "    <rule>Inspect multiple implementation files, not only entrypoints or __init__ files.</rule>\n"
+                "    <rule>Cross-check at least entry, runtime, and one downstream subsystem relevant to the question.</rule>\n"
+                "    <rule>In the final answer, clearly separate verified facts from inferences.</rule>\n"
+                f"    <rule>{expectation}</rule>\n"
+                "  </rules>\n"
+                "</investigation-protocol>"
+            )
+            registry.register(prompt_section("investigation", lambda t=inv_text: t))
+
+        # Tools section
+        if tool_entries:
+            tool_text = self._format_tool_catalog(tool_entries)
+            if tool_text:
+                registry.register(prompt_section("tools", lambda t=tool_text: t))
+
+        # Skill section
+        skill_addon = self.collect_skill_addon(active_skill)
+        if skill_addon:
+            registry.register(prompt_section("skill", lambda t=skill_addon: t))
+
+        return registry
 
     def collect_skill_addon(self, active_skill: Skill | None) -> str | None:
         """Get skill-specific system prompt addon, wrapped in XML."""

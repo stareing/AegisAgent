@@ -319,6 +319,14 @@ _STAGE_NAMES = {
     require_confirm=True,
     tags=["system", "file", "write"],
     namespace=SYSTEM_NAMESPACE,
+    is_destructive=True,
+    search_hint="edit modify file replace text",
+    activity_description="Editing file",
+    prompt=(
+        "Edit a file by replacing an exact string match. The old_string must match "
+        "exactly including whitespace and indentation."
+    ),
+    tool_use_summary_tpl="Edited {file_path}",
 )
 def edit_file(
     file_path: str,

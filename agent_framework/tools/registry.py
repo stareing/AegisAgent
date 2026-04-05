@@ -32,6 +32,9 @@ class ToolRegistry:
         qname = _qualified_name(entry.meta)
         self._tools[qname] = entry
         self._bare_to_qualified[entry.meta.name] = qname
+        # Register aliases so they resolve to the same qualified name
+        for alias in entry.meta.aliases:
+            self._bare_to_qualified[alias] = qname
 
     # Alias for backward compatibility
     add = register
@@ -41,6 +44,8 @@ class ToolRegistry:
         if qname and qname in self._tools:
             entry = self._tools.pop(qname)
             self._bare_to_qualified.pop(entry.meta.name, None)
+            for alias in entry.meta.aliases:
+                self._bare_to_qualified.pop(alias, None)
             return True
         return False
 
@@ -69,23 +74,38 @@ class ToolRegistry:
             result = [e for e in result if e.meta.source == source]
         return result
 
-    def export_schemas(self, whitelist: list[str] | None = None) -> list[dict]:
+    def export_schemas(
+        self,
+        whitelist: list[str] | None = None,
+        include_deferred: bool = False,
+    ) -> list[dict]:
         """Export tool schemas in OpenAI function-calling format.
 
         Uses bare name in schema for LLM consumption.
+        Deferred tools (should_defer=True) are excluded by default unless
+        include_deferred is True or they appear in the whitelist.
         """
         entries = list(self._tools.values())
         if whitelist is not None:
             wl_set = set(whitelist)
             entries = [e for e in entries if e.meta.name in wl_set]
+        elif not include_deferred:
+            # v4.1: always_load tools are included even when deferred
+            entries = [
+                e for e in entries
+                if not e.meta.should_defer or e.meta.always_load
+            ]
 
         schemas = []
         for entry in entries:
+            description = entry.meta.description
+            if entry.meta.prompt:
+                description = f"{description}\n\n{entry.meta.prompt}" if description else entry.meta.prompt
             schema: dict = {
                 "type": "function",
                 "function": {
                     "name": entry.meta.name,
-                    "description": entry.meta.description,
+                    "description": description,
                 },
             }
             if entry.meta.parameters_schema:
@@ -168,11 +188,15 @@ class ScopedToolRegistry:
 
         schemas = []
         for entry in entries:
+            # v4.1: Append prompt to description (same as main ToolRegistry)
+            description = entry.meta.description
+            if entry.meta.prompt:
+                description = f"{description}\n\n{entry.meta.prompt}" if description else entry.meta.prompt
             schema: dict = {
                 "type": "function",
                 "function": {
                     "name": entry.meta.name,
-                    "description": entry.meta.description,
+                    "description": description,
                 },
             }
             if entry.meta.parameters_schema:

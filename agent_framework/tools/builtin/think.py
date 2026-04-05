@@ -21,6 +21,8 @@ from agent_framework.tools.schemas.builtin_args import SYSTEM_NAMESPACE
     require_confirm=False,
     tags=["system", "reasoning"],
     namespace=SYSTEM_NAMESPACE,
+    is_read_only=True,
+    search_hint="think reason plan internally",
 )
 def think(thought: str) -> str:
     """Log a thought without taking any action.

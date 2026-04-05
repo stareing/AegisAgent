@@ -36,24 +36,33 @@ def set_skill_runtime(skill_router: Any, context_engineer: Any) -> None:
     ),
     category="skill",
     require_confirm=False,
+    is_read_only=True,
+    search_hint="invoke activate skill",
 )
-def invoke_skill(skill_id: str, arguments: str = "") -> str:
-    """Invoke a skill and return its full prompt for the LLM to follow.
+def invoke_skill(skill_id: str, arguments: str = "") -> dict:
+    """Invoke a skill and return structured result for the LLM.
 
     Args:
         skill_id: The ID of the skill to invoke.
         arguments: Free-form arguments from the user's message.
 
     Returns:
-        The preprocessed skill prompt body.
+        Dict with ``success``, ``content``, metadata on success;
+        ``success=False`` and ``error`` on failure.
     """
     if _skill_router is None:
-        return "ERROR: Skill system not initialized"
+        return {"success": False, "error": "Skill system not initialized"}
 
     skill = _skill_router.get_skill(skill_id)
     if skill is None:
         available = [s.skill_id for s in _skill_router.list_skills()]
-        return f"ERROR: Skill '{skill_id}' not found. Available: {', '.join(available)}"
+        return {
+            "success": False,
+            "error": (
+                f"Skill '{skill_id}' not found. "
+                f"Available: {', '.join(available)}"
+            ),
+        }
 
     # File-based skill: lazy load body from SKILL.md
     if skill.source_path:
@@ -65,7 +74,10 @@ def invoke_skill(skill_id: str, arguments: str = "") -> str:
         try:
             body = load_skill_body(skill.source_path)
         except FileNotFoundError:
-            return f"ERROR: Skill file not found: {skill.source_path}"
+            return {
+                "success": False,
+                "error": f"Skill file not found: {skill.source_path}",
+            }
 
         # skill_dir = directory containing SKILL.md (for ${SKILL_DIR} and cwd)
         skill_dir = str(Path(skill.source_path).parent)
@@ -85,7 +97,15 @@ def invoke_skill(skill_id: str, arguments: str = "") -> str:
             args_preview=arguments[:100],
             body_length=len(body),
         )
-        return body
+        return {
+            "success": True,
+            "content": body,
+            "skill_id": skill_id,
+            "skill_name": skill.name,
+            "skill_dir": skill_dir,
+            "source": skill.skill_source,
+            "execution_mode": skill.execution_mode,
+        }
 
     # Config-based skill: return system_prompt_addon as the instruction
     if skill.system_prompt_addon:
@@ -98,6 +118,17 @@ def invoke_skill(skill_id: str, arguments: str = "") -> str:
         addon = skill.system_prompt_addon
         if arguments:
             addon = f"{addon}\n\nARGUMENTS: {arguments}"
-        return addon
+        return {
+            "success": True,
+            "content": addon,
+            "skill_id": skill_id,
+            "skill_name": skill.name,
+            "skill_dir": None,
+            "source": skill.skill_source,
+            "execution_mode": skill.execution_mode,
+        }
 
-    return f"Skill '{skill_id}' has no content to invoke."
+    return {
+        "success": False,
+        "error": f"Skill '{skill_id}' has no content to invoke.",
+    }

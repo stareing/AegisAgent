@@ -428,8 +428,10 @@ class TestInvokeSkillTool:
         set_skill_runtime(router, MagicMock())
 
         result = invoke_skill("greet", arguments="Alice")
-        assert "Alice" in result
-        assert "politely" in result
+        assert isinstance(result, dict)
+        assert result["success"] is True
+        assert "Alice" in result["content"]
+        assert "politely" in result["content"]
 
     def test_invoke_config_skill(self):
         from agent_framework.agent.skill_router import SkillRouter
@@ -443,8 +445,10 @@ class TestInvokeSkillTool:
         set_skill_runtime(router, MagicMock())
 
         result = invoke_skill("translate", arguments="Hello World")
-        assert "translator" in result
-        assert "Hello World" in result
+        assert isinstance(result, dict)
+        assert result["success"] is True
+        assert "translator" in result["content"]
+        assert "Hello World" in result["content"]
 
     def test_invoke_nonexistent_skill(self):
         from agent_framework.agent.skill_router import SkillRouter
@@ -454,15 +458,18 @@ class TestInvokeSkillTool:
         router = SkillRouter()
         set_skill_runtime(router, MagicMock())
         result = invoke_skill("nonexistent")
-        assert "ERROR" in result
-        assert "not found" in result
+        assert isinstance(result, dict)
+        assert result["success"] is False
+        assert "not found" in result["error"]
 
     def test_invoke_not_initialized(self):
         from agent_framework.tools.builtin_skills import (invoke_skill,
                                                           set_skill_runtime)
         set_skill_runtime(None, None)
         result = invoke_skill("anything")
-        assert "not initialized" in result
+        assert isinstance(result, dict)
+        assert result["success"] is False
+        assert "not initialized" in result["error"]
 
 
 # =====================================================================
@@ -591,9 +598,11 @@ class TestComplexSkillSupport:
 
         result = invoke_skill("my-complex-skill", arguments="do the thing")
         # ${SKILL_DIR} should be resolved to actual path
-        assert str(skill_dir) in result
-        assert "do the thing" in result
-        assert "${SKILL_DIR}" not in result
+        assert isinstance(result, dict)
+        assert result["success"] is True
+        assert str(skill_dir) in result["content"]
+        assert "do the thing" in result["content"]
+        assert "${SKILL_DIR}" not in result["content"]
 
     def test_full_complex_skill_structure(self, tmp_path):
         """Test a skill with structure mirroring skill-creator."""

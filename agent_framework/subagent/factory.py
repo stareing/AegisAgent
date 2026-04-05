@@ -162,6 +162,11 @@ class SubAgentFactory:
             spec.tool_name_whitelist,
         )
 
+        # v4.2: Worker mode — restrict delegation tools
+        if spec.is_worker:
+            from agent_framework.models.subagent import WORKER_BLOCKED_TOOLS
+            allowed_names = [n for n in allowed_names if n not in WORKER_BLOCKED_TOOLS]
+
         tool_registry = ScopedToolRegistry(
             source=self._parent_deps.tool_registry,
             whitelist=allowed_names,

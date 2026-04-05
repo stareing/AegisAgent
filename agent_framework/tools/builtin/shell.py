@@ -43,6 +43,14 @@ __all__ = [
     require_confirm=True,
     tags=["system", "shell", "dangerous"],
     namespace=SYSTEM_NAMESPACE,
+    is_destructive=True,
+    search_hint="run shell command bash terminal",
+    activity_description="Running command",
+    prompt=(
+        "Execute a shell command. Use for system operations, builds, tests, and git commands. "
+        "Avoid using for file operations that have dedicated tools."
+    ),
+    tool_use_summary_tpl="Ran command",
 )
 async def bash_exec(
     command: str,
@@ -86,6 +94,9 @@ async def bash_exec(
     require_confirm=False,
     tags=["system", "shell"],
     namespace=SYSTEM_NAMESPACE,
+    is_read_only=True,
+    search_hint="get command output background",
+    activity_description="Reading output",
 )
 async def bash_output(
     task_id: str,
@@ -130,6 +141,8 @@ async def bash_output(
     require_confirm=False,
     tags=["system", "shell"],
     namespace=SYSTEM_NAMESPACE,
+    is_destructive=True,
+    search_hint="stop kill process",
 )
 def bash_stop(task_id: str) -> dict:
     """Stop a specific background task.
@@ -155,6 +168,8 @@ def bash_stop(task_id: str) -> dict:
     require_confirm=False,
     tags=["system", "shell", "background", "task"],
     namespace=SYSTEM_NAMESPACE,
+    is_destructive=True,
+    search_hint="stop kill background task",
 )
 def task_stop(task_id: str) -> dict:
     """Compatibility alias for stopping one background shell task.
@@ -176,6 +191,8 @@ def task_stop(task_id: str) -> dict:
     require_confirm=True,
     tags=["system", "shell", "dangerous"],
     namespace=SYSTEM_NAMESPACE,
+    is_destructive=True,
+    search_hint="kill shell session",
 )
 async def kill_shell() -> str:
     """Kill the persistent shell process and all background tasks.

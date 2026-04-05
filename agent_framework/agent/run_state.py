@@ -224,7 +224,17 @@ class RunStateController:
 
         Formatting is delegated to MessageProjector.
         This method only commits the projected messages.
+        v4.3: Stamps assistant messages with metadata.timestamp for
+        time-based clearing to determine cache staleness.
         """
+        from datetime import datetime, timezone
         messages = self._projector.project_iteration(iteration_result)
+        now_iso = datetime.now(timezone.utc).isoformat()
         for msg in messages:
+            # v4.3: Add timestamp to assistant messages for time-based clearing
+            if msg.role == "assistant":
+                existing = msg.metadata or {}
+                msg = msg.model_copy(update={
+                    "metadata": {**existing, "timestamp": now_iso}
+                })
             session_state.append_message(msg)

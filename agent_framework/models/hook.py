@@ -65,6 +65,17 @@ class HookPoint(str, Enum):
     AFTER_COMPACTION = "context.after_compaction"    # Post-compaction observation
     MODEL_RESOLVE = "model.resolve"                 # Before model selection
 
+    # Agent definition lifecycle
+    AGENT_DEFINITION_LOADED = "agent_definition.loaded"  # After definition loaded
+
+    # Plan mode transitions
+    PLAN_MODE_ENTERED = "plan_mode.entered"         # Entered plan mode
+    PLAN_MODE_EXITED = "plan_mode.exited"           # Exited plan mode
+
+    # Worktree lifecycle
+    WORKTREE_ENTERED = "worktree.entered"           # Worktree session started
+    WORKTREE_EXITED = "worktree.exited"             # Worktree session ended
+
 
 # Hook points that allow DENY action
 DENIABLE_HOOK_POINTS: frozenset[HookPoint] = frozenset({

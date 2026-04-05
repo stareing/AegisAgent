@@ -61,6 +61,8 @@ class ContextConfig(BaseModel):
     identifier_preservation: bool = True
     # Provider context window override (0 = auto-detect from adapter)
     provider_context_window_override: int = 0
+    # Auto-compaction trigger: compress when token usage exceeds this ratio of budget
+    auto_compact_threshold: float = 0.7
     # Bootstrap budget limits
     bootstrap_max_chars_per_file: int = 50_000
     bootstrap_max_total_chars: int = 200_000

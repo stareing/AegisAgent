@@ -14,12 +14,15 @@ class CompressionStrategy(str, Enum):
     SUMMARIZATION: LLM-based incremental summarization (default).
     TRUNCATION: Drop oldest groups, keep most recent N.
     HYBRID: Summarize old groups, keep recent N verbatim.
+    SNIP: Replace long tool outputs with truncated markers, preserving head/tail.
     NONE: Never compress — fail if budget exceeded.
     """
 
     SUMMARIZATION = "SUMMARIZATION"
     TRUNCATION = "TRUNCATION"
     HYBRID = "HYBRID"
+    SNIP = "SNIP"
+    PARTIAL = "PARTIAL"
     NONE = "NONE"
 
     # Legacy alias

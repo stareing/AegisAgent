@@ -48,6 +48,18 @@ def tool(
     tags: list[str] | None = None,
     namespace: str | None = None,
     source: str = "local",
+    concurrency_class: str = "non_concurrent",
+    # --- Claude Code aligned fields (v4.1) ---
+    prompt: str = "",
+    aliases: list[str] | None = None,
+    search_hint: str = "",
+    is_read_only: bool = False,
+    is_destructive: bool = False,
+    should_defer: bool = False,
+    always_load: bool = False,
+    max_result_chars: int = 250_000,
+    activity_description: str = "",
+    tool_use_summary_tpl: str = "",
 ) -> Callable:
     """Decorator to register a function as a tool.
 
@@ -74,6 +86,17 @@ def tool(
             tags=tags or [],
             source=source,
             namespace=namespace,
+            concurrency_class=concurrency_class,
+            prompt=prompt,
+            aliases=aliases or [],
+            search_hint=search_hint,
+            is_read_only=is_read_only,
+            is_destructive=is_destructive,
+            should_defer=should_defer,
+            always_load=always_load,
+            max_result_chars=max_result_chars,
+            activity_description=activity_description,
+            tool_use_summary_tpl=tool_use_summary_tpl,
         )
 
         func.__tool_meta__ = meta  # type: ignore[attr-defined]

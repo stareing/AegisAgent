@@ -282,6 +282,7 @@ class AgentFramework:
             builder=builder,
             compressor=compressor,
             hook_executor=self._hook_executor,
+            tool_registry=self._registry,
         )
 
         # Skill router — load declarative skills from config
@@ -298,25 +299,38 @@ class AgentFramework:
                 temperature_override=skill_def.temperature_override,
             ))
 
-        # Load file-based skills from directories (SKILL.md)
-        # Searches both "skills/" and ".skills/" (dot-prefixed, like .agent-team/)
+        # Load file-based skills from prioritized directories (SKILL.md)
+        # Priority ladder: builtin(0) → user(1) → project(2) → policy(3) → extra(4)
         import pathlib
-        skill_dirs: list[pathlib.Path] = []
-        for skill_dir_name in ("skills", ".skills"):
-            project_skills = pathlib.Path.cwd() / skill_dir_name
-            if project_skills.is_dir():
-                skill_dirs.append(project_skills)
-        user_skills = pathlib.Path.home() / ".agent" / "skills"
-        if user_skills.is_dir():
-            skill_dirs.append(user_skills)
-        for extra_dir in self.config.skills.directories:
-            p = pathlib.Path(extra_dir)
-            if p.is_dir():
-                skill_dirs.append(p)
-        if skill_dirs:
-            file_count = skill_router.load_file_skills(skill_dirs)
-            logger.info("skills.file_loaded", count=file_count,
-                        dirs=[str(d) for d in skill_dirs])
+        user_skill_dirs = [pathlib.Path.home() / ".agent" / "skills"]
+        project_skill_dirs = [
+            pathlib.Path.cwd() / d for d in ("skills", ".skills")
+        ]
+        policy_dirs = [
+            pathlib.Path(d) for d in self.config.skills.directories
+        ]
+
+        file_count = skill_router.load_all_skills(
+            user_dirs=[d for d in user_skill_dirs if d.is_dir()],
+            project_dirs=[d for d in project_skill_dirs if d.is_dir()],
+            extra_dirs=[d for d in policy_dirs if d.is_dir()],
+        )
+        if file_count:
+            logger.info("skills.file_loaded", count=file_count)
+
+        # Agent definition loader (v4.0) — discover agent type definitions
+        from agent_framework.agent.definition import AgentDefinitionLoader
+        self._definition_loader = AgentDefinitionLoader(
+            extra_directories=getattr(self.config, "agent_definition_dirs", None),
+            load_builtins=True,
+        )
+        self._agent_definitions = self._definition_loader.load_all()
+        if self._agent_definitions:
+            logger.info(
+                "agent_definitions.available",
+                count=len(self._agent_definitions),
+                ids=list(self._agent_definitions.keys()),
+            )
 
         # Plugin system — discover, load, and enable plugins (OC-compatible)
         self._plugin_registry_obj: Any = None
@@ -470,6 +484,76 @@ class AgentFramework:
         self._coordinator._notification_channel.set_interaction_channel(
             self._interaction_channel
         )
+
+        # ---------------------------------------------------------------
+        # v4.0 Runtime Wiring — connect new features to the framework
+        # ---------------------------------------------------------------
+
+        # Plan Mode Controller — binds to control tools and coordinator
+        from agent_framework.agent.plan_mode import PlanModeController
+        self._plan_mode_controller = PlanModeController()
+        self._coordinator._plan_mode_controller = self._plan_mode_controller
+
+        from agent_framework.tools.builtin.control_tools import set_plan_mode_runtime
+        set_plan_mode_runtime(
+            controller=self._plan_mode_controller,
+            agent_state_getter=lambda: getattr(self._coordinator, "_current_agent_state", None),
+            on_enter=lambda: self._coordinator._enter_plan_mode(),
+            on_exit=lambda plan: self._coordinator._exit_plan_mode(plan),
+        )
+
+        # Deferred Tool Manager — enables tool_search to find deferred tools
+        from agent_framework.tools.deferred import DeferredToolManager
+        self._deferred_tool_manager = DeferredToolManager(self._registry)
+        from agent_framework.tools.builtin_tool_search import set_deferred_manager
+        set_deferred_manager(self._deferred_tool_manager)
+
+        # Cron Registry + Scheduler — enables cron_create/list/delete tools
+        try:
+            from agent_framework.scheduling.scheduler import CronRegistry, CronScheduler
+            cron_db = getattr(self.config, "cron_db_path", "data/cron_jobs.db")
+            self._cron_registry = CronRegistry(db_path=cron_db)
+            self._cron_scheduler = CronScheduler(
+                registry=self._cron_registry,
+                run_callback=self._cron_run_callback,
+            )
+            from agent_framework.tools.builtin.cron_tools import set_cron_registry
+            set_cron_registry(self._cron_registry)
+        except Exception as cron_err:
+            logger.warning("cron.init_failed", error=str(cron_err))
+            self._cron_registry = None
+            self._cron_scheduler = None
+
+        # AutoDream Controller — background memory consolidation
+        try:
+            from agent_framework.memory.auto_dream import AutoDreamController
+            self._auto_dream = AutoDreamController(
+                consolidation_callback=self._auto_dream_callback,
+                state_file=str(
+                    __import__("pathlib").Path(
+                        getattr(self.config.memory, "db_path", "data/memories.db")
+                    ).parent / "auto_dream_state.json"
+                ),
+            )
+            # Wire into coordinator so session ends trigger dream checks
+            self._coordinator._auto_dream = self._auto_dream
+        except Exception as dream_err:
+            logger.warning("auto_dream.init_failed", error=str(dream_err))
+            self._auto_dream = None
+
+        # Worktree Manager — git worktree isolation for agent runs
+        from agent_framework.workspace.worktree import WorktreeManager
+        self._worktree_manager = WorktreeManager()
+        self._coordinator._worktree_manager = self._worktree_manager
+
+        # Progress Summarizer — wired into coordinator (started/stopped per run)
+        self._coordinator._model_adapter_for_summarizer = model_adapter
+
+        # Agent Definition → Coordinator (for capability policy filtering)
+        self._coordinator._agent_definitions = getattr(self, "_agent_definitions", {})
+
+        # Track recently_accessed_files in ToolExecutor → AgentState
+        tool_executor._track_recently_accessed = True
 
         # Discover and auto-initialize team from .agent-team/
         self._discovered_teams: list[dict] = []
@@ -931,6 +1015,31 @@ class AgentFramework:
         # Priority 3: default
         return default_factory() if callable(default_factory) else default_factory
 
+    # ------------------------------------------------------------------
+    # v4.0 Callback methods (used by wired controllers)
+    # ------------------------------------------------------------------
+
+    async def _cron_run_callback(self, job_id: str, task_prompt: str) -> None:
+        """Callback for cron scheduler — runs an agent task."""
+        logger.info("cron.executing", job_id=job_id, task=task_prompt[:100])
+        try:
+            await self.run(task_prompt)
+        except Exception as e:
+            logger.warning("cron.execution_failed", job_id=job_id, error=str(e))
+
+    async def _auto_dream_callback(self) -> None:
+        """Callback for auto_dream — consolidates memory from recent sessions."""
+        logger.info("auto_dream.running_consolidation")
+        # Auto-dream uses a lightweight agent run for memory review
+        try:
+            await self.run(
+                "Review recent sessions and consolidate recurring patterns, "
+                "insights, and useful facts into long-term memory records. "
+                "Focus on non-obvious learnings.",
+            )
+        except Exception as e:
+            logger.warning("auto_dream.callback_failed", error=str(e))
+
     def _create_model_adapter(self) -> BaseModelAdapter:
         """Create model adapter based on config.model.adapter_type.
 
@@ -1316,6 +1425,27 @@ class AgentFramework:
             self.setup()
         self._deps.skill_router.register_skill(skill)
         logger.info("skill.registered", skill_id=skill.skill_id, name=skill.name)
+
+    # ------------------------------------------------------------------
+    # Agent Definitions (v4.0)
+    # ------------------------------------------------------------------
+
+    def list_agent_definitions(self) -> list:
+        """List all loaded agent definitions."""
+        if not self._setup_done:
+            self.setup()
+        return list(getattr(self, "_agent_definitions", {}).values())
+
+    def get_agent_definition(self, definition_id: str):
+        """Get an agent definition by ID."""
+        if not self._setup_done:
+            self.setup()
+        defs = getattr(self, "_agent_definitions", {})
+        return defs.get(definition_id)
+
+    # ------------------------------------------------------------------
+    # Skills
+    # ------------------------------------------------------------------
 
     def list_skills(self) -> list[Skill]:
         """List all registered skills."""

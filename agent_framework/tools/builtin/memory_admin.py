@@ -39,6 +39,8 @@ def _get_manager() -> Any:
     require_confirm=False,
     tags=["system", "memory"],
     namespace=SYSTEM_NAMESPACE,
+    is_read_only=True,
+    search_hint="list show memories recall",
 )
 def list_memories(user_id: str | None = None) -> list[dict]:
     """List saved memories.
@@ -71,6 +73,8 @@ def list_memories(user_id: str | None = None) -> list[dict]:
     require_confirm=True,
     tags=["system", "memory", "dangerous"],
     namespace=SYSTEM_NAMESPACE,
+    is_destructive=True,
+    search_hint="delete forget remove memory",
 )
 def forget_memory(memory_id: str) -> str:
     """Delete one memory.
@@ -93,6 +97,8 @@ def forget_memory(memory_id: str) -> str:
     require_confirm=True,
     tags=["system", "memory", "dangerous"],
     namespace=SYSTEM_NAMESPACE,
+    is_destructive=True,
+    search_hint="clear all memories reset",
 )
 def clear_memories(user_id: str | None = None) -> str:
     """Clear all memories.

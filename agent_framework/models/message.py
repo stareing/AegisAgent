@@ -108,6 +108,10 @@ class Message(BaseModel):
     tool_call_id: str | None = None
     name: str | None = None
     metadata: dict | None = None
+    # v4.3: Provider cache hint — tells supported providers (Anthropic) to cache
+    # content up to this point. Not sent by providers that don't support it.
+    # Example: {"type": "ephemeral"} for Anthropic prompt caching.
+    cache_control: dict | None = None
 
     @property
     def has_multimodal(self) -> bool:

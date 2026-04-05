@@ -153,6 +153,15 @@ def _is_gitignored_path(file_path: Path) -> bool:
     require_confirm=False,
     tags=["system", "file", "read"],
     namespace=SYSTEM_NAMESPACE,
+    concurrency_class="concurrent_safe",
+    is_read_only=True,
+    search_hint="read file contents from disk",
+    activity_description="Reading file",
+    prompt=(
+        "Reads a file and returns its contents. The file_path parameter must be "
+        "an absolute path. By default reads up to 2000 lines."
+    ),
+    tool_use_summary_tpl="Read {path}",
 )
 def read_file(
     path: str,
@@ -232,6 +241,11 @@ def read_file(
     require_confirm=True,
     tags=["system", "file", "write"],
     namespace=SYSTEM_NAMESPACE,
+    is_destructive=True,
+    search_hint="write create file",
+    activity_description="Writing file",
+    prompt="Write content to a file. Creates parent directories if needed. Overwrites existing files.",
+    tool_use_summary_tpl="Wrote {path}",
 )
 def write_file(path: str, content: str, encoding: str = "utf-8") -> str:
     """Write content to a file.
@@ -329,6 +343,11 @@ def write_file(path: str, content: str, encoding: str = "utf-8") -> str:
     require_confirm=False,
     tags=["system", "file", "read"],
     namespace=SYSTEM_NAMESPACE,
+    is_read_only=True,
+    concurrency_class="concurrent_safe",
+    search_hint="read multiple files batch",
+    activity_description="Reading files",
+    tool_use_summary_tpl="Read {paths}",
 )
 def read_many_files(
     paths: list[str],
@@ -452,6 +471,9 @@ def read_many_files(
     require_confirm=False,
     tags=["system", "interaction"],
     namespace=SYSTEM_NAMESPACE,
+    is_read_only=True,
+    search_hint="ask user question input",
+    activity_description="Waiting for user input",
 )
 def ask_user(
     question: str,
@@ -489,6 +511,10 @@ def ask_user(
     require_confirm=False,
     tags=["system", "file", "read"],
     namespace=SYSTEM_NAMESPACE,
+    concurrency_class="concurrent_safe",
+    is_read_only=True,
+    search_hint="list directory contents ls",
+    activity_description="Listing directory",
 )
 def list_directory(path: str = ".", pattern: str = "*") -> list[str]:
     """List files and directories.

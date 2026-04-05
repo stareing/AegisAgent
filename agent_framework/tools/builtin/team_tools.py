@@ -39,6 +39,7 @@ _LEAD_ACTIONS = frozenset({
     tags=["system", "delegation", "team"],
     namespace=SYSTEM_NAMESPACE,
     source="subagent",
+    search_hint="team manage coordination",
 )
 async def team(
     action: str,
@@ -232,6 +233,7 @@ async def execute_team(executor: ToolExecutor, args: dict) -> dict[str, Any]:
     tags=["system", "delegation", "team"],
     namespace=SYSTEM_NAMESPACE,
     source="subagent",
+    search_hint="send message teammate mail",
 )
 async def mail(
     action: str,

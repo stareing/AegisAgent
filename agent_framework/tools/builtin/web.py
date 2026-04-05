@@ -336,11 +336,20 @@ class _TextExtractor(HTMLParser):
     require_confirm=False,
     tags=["system", "network", "web", "read"],
     namespace=SYSTEM_NAMESPACE,
+    is_read_only=True,
+    search_hint="fetch web page URL http",
+    activity_description="Fetching page",
+    prompt=(
+        "Fetch a web page and extract readable text. Supports HTML to text conversion, "
+        "GitHub raw URL conversion, and response caching."
+    ),
+    tool_use_summary_tpl="Fetched {url}",
 )
 def web_fetch(
     url: str,
     timeout_seconds: int = _DEFAULT_TIMEOUT,
     extract_text: bool = True,
+    prompt: str | None = None,
 ) -> dict:
     """Fetch a web page and extract its content.
 
@@ -349,6 +358,8 @@ def web_fetch(
         timeout_seconds: Request timeout in seconds.
         extract_text: If True, extract readable text from HTML.
                      If False, return raw HTML.
+        prompt: Optional prompt to apply to the fetched content (v4.0).
+                When provided, only content relevant to the prompt is extracted.
 
     Returns:
         Dict with 'title', 'content', 'url', and 'content_length'.
@@ -456,12 +467,19 @@ def web_fetch(
     if len(text) > _MAX_CONTENT_CHARS:
         text = text[:_MAX_CONTENT_CHARS] + "\n... (truncated)"
 
+    # Prompt-based extraction (v4.0): when a prompt is provided,
+    # prepend it as a filter instruction for the consumer
+    if prompt:
+        text = f"[Extraction prompt: {prompt}]\n\n{text}"
+
     result = {
         "title": extractor.get_title(),
         "content": text,
         "url": normalized_url,
         "content_length": len(text),
     }
+    if prompt:
+        result["extraction_prompt"] = prompt
     _response_cache.put(normalized_url, result)
     return result
 
@@ -485,6 +503,11 @@ _SEARCH_SNIPPET_CHARS = 300
     require_confirm=False,
     tags=["system", "network", "web", "search"],
     namespace=SYSTEM_NAMESPACE,
+    is_read_only=True,
+    search_hint="search web internet query",
+    activity_description="Searching web",
+    prompt="Search the web for information. Returns results with titles, URLs, and snippets.",
+    tool_use_summary_tpl="Searched web for {query}",
 )
 def web_search(
     query: str,

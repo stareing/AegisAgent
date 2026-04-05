@@ -120,21 +120,39 @@ class AnthropicAdapter(BaseModelAdapter):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _extract_system(messages: list[Message]) -> tuple[str | None, list[Message]]:
+    def _extract_system(messages: list[Message]) -> tuple[Any, list[Message]]:
         """Separate system messages from the conversation.
 
         Anthropic requires the system prompt as a separate parameter.
+        When any system message carries cache_control, returns a list of
+        content blocks (Anthropic's structured system format) instead of
+        a plain string, enabling prompt caching.
+
+        Returns:
+            (system, non_system) where system is str | list[dict] | None.
         """
         system_parts: list[str] = []
+        has_cache_control = False
         non_system: list[Message] = []
         for m in messages:
             if m.role == "system":
                 if m.content:
                     system_parts.append(m.content)
+                if m.cache_control:
+                    has_cache_control = True
             else:
                 non_system.append(m)
-        system = "\n\n".join(system_parts) if system_parts else None
-        return system, non_system
+
+        if not system_parts:
+            return None, non_system
+
+        # v4.3: When cache_control is present, use structured system format
+        # so Anthropic caches the system prompt prefix
+        if has_cache_control:
+            system_text = "\n\n".join(system_parts)
+            return [{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}], non_system
+
+        return "\n\n".join(system_parts), non_system
 
     @staticmethod
     def _convert_messages(messages: list[Message]) -> list[dict[str, Any]]:
@@ -144,8 +162,12 @@ class AnthropicAdapter(BaseModelAdapter):
         - assistant messages with tool_calls → content blocks with tool_use type
         - tool messages → user messages with tool_result content blocks
         - Consecutive same-role messages are merged (Anthropic requirement)
+        - v4.3: cache_control propagated to last content block of marked messages
         """
         result: list[dict[str, Any]] = []
+        # v4.3: Track which result indices need cache_control applied
+        # (needed because user messages get merged)
+        cache_control_indices: dict[int, dict] = {}
 
         for m in messages:
             if m.role == "assistant":
@@ -162,6 +184,9 @@ class AnthropicAdapter(BaseModelAdapter):
                         })
                 if not content_blocks:
                     content_blocks.append({"type": "text", "text": ""})
+                # v4.3: Inject cache_control on last content block
+                if m.cache_control and content_blocks:
+                    content_blocks[-1]["cache_control"] = m.cache_control
                 result.append({"role": "assistant", "content": content_blocks})
 
             elif m.role == "tool":
@@ -176,6 +201,8 @@ class AnthropicAdapter(BaseModelAdapter):
                     result[-1]["content"].append(tool_result_block)
                 else:
                     result.append({"role": "user", "content": [tool_result_block]})
+                if m.cache_control:
+                    cache_control_indices[len(result) - 1] = m.cache_control
 
             elif m.role == "user":
                 if m.content_parts:
@@ -193,6 +220,16 @@ class AnthropicAdapter(BaseModelAdapter):
                         result[-1]["content"].append({"type": "text", "text": m.content or ""})
                     else:
                         result.append({"role": "user", "content": m.content or ""})
+                if m.cache_control:
+                    cache_control_indices[len(result) - 1] = m.cache_control
+
+        # v4.3: Apply cache_control to last content block of marked messages
+        for idx, cc in cache_control_indices.items():
+            msg_content = result[idx].get("content")
+            if isinstance(msg_content, list) and msg_content:
+                msg_content[-1]["cache_control"] = cc
+            elif isinstance(msg_content, str):
+                result[idx]["content"] = [{"type": "text", "text": msg_content, "cache_control": cc}]
 
         return result
 
