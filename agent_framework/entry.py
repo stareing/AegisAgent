@@ -508,38 +508,117 @@ class AgentFramework:
         from agent_framework.tools.builtin_tool_search import set_deferred_manager
         set_deferred_manager(self._deferred_tool_manager)
 
-        # Cron Registry + Scheduler — enables cron_create/list/delete tools
+        # Sandbox Bridge — risk-based sandbox selection for bash_exec
+        self._sandbox_bridge = None
+        if self.config.tools.sandbox_auto_select:
+            try:
+                from agent_framework.tools.sandbox.protocol import SandboxConfig
+                from agent_framework.tools.sandbox.risk_scorer import RiskLevel
+                from agent_framework.tools.sandbox.selector import SandboxSelector
+                from agent_framework.tools.shell.sandbox_bridge import SandboxBridge
+
+                sandbox_config = SandboxConfig(
+                    image=self.config.tools.sandbox_image,
+                    memory_limit=self.config.tools.sandbox_memory_limit,
+                    pids_limit=self.config.tools.sandbox_pids_limit,
+                    network=self.config.tools.sandbox_network,
+                    workspace_mount_mode=self.config.tools.sandbox_workspace_mount,
+                )
+                selector = SandboxSelector(
+                    base_config=sandbox_config,
+                    workspace_dir=str(__import__("pathlib").Path.cwd()),
+                    confirmation_handler=confirmation,
+                )
+                min_risk = getattr(
+                    RiskLevel, self.config.tools.sandbox_min_risk_for_container, RiskLevel.MEDIUM,
+                )
+                self._sandbox_bridge = SandboxBridge(
+                    selector, min_risk_for_sandbox=min_risk,
+                )
+                from agent_framework.tools.builtin.shell import set_sandbox_bridge
+                set_sandbox_bridge(self._sandbox_bridge)
+                logger.info(
+                    "sandbox_bridge.initialized",
+                    min_risk=min_risk.name,
+                    container_available=selector.is_available(),
+                )
+            except Exception as sb_err:
+                logger.warning("sandbox_bridge.init_failed", error=str(sb_err))
+
+        # Cron Daemon — manages cron job lifecycle and triggers agent runs
+        self._cron_daemon = None
         try:
-            from agent_framework.scheduling.scheduler import CronRegistry, CronScheduler
-            cron_db = getattr(self.config, "cron_db_path", "data/cron_jobs.db")
-            self._cron_registry = CronRegistry(db_path=cron_db)
-            self._cron_scheduler = CronScheduler(
+            from agent_framework.scheduling.daemon import CronDaemon
+            from agent_framework.scheduling.scheduler import CronRegistry
+            sched_cfg = self.config.scheduling
+            self._cron_registry = CronRegistry(db_path=sched_cfg.db_path)
+            self._cron_daemon = CronDaemon(
                 registry=self._cron_registry,
                 run_callback=self._cron_run_callback,
+                check_interval_seconds=sched_cfg.check_interval_seconds,
+                max_jobs=sched_cfg.max_jobs,
+                max_age_days=sched_cfg.max_age_days,
             )
             from agent_framework.tools.builtin.cron_tools import set_cron_registry
             set_cron_registry(self._cron_registry)
+            if sched_cfg.auto_start:
+                asyncio.get_event_loop().create_task(self._cron_daemon.start())
         except Exception as cron_err:
             logger.warning("cron.init_failed", error=str(cron_err))
             self._cron_registry = None
-            self._cron_scheduler = None
 
-        # AutoDream Controller — background memory consolidation
-        try:
-            from agent_framework.memory.auto_dream import AutoDreamController
-            self._auto_dream = AutoDreamController(
-                consolidation_callback=self._auto_dream_callback,
-                state_file=str(
-                    __import__("pathlib").Path(
-                        getattr(self.config.memory, "db_path", "data/memories.db")
-                    ).parent / "auto_dream_state.json"
-                ),
-            )
-            # Wire into coordinator so session ends trigger dream checks
-            self._coordinator._auto_dream = self._auto_dream
-        except Exception as dream_err:
-            logger.warning("auto_dream.init_failed", error=str(dream_err))
-            self._auto_dream = None
+        # AutoDream Controller — background memory consolidation with LLM
+        self._auto_dream = None
+        self._memory_consolidator = None
+        mem_cfg = self.config.memory
+        if mem_cfg.auto_dream_enabled:
+            try:
+                from agent_framework.memory.auto_dream import AutoDreamController
+                from agent_framework.memory.consolidation import MemoryConsolidator
+
+                self._memory_consolidator = MemoryConsolidator(
+                    store=memory_store,
+                    adapter=model_adapter,
+                    agent_id=self._agent.agent_id if self._agent else "system",
+                    user_id="default",
+                )
+                self._auto_dream = AutoDreamController(
+                    min_hours_between=mem_cfg.dream_min_hours,
+                    min_sessions=mem_cfg.dream_min_sessions,
+                    consolidation_callback=self._memory_consolidator.consolidate,
+                    state_file=str(
+                        __import__("pathlib").Path(mem_cfg.db_path).parent
+                        / "auto_dream_state.json"
+                    ),
+                )
+                self._coordinator._auto_dream = self._auto_dream
+                # Start background loop
+                asyncio.get_event_loop().create_task(
+                    self._auto_dream.start_background(
+                        check_interval_seconds=mem_cfg.dream_check_interval_seconds,
+                    )
+                )
+                logger.info(
+                    "auto_dream.initialized",
+                    min_hours=mem_cfg.dream_min_hours,
+                    min_sessions=mem_cfg.dream_min_sessions,
+                )
+            except Exception as dream_err:
+                logger.warning("auto_dream.init_failed", error=str(dream_err))
+        else:
+            # Legacy: still create controller but without callback
+            try:
+                from agent_framework.memory.auto_dream import AutoDreamController
+                self._auto_dream = AutoDreamController(
+                    consolidation_callback=self._auto_dream_callback,
+                    state_file=str(
+                        __import__("pathlib").Path(mem_cfg.db_path).parent
+                        / "auto_dream_state.json"
+                    ),
+                )
+                self._coordinator._auto_dream = self._auto_dream
+            except Exception:
+                pass
 
         # Worktree Manager — git worktree isolation for agent runs
         from agent_framework.workspace.worktree import WorktreeManager

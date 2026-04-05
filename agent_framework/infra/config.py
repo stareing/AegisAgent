@@ -92,6 +92,21 @@ class MemoryConfig(BaseModel):
     max_memory_items_per_user: int = 200
     allow_user_memory_namespace: bool = True
     allow_memory_management_api: bool = True
+    # AutoDream memory consolidation
+    auto_dream_enabled: bool = False
+    dream_min_hours: float = 24.0
+    dream_min_sessions: int = 5
+    dream_check_interval_seconds: float = 300.0
+
+
+class SchedulingConfig(BaseModel):
+    """Cron scheduling daemon configuration."""
+
+    auto_start: bool = False
+    max_jobs: int = 50
+    max_age_days: int = 30
+    check_interval_seconds: float = 60.0
+    db_path: str = "data/cron_jobs.db"
 
 
 class ToolConfig(BaseModel):
@@ -382,6 +397,7 @@ class FrameworkConfig(BaseSettings):
     skills: SkillsConfig = Field(default_factory=SkillsConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     a2a: A2AConfig = Field(default_factory=A2AConfig)
+    scheduling: SchedulingConfig = Field(default_factory=SchedulingConfig)
     team: TeamConfig = Field(default_factory=lambda: TeamConfig())
     policy: PolicyConfig = Field(default_factory=PolicyConfig)
     plugins: PluginConfig = Field(default_factory=PluginConfig)

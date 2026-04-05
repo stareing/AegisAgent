@@ -9,6 +9,8 @@ This file contains only the thin tool interface definitions.
 
 from __future__ import annotations
 
+from typing import Any
+
 from agent_framework.tools.decorator import tool
 from agent_framework.tools.schemas.builtin_args import SYSTEM_NAMESPACE
 from agent_framework.tools.shell.shell_manager import (
@@ -25,10 +27,20 @@ _check_banned = check_banned
 _ENV_WHITELIST = ENV_WHITELIST
 _ShellSessionManager = ShellSessionManager
 
+# Sandbox bridge — set by entry.py when sandbox_auto_select=True
+_sandbox_bridge: Any = None
+
+
+def set_sandbox_bridge(bridge: Any) -> None:
+    """Wire sandbox bridge at framework setup time."""
+    global _sandbox_bridge
+    _sandbox_bridge = bridge
+
+
 __all__ = [
     "bash_exec", "bash_output", "bash_stop", "task_stop", "kill_shell",
     "ShellSessionManager", "build_safe_env", "check_banned",
-    "ENV_WHITELIST", "DEFAULT_TIMEOUT",
+    "ENV_WHITELIST", "DEFAULT_TIMEOUT", "set_sandbox_bridge",
 ]
 
 
@@ -80,6 +92,12 @@ async def bash_exec(
     if run_in_background:
         task_id = await session.execute_background(command, timeout_seconds)
         return {"task_id": task_id, "status": "running"}
+
+    # Route through sandbox bridge when enabled (risk-based sandbox selection)
+    if _sandbox_bridge is not None:
+        return await _sandbox_bridge.evaluate_and_execute(
+            command, timeout_seconds=timeout_seconds, session=session,
+        )
 
     return await session.execute(command, timeout_seconds)
 
