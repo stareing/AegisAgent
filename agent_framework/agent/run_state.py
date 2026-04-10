@@ -20,7 +20,8 @@ from typing import TYPE_CHECKING
 
 from agent_framework.agent.message_projector import MessageProjector
 from agent_framework.models.agent import (AgentState, AgentStatus,
-                                          IterationResult, StopSignal)
+                                          IterationResult, PlanModeState,
+                                          StopSignal)
 
 if TYPE_CHECKING:
     from agent_framework.models.agent import Skill
@@ -168,6 +169,37 @@ class RunStateController:
         """
         agent_state.iteration_count += 1
         agent_state.iteration_history.append(iteration_result)
+
+    @staticmethod
+    def set_progress_summary(agent_state: AgentState, summary: str) -> None:
+        """Update the background progress summary.
+
+        Sole write-port for agent_state.progress_summary. Previously
+        ProgressSummarizer wrote this field directly — that violated the
+        sole-write-port contract. Now ProgressSummarizer routes its updates
+        through this method.
+        """
+        agent_state.progress_summary = summary
+
+    @staticmethod
+    def enter_plan_mode(
+        agent_state: AgentState, plan_state: PlanModeState
+    ) -> None:
+        """Install an active PlanModeState on the run.
+
+        Sole write-port for plan_mode_state. RunCoordinator must call this
+        instead of mutating agent_state.plan_mode_state directly (v2.5.3 §必修1:
+        Coordinator orchestrates, StateController executes).
+        """
+        agent_state.plan_mode_state = plan_state
+
+    @staticmethod
+    def exit_plan_mode(agent_state: AgentState) -> None:
+        """Clear the active plan mode by installing an inactive PlanModeState.
+
+        Sole write-port counterpart to enter_plan_mode.
+        """
+        agent_state.plan_mode_state = PlanModeState(active=False)
 
     @staticmethod
     def mark_finished(agent_state: AgentState) -> None:

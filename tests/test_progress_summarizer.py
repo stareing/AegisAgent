@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from agent_framework.agent.progress_summarizer import ProgressSummarizer
+from agent_framework.agent.run_state import RunStateController
 from agent_framework.models.agent import AgentState, IterationResult
 from agent_framework.models.message import ModelResponse
 
@@ -41,7 +42,7 @@ class TestProgressSummarizerStartStop:
     @pytest.mark.asyncio
     async def test_start_and_stop_cleanly(self):
         adapter = _make_mock_adapter()
-        summarizer = ProgressSummarizer(adapter, interval_seconds=0.05)
+        summarizer = ProgressSummarizer(adapter, RunStateController(), interval_seconds=0.05)
         state = _make_agent_state(iteration_count=2)
 
         await summarizer.start(state)
@@ -56,7 +57,7 @@ class TestProgressSummarizerStartStop:
     @pytest.mark.asyncio
     async def test_stop_without_start_returns_none(self):
         adapter = _make_mock_adapter()
-        summarizer = ProgressSummarizer(adapter, interval_seconds=1.0)
+        summarizer = ProgressSummarizer(adapter, RunStateController(), interval_seconds=1.0)
 
         result = await summarizer.stop()
         assert result is None
@@ -64,7 +65,7 @@ class TestProgressSummarizerStartStop:
     @pytest.mark.asyncio
     async def test_stop_returns_last_summary(self):
         adapter = _make_mock_adapter("Reading configuration")
-        summarizer = ProgressSummarizer(adapter, interval_seconds=0.05)
+        summarizer = ProgressSummarizer(adapter, RunStateController(), interval_seconds=0.05)
         state = _make_agent_state(iteration_count=3)
 
         await summarizer.start(state)
@@ -80,7 +81,7 @@ class TestProgressSummarizerDedup:
     @pytest.mark.asyncio
     async def test_dedup_skips_identical_summaries(self):
         adapter = _make_mock_adapter("Analyzing code files")
-        summarizer = ProgressSummarizer(adapter, interval_seconds=0.05)
+        summarizer = ProgressSummarizer(adapter, RunStateController(), interval_seconds=0.05)
         state = _make_agent_state(iteration_count=2)
 
         await summarizer.start(state)
@@ -103,7 +104,7 @@ class TestProgressSummarizerDedup:
     @pytest.mark.asyncio
     async def test_no_call_when_no_iterations(self):
         adapter = _make_mock_adapter()
-        summarizer = ProgressSummarizer(adapter, interval_seconds=0.05)
+        summarizer = ProgressSummarizer(adapter, RunStateController(), interval_seconds=0.05)
         state = _make_agent_state(iteration_count=0)
 
         await summarizer.start(state)
@@ -115,7 +116,7 @@ class TestProgressSummarizerDedup:
     @pytest.mark.asyncio
     async def test_skips_when_iteration_count_unchanged(self):
         adapter = _make_mock_adapter("Working on task")
-        summarizer = ProgressSummarizer(adapter, interval_seconds=0.05)
+        summarizer = ProgressSummarizer(adapter, RunStateController(), interval_seconds=0.05)
         state = _make_agent_state(iteration_count=1)
 
         await summarizer.start(state)

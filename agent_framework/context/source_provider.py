@@ -365,23 +365,34 @@ class ContextSourceProvider:
         SessionState. When SessionSnapshot is passed, the context layer
         sees a frozen view that cannot change mid-build.
         """
-        # Transcript repair: fix malformed tool calls before building context
-        from agent_framework.models.transcript_repair import repair_session_messages
+        # Transcript repair: fix malformed tool calls before building context.
+        # Repair is PURE — produces a LOCAL list, never writes back to
+        # session_state. ContextSourceProvider lives in the context layer and
+        # MUST NOT mutate SessionState (run_state.py sole-write-port contract).
+        # Previously this method directly replaced session_state.messages,
+        # which crossed layer boundaries, bypassed CommitSequencer, and was
+        # silently swallowed on SessionSnapshot.
+        from agent_framework.models.transcript_repair import \
+            repair_session_messages
+        messages: list[Message] = list(session_state.get_messages())
         try:
-            raw_msgs = [m.model_dump() for m in session_state.messages]
-            repaired = repair_session_messages(raw_msgs)
-            # Only apply if repair changed something (avoid unnecessary mutation)
-            if len(repaired) != len(raw_msgs):
-                session_state.messages = [Message(**m) for m in repaired]
+            raw_msgs = [m.model_dump() for m in messages]
+            repaired_dicts = repair_session_messages(raw_msgs)
+            # Use deep compare so content-only repairs (e.g. sanitized tool
+            # names) are also picked up — the previous len-only check missed
+            # them.
+            if repaired_dicts != raw_msgs:
+                messages = [Message(**m) for m in repaired_dicts]
         except Exception:
-            pass  # Repair is best-effort; never block context build
+            # Repair is best-effort; fall back to the unrepaired messages.
+            pass
 
         # If pre-computed index is available, use it directly
         if transaction_index is not None:
             return self._consume_transaction_index(transaction_index)
 
         # Fallback: build groups from linear messages (legacy path)
-        return self._build_groups_from_messages(session_state)
+        return self._build_groups_from_messages(messages)
 
     def _consume_transaction_index(
         self, index: TransactionGroupIndex
@@ -407,7 +418,7 @@ class ContextSourceProvider:
         return list(index.groups_by_id.values())
 
     def _build_groups_from_messages(
-        self, session_state: SessionState | SessionSnapshot
+        self, messages: list[Message]
     ) -> list[ToolTransactionGroup]:
         """Build transaction groups from linear session messages (legacy fallback).
 
@@ -415,8 +426,10 @@ class ContextSourceProvider:
         Groups built here are marked protected=True (not safely trimmable)
         because their group_ids are ephemeral, not persisted metadata.
         Callers should prefer providing a TransactionGroupIndex.
+
+        Accepts a list of messages directly (not SessionState) so this method
+        can consume pre-repaired messages without touching SessionState.
         """
-        messages = session_state.get_messages()
         groups: list[ToolTransactionGroup] = []
 
         i = 0

@@ -14,6 +14,7 @@ from agent_framework.models.message import Message
 from agent_framework.models.stream import StreamEvent, StreamEventType
 
 if TYPE_CHECKING:
+    from agent_framework.agent.run_state import RunStateController
     from agent_framework.models.agent import AgentState
     from agent_framework.protocols.core import ModelAdapterProtocol
 
@@ -42,9 +43,11 @@ class ProgressSummarizer:
     def __init__(
         self,
         model_adapter: ModelAdapterProtocol,
+        state_controller: RunStateController,
         interval_seconds: float = 30.0,
     ) -> None:
         self._model_adapter = model_adapter
+        self._state_controller = state_controller
         self._interval_seconds = interval_seconds
         self._task: asyncio.Task[None] | None = None
         self._last_summary: str | None = None
@@ -145,7 +148,12 @@ class ProgressSummarizer:
 
         self._last_summary = new_summary
         self._last_iteration_count = current_count
-        self._agent_state.progress_summary = new_summary
+        # Route the write through RunStateController — the sole write-port
+        # for AgentState mutations. Never mutate agent_state directly from
+        # here (v2.5.3 §必修1).
+        self._state_controller.set_progress_summary(
+            self._agent_state, new_summary
+        )
 
         logger.info("progress_summarizer.updated", summary=new_summary)
 

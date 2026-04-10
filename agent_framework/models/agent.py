@@ -84,6 +84,11 @@ class StopReason(str, Enum):
     CUSTOM = "CUSTOM"
     ERROR = "ERROR"
     OUTPUT_TRUNCATED = "OUTPUT_TRUNCATED"
+    # Hard per-run total-token cap exceeded (v5.1). Distinct from
+    # OUTPUT_TRUNCATED (single-call output cap) and MAX_ITERATIONS
+    # (iteration cap). Fires when projected cumulative usage crosses the
+    # run-level budget set by EffectiveRunConfig.max_total_tokens.
+    TOKEN_BUDGET_EXCEEDED = "TOKEN_BUDGET_EXCEEDED"
 
 
 class TerminationKind(str, Enum):
@@ -105,6 +110,7 @@ _STOP_REASON_TO_TERMINATION_KIND: dict[StopReason, TerminationKind] = {
     StopReason.CUSTOM: TerminationKind.NORMAL,
     StopReason.ERROR: TerminationKind.ABORT,
     StopReason.USER_CANCEL: TerminationKind.ABORT,
+    StopReason.TOKEN_BUDGET_EXCEEDED: TerminationKind.ABORT,
     StopReason.MAX_ITERATIONS: TerminationKind.DEGRADE,
     StopReason.OUTPUT_TRUNCATED: TerminationKind.DEGRADE,
 }
@@ -315,6 +321,8 @@ class AgentConfig(BaseModel):
     Quota semantics:
     - max_iterations: HARD — exceeded → forced stop (MAX_ITERATIONS)
       Special case: <= 0 means unlimited for the current run owner.
+    - max_total_tokens: HARD — projected cumulative usage over this quota
+      forces an ABORT stop (TOKEN_BUDGET_EXCEEDED). <= 0 means unlimited.
     - max_output_tokens: SOFT — LLM may truncate, reported as OUTPUT_TRUNCATED
     - allow_spawn_children: HARD — False → spawn denied (PERMISSION_DENIED)
     """
@@ -330,6 +338,10 @@ class AgentConfig(BaseModel):
     temperature: float = 1.0
     max_output_tokens: int = 4096
     max_iterations: int = 20
+    # Per-run cumulative token cap. 0 = unlimited (default for backward
+    # compatibility). When > 0, AgentLoop aborts the run with
+    # StopReason.TOKEN_BUDGET_EXCEEDED once the projected total crosses it.
+    max_total_tokens: int = 0
     allow_spawn_children: bool = False
     max_concurrent_tool_calls: int = 5
     allow_parallel_tool_calls: bool = True
@@ -453,6 +465,9 @@ class EffectiveRunConfig(BaseModel):
     temperature: float = 1.0
     max_output_tokens: int = 4096
     max_iterations: int = 20
+    # Per-run cumulative token hard cap. 0 = unlimited. Copied from
+    # AgentConfig.max_total_tokens by RunPolicyResolver.
+    max_total_tokens: int = 0
     reserve_for_output: int = 1024
     max_concurrent_tool_calls: int = 5
     subagent_token_budget: int = 4096

@@ -100,8 +100,9 @@ tests/               # 1358+ tests across 35+ files
 - **SubAgent 记忆**: Isolated/InheritRead/SharedWrite, spawn 时冻结快照
 
 ### 终止与错误
-- **终止6层**: LLM_STOP → MAX_ITERATIONS → OUTPUT_TRUNCATED → ERROR(3次) → USER_CANCEL → timeout
+- **终止7层**: LLM_STOP → MAX_ITERATIONS → OUTPUT_TRUNCATED → TOKEN_BUDGET_EXCEEDED → ERROR(3次) → USER_CANCEL → timeout
 - **TerminationKind**: NORMAL / ABORT / DEGRADE
+- **Hard token cap**: `AgentConfig.max_total_tokens` (0=unlimited). 投射 total 超标 → TOKEN_BUDGET_EXCEEDED (ABORT)
 
 ### 不可变与边界
 - **不可变模型**: EffectiveRunConfig frozen, ToolMeta frozen, FrozenPromptPrefix frozen

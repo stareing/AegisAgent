@@ -149,7 +149,9 @@ class AgentLoop:
         # after this method returns. AgentLoop must NOT mutate token counters.
 
         # 2. Check stop conditions
-        stop_signal = self._check_stop_conditions(agent, model_response, agent_state)
+        stop_signal = self._check_stop_conditions(
+            agent, model_response, agent_state, effective_config
+        )
         if stop_signal:
             logger.info(
                 "iteration.stopped",
@@ -475,7 +477,9 @@ class AgentLoop:
         self._enforce_tool_call_parallel_policy(model_response, effective_config, idx)
 
         # 2. Check stop conditions
-        stop_signal = self._check_stop_conditions(agent, model_response, agent_state)
+        stop_signal = self._check_stop_conditions(
+            agent, model_response, agent_state, effective_config
+        )
         if stop_signal:
             yield IterationResult(
                 iteration_index=idx,
@@ -647,7 +651,38 @@ class AgentLoop:
         agent: BaseAgent,
         model_response: ModelResponse,
         agent_state: AgentState,
+        effective_config: EffectiveRunConfig | None = None,
     ) -> StopSignal | None:
+        # Hard per-run token cap (v5.1). Check BEFORE normal-stop so that a
+        # run which has already exhausted its budget still terminates with
+        # TOKEN_BUDGET_EXCEEDED rather than masquerading as LLM_STOP on the
+        # final iteration. total_tokens_used covers prior iterations only;
+        # this iteration's tokens are added in to form the projected total.
+        max_total = (
+            effective_config.max_total_tokens if effective_config is not None else 0
+        )
+        if max_total > 0:
+            projected = (
+                agent_state.total_tokens_used
+                + model_response.usage.total_tokens
+            )
+            if projected >= max_total:
+                logger.warning(
+                    "stop_check.token_budget_exceeded",
+                    iteration_index=agent_state.iteration_count,
+                    projected_total=projected,
+                    max_total_tokens=max_total,
+                    prior_total=agent_state.total_tokens_used,
+                    this_iteration=model_response.usage.total_tokens,
+                )
+                return StopSignal(
+                    reason=StopReason.TOKEN_BUDGET_EXCEEDED,
+                    message=(
+                        f"Projected total tokens {projected} reached "
+                        f"max_total_tokens ({max_total})"
+                    ),
+                )
+
         # Normal stop: model says "stop" with no tool calls
         if model_response.finish_reason == "stop" and not model_response.tool_calls:
             logger.debug(

@@ -22,8 +22,7 @@ from agent_framework.infra.telemetry import get_tracing_manager
 from agent_framework.models.agent import (AgentRunResult, AgentState,
                                           AgentStatus, ApprovalMode,
                                           EffectiveRunConfig,
-                                          IterationResult, PlanModeState,
-                                          Skill, StopDecision,
+                                          IterationResult, Skill, StopDecision,
                                           StopReason, StopSignal)
 from agent_framework.models.context import LLMRequest
 from agent_framework.models.hook import HookPoint
@@ -287,6 +286,7 @@ class RunCoordinator:
                     from agent_framework.agent.progress_summarizer import ProgressSummarizer
                     self._progress_summarizer = ProgressSummarizer(
                         model_adapter=self._model_adapter_for_summarizer,
+                        state_controller=self._state_ctrl,
                     )
                     await self._progress_summarizer.start(agent_state)
                 except Exception as ps_err:
@@ -915,7 +915,6 @@ class RunCoordinator:
 
     def _enter_plan_mode(self):
         """Called by enter_plan_mode tool via callback."""
-        from agent_framework.models.agent import PlanModeState
         agent_state = self._current_agent_state
         if agent_state is None or self._plan_mode_controller is None:
             return None
@@ -927,7 +926,9 @@ class RunCoordinator:
             current_mode,
             task=agent_state.task,
         )
-        agent_state.plan_mode_state = plan_state
+        # Route write through RunStateController — Coordinator must not
+        # mutate AgentState directly (v2.5.3 §必修1).
+        self._state_ctrl.enter_plan_mode(agent_state, plan_state)
         # Invalidate tool cache so PLAN mode filtering takes effect
         self._cached_tools_schema = None
         return plan_state
@@ -944,7 +945,8 @@ class RunCoordinator:
         if plan and plan_state.plan_file_path:
             self._plan_mode_controller.write_plan(plan_state, plan)
         restored_mode = self._plan_mode_controller.exit_plan(plan_state)
-        agent_state.plan_mode_state = PlanModeState(active=False)
+        # Route write through RunStateController — sole write-port.
+        self._state_ctrl.exit_plan_mode(agent_state)
         # Invalidate tool cache to restore full tool access
         self._cached_tools_schema = None
         return restored_mode

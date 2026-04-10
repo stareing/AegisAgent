@@ -632,6 +632,96 @@ class TestAgentLoop:
         assert result.stop_signal.reason == StopReason.MAX_ITERATIONS
 
     @pytest.mark.asyncio
+    async def test_iteration_token_budget_exceeded_aborts(self):
+        """max_total_tokens is a HARD cap — projected total over it aborts."""
+        from agent_framework.models.agent import TerminationKind
+        loop = AgentLoop()
+        agent = self._make_agent()
+        state = self._make_state()
+        state.total_tokens_used = 4500  # prior iterations
+        config = EffectiveRunConfig(
+            model_name="test-model", max_total_tokens=5000
+        )
+        request = self._make_llm_request()
+
+        mock_adapter = AsyncMock()
+        mock_adapter.complete.return_value = ModelResponse(
+            content="answer",
+            finish_reason="stop",
+            usage=TokenUsage(total_tokens=600),  # 4500 + 600 = 5100 >= 5000
+        )
+        mock_executor = AsyncMock()
+        mock_executor.is_tool_allowed = MagicMock(return_value=True)
+
+        result = await loop.execute_iteration(
+            agent,
+            AgentLoopDeps(model_adapter=mock_adapter, tool_executor=mock_executor),
+            state, request, config,
+        )
+        assert result.stop_signal is not None
+        assert result.stop_signal.reason == StopReason.TOKEN_BUDGET_EXCEEDED
+        # Token budget exhaustion is an ABORT, not a normal stop or degrade.
+        assert result.stop_signal.termination_kind == TerminationKind.ABORT
+
+    @pytest.mark.asyncio
+    async def test_iteration_token_budget_under_cap_does_not_stop(self):
+        """Projected total below max_total_tokens → no stop from budget check."""
+        loop = AgentLoop()
+        agent = self._make_agent()
+        state = self._make_state()
+        state.total_tokens_used = 1000
+        config = EffectiveRunConfig(
+            model_name="test-model", max_total_tokens=5000
+        )
+        request = self._make_llm_request()
+
+        mock_adapter = AsyncMock()
+        mock_adapter.complete.return_value = ModelResponse(
+            content="answer", finish_reason="stop",
+            usage=TokenUsage(total_tokens=500),  # 1000 + 500 = 1500 < 5000
+        )
+        mock_executor = AsyncMock()
+        mock_executor.is_tool_allowed = MagicMock(return_value=True)
+
+        result = await loop.execute_iteration(
+            agent,
+            AgentLoopDeps(model_adapter=mock_adapter, tool_executor=mock_executor),
+            state, request, config,
+        )
+        # Not a budget stop — finish_reason=stop → normal LLM_STOP
+        assert result.stop_signal is not None
+        assert result.stop_signal.reason == StopReason.LLM_STOP
+
+    @pytest.mark.asyncio
+    async def test_iteration_token_budget_zero_means_unlimited(self):
+        """max_total_tokens=0 preserves the pre-v5.1 unlimited default."""
+        loop = AgentLoop()
+        agent = self._make_agent()
+        state = self._make_state()
+        state.total_tokens_used = 10_000_000  # huge usage
+        config = EffectiveRunConfig(
+            model_name="test-model", max_total_tokens=0
+        )
+        request = self._make_llm_request()
+
+        mock_adapter = AsyncMock()
+        mock_adapter.complete.return_value = ModelResponse(
+            content="answer", finish_reason="stop",
+            usage=TokenUsage(total_tokens=999_999),
+        )
+        mock_executor = AsyncMock()
+        mock_executor.is_tool_allowed = MagicMock(return_value=True)
+
+        result = await loop.execute_iteration(
+            agent,
+            AgentLoopDeps(model_adapter=mock_adapter, tool_executor=mock_executor),
+            state, request, config,
+        )
+        # Budget check must not fire — finish_reason=stop → normal LLM_STOP
+        assert result.stop_signal is not None
+        assert result.stop_signal.reason == StopReason.LLM_STOP
+
+    @pytest.mark.asyncio
     async def test_tool_blocked_by_agent_hook(self):
         """Agent's on_tool_call_requested returns ToolCallDecision(allowed=False)."""
         loop = AgentLoop()
